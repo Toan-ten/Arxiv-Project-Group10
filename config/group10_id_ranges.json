@@ -1,0 +1,32 @@
+{
+  "members": [
+    {
+      "mssv": "24120010",
+      "start_month": "2025-08",
+      "start_id": 7872,
+      "end_month": "2025-08",
+      "end_id": 12871
+    },
+    {
+      "mssv": "24120035",
+      "start_month": "2025-07",
+      "start_id": 16659,
+      "end_month": "2025-07",
+      "end_id": 21658
+    },
+    {
+      "mssv": "24120232",
+      "start_month": "2025-02",
+      "start_id": 8235,
+      "end_month": "2025-02",
+      "end_id": 13234
+    },
+    {
+      "mssv": "24120260",
+      "start_month": "2025-01",
+      "start_id": 2642,
+      "end_month": "2025-01",
+      "end_id": 7641
+    }
+  ]
+}
