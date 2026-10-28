@@ -1,0 +1,3 @@
+# Keep text files stable across Windows, WSL, and Colab checkouts.
+# Git stores LF in the index and checks out LF in the working tree.
+* text=auto eol=lf
