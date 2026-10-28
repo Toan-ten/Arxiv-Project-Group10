@@ -11,21 +11,29 @@ Tài liệu này là nguồn thống nhất cho crawler, test, auditor và Jupyt
 - Sequence luôn pad 5 chữ số: `7872` → `2508.07872`; `2642` → `2501.02642`.
 - Folder key: thay dấu chấm bằng gạch ngang: `2508.07872` → `2508-07872`.
 
-Config tối thiểu:
+Config hiện tại dùng `config/group10_id_ranges.json`; mỗi member có đúng 5 field
+`mssv`, `start_month`, `start_id`, `end_month`, `end_id`:
 
-```yaml
-ranges:
-  - student_id: "24120035"   # optional, dùng để đối chiếu phân công
-    start_month: "2025-07"
-    start_id: 16659
-    end_month: "2025-07"
-    end_id: 21658
+```json
+{
+  "members": [
+    {
+      "mssv": "24120035",
+      "start_month": "2025-07",
+      "start_id": 16659,
+      "end_month": "2025-07",
+      "end_id": 21658
+    }
+  ]
+}
 ```
+
+`mssv` là chuỗi chữ số, không trùng; range cùng tháng và không chồng nhau.
 
 ## 2. CLI tối thiểu
 
 ```bash
-python -m src.crawl --config config/id_ranges.yaml --out data/corpus --limit 10 --resume
+python -m src.crawl --config config/group10_id_ranges.json --out data/corpus --limit 10 --resume
 ```
 
 | Flag | Ý nghĩa |
