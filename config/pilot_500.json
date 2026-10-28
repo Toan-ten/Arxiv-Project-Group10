@@ -1,0 +1,3502 @@
+[
+  {
+    "arxiv_id": "2508.07872",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_start"
+  },
+  {
+    "arxiv_id": "2508.07912",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.07953",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.07993",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08033",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08074",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08114",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08154",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08195",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08235",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08275",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08315",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08356",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08396",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08436",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08477",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08517",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08557",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08598",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08638",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08678",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08719",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08759",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08799",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08840",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08880",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08920",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.08960",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09001",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09041",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09081",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09122",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09162",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09202",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09243",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09283",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09323",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09364",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09404",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09444",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09485",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09525",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09565",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09606",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09646",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09686",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09726",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09767",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09807",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09847",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09888",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09928",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.09968",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10009",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10049",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10089",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10130",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10170",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10210",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10251",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10291",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10331",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10372",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10412",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10452",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10492",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10533",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10573",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10613",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10654",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10694",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10734",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10775",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10815",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10855",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10896",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10936",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.10976",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11017",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11057",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11097",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11137",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11178",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11218",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11258",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11299",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11339",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11379",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11420",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11460",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11500",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11541",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11581",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11621",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11662",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11702",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11742",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11783",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11823",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11863",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11903",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11944",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.11984",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12024",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12065",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12105",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12145",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12186",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12226",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12266",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12307",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12347",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12387",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12428",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12468",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12508",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12548",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12589",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12629",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12669",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12710",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12750",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12790",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12831",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2508.12871",
+    "mssv": "24120010",
+    "range_start": "2508.07872",
+    "range_end": "2508.12871",
+    "reason": "pilot_end"
+  },
+  {
+    "arxiv_id": "2507.16659",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_start"
+  },
+  {
+    "arxiv_id": "2507.16699",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16740",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16780",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16820",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16861",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16901",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16941",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.16982",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17022",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17062",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17102",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17143",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17183",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17223",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17264",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17304",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17344",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17385",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17425",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17465",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17506",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17546",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17586",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17627",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17667",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17707",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17747",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17788",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17828",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17868",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17909",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17949",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.17989",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18030",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18070",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18110",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18151",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18191",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18231",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18272",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18312",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18352",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18393",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18433",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18473",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18513",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18554",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18594",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18634",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18675",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18715",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18755",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18796",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18836",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18876",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18917",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18957",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.18997",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19038",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19078",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19118",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19159",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19199",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19239",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19279",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19320",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19360",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19400",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19441",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19481",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19521",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19562",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19602",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19642",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19683",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19723",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19763",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19804",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19844",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19884",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19924",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.19965",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20005",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20045",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20086",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20126",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20166",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20207",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20247",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20287",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20328",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20368",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20408",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20449",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20489",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20529",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20570",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20610",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20650",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20690",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20731",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20771",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20811",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20852",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20892",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20932",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.20973",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21013",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21053",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21094",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21134",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21174",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21215",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21255",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21295",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21335",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21376",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21416",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21456",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21497",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21537",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21577",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21618",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2507.21658",
+    "mssv": "24120035",
+    "range_start": "2507.16659",
+    "range_end": "2507.21658",
+    "reason": "pilot_end"
+  },
+  {
+    "arxiv_id": "2502.08235",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_start"
+  },
+  {
+    "arxiv_id": "2502.08275",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08316",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08356",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08396",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08437",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08477",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08517",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08558",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08598",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08638",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08678",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08719",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08759",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08799",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08840",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08880",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08920",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.08961",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09001",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09041",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09082",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09122",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09162",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09203",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09243",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09283",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09323",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09364",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09404",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09444",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09485",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09525",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09565",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09606",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09646",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09686",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09727",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09767",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09807",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09848",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09888",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09928",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.09969",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10009",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10049",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10089",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10130",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10170",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10210",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10251",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10291",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10331",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10372",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10412",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10452",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10493",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10533",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10573",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10614",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10654",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10694",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10735",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10775",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10815",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10855",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10896",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10936",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.10976",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11017",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11057",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11097",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11138",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11178",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11218",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11259",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11299",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11339",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11380",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11420",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11460",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11500",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11541",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11581",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11621",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11662",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11702",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11742",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11783",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11823",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11863",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11904",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11944",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.11984",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12025",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12065",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12105",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12146",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12186",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12226",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12266",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12307",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12347",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12387",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12428",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12468",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12508",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12549",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12589",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12629",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12670",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12710",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12750",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12791",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12831",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12871",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12911",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12952",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.12992",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13032",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13073",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13113",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13153",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13194",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2502.13234",
+    "mssv": "24120232",
+    "range_start": "2502.08235",
+    "range_end": "2502.13234",
+    "reason": "pilot_end"
+  },
+  {
+    "arxiv_id": "2501.02642",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_start"
+  },
+  {
+    "arxiv_id": "2501.02682",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02723",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02763",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02803",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02844",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02884",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02924",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.02965",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03005",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03045",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03085",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03126",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03166",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03206",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03247",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03287",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03327",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03368",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03408",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03448",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03489",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03529",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03569",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03610",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03650",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03690",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03730",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03771",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03811",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03851",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03892",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03932",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.03972",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04013",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04053",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04093",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04134",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04174",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04214",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04255",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04295",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04335",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04376",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04416",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04456",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04496",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04537",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04577",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04617",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04658",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04698",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04738",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04779",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04819",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04859",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04900",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04940",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.04980",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05021",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05061",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05101",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05142",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05182",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05222",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05262",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05303",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05343",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05383",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05424",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05464",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05504",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05545",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05585",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05625",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05666",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05706",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05746",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05787",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05827",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05867",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05907",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05948",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.05988",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06028",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06069",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06109",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06149",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06190",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06230",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06270",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06311",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06351",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06391",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06432",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06472",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06512",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06553",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06593",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06633",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06673",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06714",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06754",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06794",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06835",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06875",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06915",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06956",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.06996",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07036",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07077",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07117",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07157",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07198",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07238",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07278",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07318",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07359",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07399",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07439",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07480",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07520",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07560",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07601",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_stride"
+  },
+  {
+    "arxiv_id": "2501.07641",
+    "mssv": "24120260",
+    "range_start": "2501.02642",
+    "range_end": "2501.07641",
+    "reason": "pilot_end"
+  }
+]
