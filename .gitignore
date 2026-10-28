@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Internal project notes
+/AGENTS.md
+/AGENTS_CODE.md
+/AGENTS_REPORT.md
+/PROJECT_BRIEF.md
+/M1_CHECKLIST.md
+
+# Local environment overrides
+.env.*
+
+# Crawl data and runtime files
+/data/
+/corpus/
+/sources/
+/checkpoints/
+/checkpoint/
+/logs/
+/outputs/
