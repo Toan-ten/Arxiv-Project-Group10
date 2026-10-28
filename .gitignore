@@ -237,3 +237,6 @@ __marimo__/
 /checkpoint/
 /logs/
 /outputs/
+/benchmark_results/
+/test_corpus_tmp/
+/raw/
