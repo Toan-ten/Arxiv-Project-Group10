@@ -10,7 +10,9 @@ tích hợp API arXiv/Semantic Scholar chưa được triển khai.
 config/group10_id_ranges.json  Khoảng ID theo MSSV
 src/__init__.py
 src/id_ranges.py               Đọc cấu hình, kiểm tra và sinh ID
-tests/test_id_ranges.py        Unit tests offline
+src/benchmark.py               Đo thời gian, RAM và dung lượng corpus
+tests/test_id_ranges.py        Unit tests offline cho module ID
+tests/test_benchmark.py        Unit tests offline cho benchmark
 docs/id_ranges.md              Hướng dẫn module ID
 docs/m1_contract.md            Hợp đồng output của crawler M1
 .gitignore
@@ -49,4 +51,4 @@ không đồng nghĩa 20.000 publication hợp lệ. Dùng
 python -B -m unittest discover -s tests -v
 ```
 
-`-B` ngăn tạo cache `.pyc`. Bộ kiểm thử gồm 33 tests, chạy hoàn toàn offline.
+`-B` ngăn tạo cache `.pyc`. Bộ kiểm thử gồm 37 tests, chạy hoàn toàn offline.
