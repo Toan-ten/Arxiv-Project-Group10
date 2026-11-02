@@ -10,6 +10,11 @@ DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "group10_id_ranges.json"
 )
 
+# New-style arXiv IDs started in April 2007.
+_MIN_MONTH = "2007-04"
+_MAX_MONTH = "2099-12"
+_ARXIV_ID_RE = re.compile(r"^(?P<yymm>[0-9]{4})\.(?P<serial>[0-9]{5})$")
+
 
 class ConfigError(ValueError):
     pass
@@ -26,12 +31,39 @@ def format_arxiv_id(month: str, serial: int) -> str:
         r"[0-9]{4}-(0[1-9]|1[0-2])", month
     ):
         raise ConfigError("month must use YYYY-MM with a month from 01 to 12")
-    if not "2015-01" <= month <= "2099-12":
-        raise ConfigError("five-digit ID scope is 2015-01 through 2099-12")
+    if not _MIN_MONTH <= month <= _MAX_MONTH:
+        raise ConfigError(f"five-digit ID scope is {_MIN_MONTH} through {_MAX_MONTH}")
     _positive_integer(serial, "ID")
     if serial > 99999:
         raise ConfigError("ID must be at most 99999 (five digits)")
     return f"{month[2:4]}{month[5:7]}.{serial:05d}"
+
+
+def arxiv_id_to_folder_key(arxiv_id: str) -> str:
+    """Convert a new-style ID such as ``2508.07872`` to ``2508-07872``."""
+
+    if not isinstance(arxiv_id, str):
+        raise ConfigError("arXiv ID must be a string")
+    match = _ARXIV_ID_RE.fullmatch(arxiv_id)
+    if match is None:
+        raise ConfigError(
+            f"expected a new-style arXiv ID such as 2507.16659: {arxiv_id!r}"
+        )
+
+    yymm = match.group("yymm")
+    serial = int(match.group("serial"))
+    if serial < 1:
+        raise ConfigError("ID must be between 1 and 99999 (five digits)")
+
+    month_number = int(yymm[2:])
+    if not 1 <= month_number <= 12:
+        raise ConfigError(f"invalid month in arXiv ID: {arxiv_id!r}")
+
+    year = 2000 + int(yymm[:2])
+    month = f"{year:04d}-{month_number:02d}"
+    if not _MIN_MONTH <= month <= _MAX_MONTH:
+        raise ConfigError(f"arXiv ID is outside {_MIN_MONTH} through {_MAX_MONTH}")
+    return f"{yymm}-{serial:05d}"
 
 
 @dataclass(frozen=True)
@@ -72,6 +104,21 @@ def _require_fields(value: object, expected: set[str], context: str) -> None:
         )
 
 
+def _ensure_no_overlaps(members: dict[str, AssignedRange]) -> None:
+    by_month: dict[str, list[AssignedRange]] = {}
+    for member in members.values():
+        by_month.setdefault(member.start_month, []).append(member)
+
+    for month, group in by_month.items():
+        ordered = sorted(group, key=lambda member: member.start_id)
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.start_id <= previous.end_id:
+                raise ConfigError(
+                    f"overlapping ranges in {month}: "
+                    f"{previous.mssv} and {current.mssv}"
+                )
+
+
 def parse_config(data: object) -> dict[str, AssignedRange]:
     _require_fields(data, {"members"}, "config")
     if not isinstance(data["members"], list) or len(data["members"]) != 4:
@@ -89,7 +136,11 @@ def parse_config(data: object) -> dict[str, AssignedRange]:
         member = AssignedRange(**row)
         if member.mssv in members:
             raise ConfigError(f"duplicate mssv: {member.mssv}")
+        if member.start_month != member.end_month:
+            raise ConfigError(f"{member.mssv}: only same-month ranges are supported")
         members[member.mssv] = member
+
+    _ensure_no_overlaps(members)
     return members
 
 
@@ -119,6 +170,7 @@ def iter_assigned_ids(
     for member in config.values():
         if member.start_month != member.end_month:
             raise ConfigError(f"{member.mssv}: only same-month ranges are supported")
+    _ensure_no_overlaps(config)
     for member in config.values():
         for serial in range(member.start_id, member.end_id + 1):
             yield member.mssv, format_arxiv_id(member.start_month, serial)

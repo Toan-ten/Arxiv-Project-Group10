@@ -14,6 +14,7 @@ from src.id_ranges import (
     AssignedRange,
     DEFAULT_CONFIG_PATH,
     ConfigError,
+    arxiv_id_to_folder_key,
     format_arxiv_id,
     iter_assigned_ids,
     load_config,
@@ -30,6 +31,8 @@ class FormattingTests(unittest.TestCase):
             ("2025-01", 2642, "2501.02642"),
             ("2025-01", 7641, "2501.07641"),
             ("2025-12", 1, "2512.00001"),
+            ("2007-04", 1, "0704.00001"),
+            ("2014-12", 1, "1412.00001"),
             ("2015-01", 99999, "1501.99999"),
             ("2099-12", 12, "9912.00012"),
         ]
@@ -41,7 +44,7 @@ class FormattingTests(unittest.TestCase):
         for month in (
             None, 202508, True, "2025-8", "25-08", "2025-00", "2025-13",
             "2025/08", "2025-08-01", " 2025-08", "2025-08\n", "２０２５-０８",
-            "0000-01", "2014-12", "2100-01",
+            "0000-01", "2007-03", "2100-01",
         ):
             with self.subTest(month=month), self.assertRaises(ConfigError):
                 format_arxiv_id(month, 7872)
@@ -50,6 +53,36 @@ class FormattingTests(unittest.TestCase):
         for serial in (0, -1, 100000, "7872", "07872", 7872.0, True, False, None):
             with self.subTest(serial=serial), self.assertRaises(ConfigError):
                 format_arxiv_id("2025-08", serial)
+
+
+class FolderKeyTests(unittest.TestCase):
+    def test_valid_ids_are_converted(self):
+        cases = {
+            "2508.07872": "2508-07872",
+            "2501.02642": "2501-02642",
+            "0704.00001": "0704-00001",
+            "9912.99999": "9912-99999",
+        }
+        for arxiv_id, expected in cases.items():
+            with self.subTest(arxiv_id=arxiv_id):
+                self.assertEqual(arxiv_id_to_folder_key(arxiv_id), expected)
+
+    def test_invalid_ids_are_rejected(self):
+        for arxiv_id in (
+            "hep-th/9901001",
+            "2501.2642",
+            "2501.02642v2",
+            "2501.00000",
+            "2501.026421",
+            "2501-02642",
+            "0000.00001",
+            "0703.00001",
+            "2007-03.00001",
+            "",
+            250102642,
+        ):
+            with self.subTest(arxiv_id=arxiv_id), self.assertRaises(ConfigError):
+                arxiv_id_to_folder_key(arxiv_id)
 
 
 class ConfigurationTests(unittest.TestCase):
@@ -161,6 +194,26 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             replace(changed, end_month="2025-11")
 
+    def test_cross_month_config_is_rejected_at_parse_time(self):
+        data = copy.deepcopy(self.data)
+        data["members"][0]["end_month"] = "2025-09"
+        data["members"][0]["end_id"] = 1
+        with self.assertRaisesRegex(ConfigError, "same-month"):
+            parse_config(data)
+
+    def test_overlapping_member_ranges_are_rejected(self):
+        data = copy.deepcopy(self.data)
+        data["members"][1].update(
+            {
+                "start_month": "2025-08",
+                "start_id": 8000,
+                "end_month": "2025-08",
+                "end_id": 8001,
+            }
+        )
+        with self.assertRaisesRegex(ConfigError, "overlapping ranges"):
+            parse_config(data)
+
     def test_equal_boundaries_are_valid(self):
         original = load_config()["24120010"]
         changed = replace(original, end_id=original.start_id)
@@ -237,6 +290,18 @@ class AssignedIdIterationTests(unittest.TestCase):
             with self.subTest(start=start_month, end=end_month):
                 with self.assertRaisesRegex(ConfigError, "24120260.*same-month"):
                     next(iter_assigned_ids(config))
+
+    def test_overlapping_direct_config_is_rejected_before_any_id(self):
+        config = load_config()
+        config["24120035"] = replace(
+            config["24120035"],
+            start_month="2025-08",
+            start_id=8000,
+            end_month="2025-08",
+            end_id=8001,
+        )
+        with self.assertRaisesRegex(ConfigError, "overlapping ranges"):
+            next(iter_assigned_ids(config))
 
     def test_ids_are_formatted_only_as_requested(self):
         config = load_config()
