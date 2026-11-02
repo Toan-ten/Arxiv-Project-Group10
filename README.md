@@ -39,8 +39,9 @@ print(next(ids))  # ('24120010', '2508.07872')
 print(arxiv_id_to_folder_key("2508.07872"))  # 2508-07872
 ```
 
-Iterator sinh từng cặp `(mssv, arxiv_id)`, bao gồm hai đầu khoảng, chỉ hỗ trợ
-khoảng cùng tháng và từ chối overlap. Cấu hình hiện tại có 5.000 vị trí mỗi
+Iterator sinh từng cặp `(mssv, arxiv_id)`, bao gồm hai đầu khoảng, hỗ trợ
+assigned IDs năm chữ số từ `2015-01` đến `2099-12`, chỉ nhận khoảng cùng
+tháng và từ chối overlap. Cấu hình hiện tại có 5.000 vị trí mỗi
 thành viên, tổng **20.000 ID ứng viên**, không đồng nghĩa 20.000 publication
 hợp lệ. Folder key dùng cho lưu trữ; ID gốc vẫn được giữ khi gọi API.
 Xem [hướng dẫn module ID](docs/id_ranges.md).
@@ -62,15 +63,17 @@ giao diện, trạng thái lỗi, kiểm thử và phạm vi thử mạng ở b�
 
 [Contract M1](docs/m1_contract.md) mô tả layout corpus, schema
 `metadata.json`, `references.json`, `manifest.json`, trạng thái và log.
-CLI và Storage + Checkpoint/Resume trong contract là phần dự kiến, chưa
-được triển khai; cần đối chiếu contract với crawler trước khi tích hợp.
+Contract phiên bản 2 đã được đối chiếu với giao diện crawler hiện tại.
+CLI và Storage + Checkpoint/Resume trong contract vẫn là phần dự kiến,
+chưa được triển khai.
 
 `benchmark_pipeline(crawler_main_func, ...)` trong `src/benchmark.py` bọc một
 hàm crawler để đo wall time, RAM đầu/cuối/đỉnh và kích thước corpus cuối,
 rồi ghi báo cáo cùng môi trường và commit. Khi có `psutil`, bộ đo lấy RAM
 của process và các process con; fallback phụ thuộc hệ điều hành.
 
-Bộ đo nền chưa có RAM trung bình, disk peak hoặc thời gian từng paper/discovery.
+Bộ đo nền chưa có RAM trung bình, disk peak hoặc thời gian từng paper,
+trung bình mỗi paper và discovery.
 Entry point `python -m src.benchmark` hiện chạy dummy crawler, không phải
 benchmark M1 thực nghiệm trên Colab CPU-only.
 

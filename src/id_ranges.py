@@ -10,8 +10,8 @@ DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "group10_id_ranges.json"
 )
 
-# New-style arXiv IDs started in April 2007.
-_MIN_MONTH = "2007-04"
+# Assigned ranges use five-digit IDs; historical IDs are handled elsewhere.
+_MIN_MONTH = "2015-01"
 _MAX_MONTH = "2099-12"
 _ARXIV_ID_RE = re.compile(r"^(?P<yymm>[0-9]{4})\.(?P<serial>[0-9]{5})$")
 
@@ -27,6 +27,8 @@ def _positive_integer(value: object, field: str) -> None:
 
 
 def format_arxiv_id(month: str, serial: int) -> str:
+    """Format an assigned five-digit ID, not an arbitrary reference ID."""
+
     if not isinstance(month, str) or not re.fullmatch(
         r"[0-9]{4}-(0[1-9]|1[0-2])", month
     ):
@@ -40,7 +42,10 @@ def format_arxiv_id(month: str, serial: int) -> str:
 
 
 def arxiv_id_to_folder_key(arxiv_id: str) -> str:
-    """Convert a new-style ID such as ``2508.07872`` to ``2508-07872``."""
+    """Convert an assigned five-digit base ID to a storage folder key.
+
+    This helper is not a validator for historical or reference IDs.
+    """
 
     if not isinstance(arxiv_id, str):
         raise ConfigError("arXiv ID must be a string")

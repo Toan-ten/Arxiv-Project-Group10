@@ -31,8 +31,7 @@ class FormattingTests(unittest.TestCase):
             ("2025-01", 2642, "2501.02642"),
             ("2025-01", 7641, "2501.07641"),
             ("2025-12", 1, "2512.00001"),
-            ("2007-04", 1, "0704.00001"),
-            ("2014-12", 1, "1412.00001"),
+            ("2015-01", 1, "1501.00001"),
             ("2015-01", 99999, "1501.99999"),
             ("2099-12", 12, "9912.00012"),
         ]
@@ -44,7 +43,7 @@ class FormattingTests(unittest.TestCase):
         for month in (
             None, 202508, True, "2025-8", "25-08", "2025-00", "2025-13",
             "2025/08", "2025-08-01", " 2025-08", "2025-08\n", "２０２５-０８",
-            "0000-01", "2007-03", "2100-01",
+            "0000-01", "2007-03", "2007-04", "2014-12", "2100-01",
         ):
             with self.subTest(month=month), self.assertRaises(ConfigError):
                 format_arxiv_id(month, 7872)
@@ -60,7 +59,7 @@ class FolderKeyTests(unittest.TestCase):
         cases = {
             "2508.07872": "2508-07872",
             "2501.02642": "2501-02642",
-            "0704.00001": "0704-00001",
+            "1501.00001": "1501-00001",
             "9912.99999": "9912-99999",
         }
         for arxiv_id, expected in cases.items():
@@ -77,6 +76,10 @@ class FolderKeyTests(unittest.TestCase):
             "2501-02642",
             "0000.00001",
             "0703.00001",
+            "0704.0001",
+            "0704.00001",
+            "1412.0001",
+            "1412.00001",
             "2007-03.00001",
             "",
             250102642,
@@ -179,6 +182,15 @@ class ConfigurationTests(unittest.TestCase):
                 with self.subTest(field=field, value=value):
                     with self.assertRaises(ConfigError):
                         parse_config(data)
+
+    def test_pre_2015_assigned_ranges_are_rejected(self):
+        for month in ("2007-04", "2014-12"):
+            data = copy.deepcopy(self.data)
+            data["members"][0].update(
+                start_month=month, end_month=month, start_id=1, end_id=2,
+            )
+            with self.subTest(month=month), self.assertRaises(ConfigError):
+                parse_config(data)
 
     def test_duplicate_mssv_is_rejected(self):
         self.data["members"][1]["mssv"] = self.data["members"][0]["mssv"]
@@ -302,6 +314,21 @@ class AssignedIdIterationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ConfigError, "overlapping ranges"):
             next(iter_assigned_ids(config))
+
+    def test_shared_endpoint_is_an_overlap_before_any_id(self):
+        first = AssignedRange("24120010", "2025-08", 10, "2025-08", 20)
+        second = AssignedRange("24120035", "2025-08", 20, "2025-08", 30)
+        with self.assertRaisesRegex(ConfigError, "overlapping ranges"):
+            next(iter_assigned_ids({first.mssv: first, second.mssv: second}))
+
+    def test_adjacent_non_overlapping_ranges_are_allowed(self):
+        first = AssignedRange("24120010", "2025-08", 10, "2025-08", 11)
+        second = AssignedRange("24120035", "2025-08", 12, "2025-08", 13)
+        self.assertEqual(
+            list(iter_assigned_ids({first.mssv: first, second.mssv: second})),
+            [("24120010", "2508.00010"), ("24120010", "2508.00011"),
+             ("24120035", "2508.00012"), ("24120035", "2508.00013")],
+        )
 
     def test_ids_are_formatted_only_as_requested(self):
         config = load_config()
