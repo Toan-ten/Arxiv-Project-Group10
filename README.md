@@ -3,8 +3,9 @@
 Đồ án môn Introduction to Data Science, HCMUS — Milestone 1: Data Crawling.
 Hiện có module quản lý ID, Entry Discovery, HTTP Client, Source Downloader
 và bộ đo benchmark nền. Các module crawler được kiểm thử offline, chưa thử
-tải source thật. Chưa tích hợp Semantic Scholar, pipeline crawl hàng loạt
-hoặc Storage + Checkpoint/Resume; chưa có benchmark M1 thực nghiệm.
+tải source thật. Storage + Checkpoint/Resume giai đoạn 1 đã có và được kiểm thử offline.
+Chưa tích hợp Semantic Scholar hoặc pipeline crawl hàng loạt;
+chưa có benchmark M1 thực nghiệm.
 
 ## Cấu trúc repository
 
@@ -14,6 +15,7 @@ src/id_ranges.py              Đọc cấu hình, kiểm tra và sinh ID
 src/arxiv_discovery.py        Phân tích Atom XML và xác định version
 src/arxiv_client.py           HTTP client cho một ID
 src/arxiv_source.py           Tải source và trích xuất TeX/BibTeX an toàn
+src/storage.py                Lưu JSON, kiểm tra source và checkpoint/resume offline
 src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
 docs/                         Hướng dẫn module và contract M1
 tests/                        Unit tests offline cho các module
@@ -64,8 +66,12 @@ giao diện, trạng thái lỗi, kiểm thử và phạm vi thử mạng ở b�
 [Contract M1](docs/m1_contract.md) mô tả layout corpus, schema
 `metadata.json`, `references.json`, `manifest.json`, trạng thái và log.
 Contract phiên bản 2 đã được đối chiếu với giao diện crawler hiện tại.
-CLI và Storage + Checkpoint/Resume trong contract vẫn là phần dự kiến,
-chưa được triển khai.
+Storage + Checkpoint/Resume giai đoạn 1 đã được triển khai theo contract;
+CLI, Semantic Scholar và bước export vẫn chưa có.
+
+[Hướng dẫn Storage](docs/storage.md) mô tả giao diện, atomic JSON, checksum
+và kế hoạch resume. Storage không gọi mạng và không tạo sẵn thư mục version;
+source có sẵn nhưng thiếu checkpoint hợp lệ được giữ nguyên để audit.
 
 `benchmark_pipeline(crawler_main_func, ...)` trong `src/benchmark.py` bọc một
 hàm crawler để đo wall time, RAM đầu/cuối/đỉnh và kích thước corpus cuối,

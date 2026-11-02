@@ -3,7 +3,9 @@
 **Rà soát:** 02/11/2026 · **Phạm vi:** crawler M1, không gồm parsing M2 hay matching M3.
 
 Đặc tả này thay thế phiên bản 1 để chuẩn bị Storage + Checkpoint/Resume.
-Các schema, trạng thái lưu trữ, CLI và bước export dưới đây **chưa được triển khai**.
+Storage + Checkpoint/Resume giai đoạn 1 đã được triển khai offline trong
+`src/storage.py` theo schema v2. CLI, Semantic Scholar và bước export vẫn chưa có.
+Giao diện và giới hạn phục hồi: [Storage giai đoạn 1](storage.md).
 ID, discovery, HTTP client, source downloader và benchmark foundation đã có;
 việc hoàn tất các module này không đồng nghĩa đã hoàn tất M1.
 
@@ -52,8 +54,9 @@ không có TeX trả `no_tex_source`; định dạng chưa nhận diện đượ
 Giới hạn kỹ thuật hiện tại: payload 100 MiB, giải nén 200 MiB, 10.000 entries.
 Chưa hỗ trợ archive/gzip lồng nhau, ZIP mã hóa, `.Z`, bz2 hoặc xz.
 Extraction từ chối traversal, đường dẫn nguy hiểm, links/special files và đường
-dẫn trùng/xung đột chữ hoa-thường. Chưa có resume theo byte, checkpoint hoặc
-bảo vệ trước process khác thay đổi thư mục đích. Chi tiết: [source downloader](arxiv_source.md).
+dẫn trùng/xung đột chữ hoa-thường. Downloader không tự có resume theo byte
+hoặc checkpoint; Storage giai đoạn 1 đảm nhiệm checkpoint theo version.
+Chưa bảo vệ trước process khác thay đổi thư mục đích. Chi tiết: [source downloader](arxiv_source.md).
 
 ## 3. `metadata.json`
 
@@ -258,9 +261,10 @@ giữ lỗi cụ thể và phần đã lưu. Run dừng giữa chừng là `inte
    ghi đè hoặc coi `output_exists` là thành công. Không dùng `.part` làm kết quả.
    Stage metadata/references còn thiếu/lỗi vẫn phải được tiếp tục dù source đã xong.
 
-Storage chưa có transaction/recovery code. Các tình huống cần test khi triển khai:
-crash trước/sau rename, crash trước manifest commit, version chỉ có BibTeX,
-no-TeX không có thư mục, checksum sai và chạy lại không tải lại version tốt.
+Storage giai đoạn 1 đã có atomic JSON và recovery checkpoint theo version,
+được kiểm thử offline cho các tình huống trên. Mỗi JSON atomic riêng; chưa có
+transaction journal cho cả ba file. Source orphan hoặc JSON bắt buộc mất/hỏng
+được giữ nguyên và báo cần audit, không tự xóa/ghi đè để sửa.
 
 ## 7. CLI, log và đầu vào report dự kiến
 
