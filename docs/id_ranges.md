@@ -69,10 +69,15 @@ Ví dụ `2025-08` và `7872` được định dạng thành `2508.07872`; số 
 quả, không ghi các trường này vào file cấu hình.
 
 Dùng `arxiv_id_to_folder_key("2508.07872")` để lấy folder key `2508-07872`.
-Helper này chỉ nhận ID new-style, không nhận ID cũ hoặc hậu tố version.
+Helper này chỉ nhận base ID năm chữ số trong phạm vi assigned ranges,
+không nhận ID cũ hoặc hậu tố version. Không dùng helper hay formatter này
+để xác thực mọi ID trong references: references có thể có ID lịch sử bốn
+chữ số hoặc old-style có dấu slash. Discovery/client/downloader vẫn giữ
+ID gốc bằng giao diện riêng.
 
-Tháng có dạng `YYYY-MM`, từ `2007-04` đến `2099-12` (new-style arXiv bắt đầu
-từ tháng 4/2007); ID là số nguyên trong `1..99999`, không chấp nhận boolean.
+Tháng có dạng `YYYY-MM`, từ `2015-01` đến `2099-12`; ID là số nguyên trong
+`1..99999`, không chấp nhận boolean. Module chủ động từ chối tháng trước
+2015-01 để tránh sinh sai ID lịch sử. Bốn khoảng Group 10 đều thuộc 2025.
 Mốc đầu không được sau mốc cuối. Cấu hình phải đủ bốn thành viên, đúng tên
 trường, không trùng MSSV hoặc khóa JSON. Các range không được chồng nhau
 trong cùng tháng. File dùng UTF-8, có thể có BOM; đường dẫn mặc định dựa vào
@@ -81,8 +86,8 @@ vị trí module.
 Các khoảng được duyệt **bao gồm cả hai đầu mút**; hai mốc bằng nhau sinh đúng
 một ID. Hàm chỉ hỗ trợ khoảng cùng tháng. Khoảng khác tháng/năm bị
 `parse_config` từ chối; nếu truyền thẳng config vào `iter_assigned_ids`, lỗi
-được báo trước khi sinh bất kỳ ID nào. Mã arXiv cũ và hậu tố version không
-được hỗ trợ. Định dạng hợp lệ không xác nhận paper tồn tại trên arXiv; 20.000
+được báo trước khi sinh bất kỳ ID nào. Module assigned ranges không hỗ trợ ID lịch sử trước 2015 hoặc hậu tố
+version; giới hạn này không áp dụng cho toàn bộ crawler hay references. Định dạng hợp lệ không xác nhận paper tồn tại trên arXiv; 20.000
 ID ứng viên không đồng nghĩa 20.000 publication hợp lệ.
 
 Hợp đồng output cho crawler nằm ở [`docs/m1_contract.md`](m1_contract.md).

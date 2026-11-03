@@ -6,7 +6,7 @@ Tài liệu này là nguồn thống nhất cho crawler, test, auditor và Jupyt
 
 ## 1. Phạm vi và quy ước ID
 
-- Chỉ dùng arXiv ID **new-style** `YYMM.NNNNN` (từ 2007-04). ID cũ `archive/YYMMNNN` chỉ xuất hiện trong references, không dùng làm ID bài được giao.
+- Chỉ dùng arXiv ID **new-style** `YYMM.NNNNN` cho assigned ranges (từ 2015-01). ID cũ `archive/YYMMNNN` chỉ xuất hiện trong references, không dùng làm ID bài được giao.
 - Mỗi range là **một tháng**, inclusive hai đầu: `end_id - start_id + 1`. Range cross-month là lỗi config ở M1, không tự suy diễn.
 - Sequence luôn pad 5 chữ số: `7872` → `2508.07872`; `2642` → `2501.02642`.
 - Folder key: thay dấu chấm bằng gạch ngang: `2508.07872` → `2508-07872`.
