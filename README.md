@@ -10,8 +10,11 @@ tích hợp API arXiv/Semantic Scholar chưa được triển khai.
 config/group10_id_ranges.json  Khoảng ID theo MSSV
 src/__init__.py
 src/id_ranges.py               Đọc cấu hình, kiểm tra và sinh ID
-tests/test_id_ranges.py        Unit tests offline
-docs/id_ranges.md             Hướng dẫn module ID
+src/benchmark.py               Đo thời gian, RAM và dung lượng corpus
+tests/test_id_ranges.py        Unit tests offline cho module ID
+tests/test_benchmark.py        Unit tests offline cho benchmark
+docs/id_ranges.md              Hướng dẫn module ID
+docs/m1_contract.md            Hợp đồng output của crawler M1
 .gitignore
 LICENSE
 README.md
@@ -19,7 +22,7 @@ README.md
 
 ## Chạy module ID
 
-Dùng Python 3.10 trở lên; đã kiểm thử trên Python 3.14.1. Chỉ cần thư viện
+Dùng Python 3.10 trở lên; đã kiểm thử trên Python 3.14. Chỉ cần thư viện
 chuẩn Python, không cần cài package. Chạy từ thư mục gốc repository:
 
 ```powershell
@@ -37,7 +40,10 @@ print(next(ids))  # ('24120010', '2508.07872')
 
 Hàm dùng generator, bao gồm cả hai đầu khoảng và chỉ hỗ trợ khoảng cùng tháng.
 Cấu hình hiện tại có 5.000 vị trí mỗi thành viên, tổng **20.000 ID ứng viên**;
-không đồng nghĩa 20.000 publication hợp lệ. Xem [hướng dẫn chi tiết](docs/id_ranges.md).
+không đồng nghĩa 20.000 publication hợp lệ. Dùng
+`arxiv_id_to_folder_key("2508.07872")` để lấy `2508-07872`. Xem
+[hướng dẫn chi tiết](docs/id_ranges.md) và
+[hợp đồng output M1](docs/m1_contract.md).
 
 ## Chạy unit tests
 
@@ -45,4 +51,4 @@ không đồng nghĩa 20.000 publication hợp lệ. Xem [hướng dẫn chi ti�
 python -B -m unittest discover -s tests -v
 ```
 
-`-B` ngăn tạo cache `.pyc`. Bộ kiểm thử gồm 28 tests, chạy hoàn toàn offline.
+`-B` ngăn tạo cache `.pyc`. Bộ kiểm thử gồm 37 tests, chạy hoàn toàn offline.
