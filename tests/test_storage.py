@@ -769,6 +769,91 @@ class StorageTests(unittest.TestCase):
         self.assertEqual((destination / "nested/main.tex").read_bytes(), TEX)
         opener.open.assert_called_once()
 
+    def test_resume_rejects_version_mismatch_before_any_checkpoint_write(self):
+        self.discover(2)
+        self.put_source("v1")
+        paper = self.store.paper_path(MSSV, ARXIV_ID)
+        originals = {p.name: p.read_bytes() for p in paper.glob("*.json")}
+        for active in (("metadata",), ("references",), ("metadata", "references")):
+            with self.subTest(in_progress=active):
+                for name, content in originals.items():
+                    (paper / name).write_bytes(content)
+                metadata = json.loads(originals["metadata.json"])
+                metadata.update(versions=metadata["versions"][:1], revised_dates=[])
+                references = json.loads(originals["references.json"])
+                for name, value in (("metadata", metadata), ("references", references)):
+                    if name in active:
+                        value["status"] = "in_progress"
+                    (paper / (name + ".json")).write_text(
+                        json.dumps(value), encoding="utf-8")
+                # Each JSON is individually valid; only their coverage disagrees.
+                self.assertEqual(len(self.store.read_metadata(MSSV, ARXIV_ID)["versions"]), 1)
+                self.assertEqual(len(self.store.read_manifest(MSSV, ARXIV_ID)["versions"]), 2)
+                self.store.read_references(MSSV, ARXIV_ID)
+                before = {p.relative_to(paper).as_posix(): p.read_bytes()
+                          for p in paper.rglob("*") if p.is_file()}
+                with patch.object(storage, "_atomic_json", wraps=storage._atomic_json) as write:
+                    for _ in range(2):
+                        with self.assertRaisesRegex(StorageError, "cannot drop known versions"):
+                            self.store.resume(MSSV, ARXIV_ID)
+                        self.assertEqual(before, {
+                            p.relative_to(paper).as_posix(): p.read_bytes()
+                            for p in paper.rglob("*") if p.is_file()})
+                    write.assert_not_called()
+
+    def test_resume_rejects_missing_coverage_before_stage_recovery(self):
+        self.discover(1)
+        paper = self.store.paper_path(MSSV, ARXIV_ID)
+        metadata = self.store.read_metadata(MSSV, ARXIV_ID)
+        metadata.update(status="in_progress", version_status="needs_verification",
+                        versions=[], revised_dates=None)
+        references = self.store.read_references(MSSV, ARXIV_ID)
+        references["status"] = "in_progress"
+        for name, value in (("metadata", metadata), ("references", references)):
+            (paper / (name + ".json")).write_text(json.dumps(value), encoding="utf-8")
+        self.store.read_metadata(MSSV, ARXIV_ID)
+        self.store.read_references(MSSV, ARXIV_ID)
+        self.store.read_manifest(MSSV, ARXIV_ID)
+        before = {p.name: p.read_bytes() for p in paper.glob("*.json")}
+
+        with patch.object(storage, "_atomic_json", wraps=storage._atomic_json) as write:
+            with self.assertRaisesRegex(StorageError, "cannot drop known versions"):
+                self.store.resume(MSSV, ARXIV_ID)
+            write.assert_not_called()
+        self.assertEqual(before, {p.name: p.read_bytes() for p in paper.glob("*.json")})
+
+    def test_resume_recovers_newer_metadata_and_interrupted_stages(self):
+        self.discover(3)
+        paper = self.store.paper_path(MSSV, ARXIV_ID)
+        manifest = self.store.read_manifest(MSSV, ARXIV_ID)
+        manifest["versions"] = {"v1": manifest["versions"]["v1"]}
+        (paper / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        metadata = self.store.read_metadata(MSSV, ARXIV_ID)
+        provenance = metadata["provenance"]
+        metadata["status"] = "in_progress"
+        references = self.store.read_references(MSSV, ARXIV_ID)
+        references["status"] = "in_progress"
+        for name, value in (("metadata", metadata), ("references", references)):
+            (paper / (name + ".json")).write_text(json.dumps(value), encoding="utf-8")
+
+        plan = self.store.resume(MSSV, ARXIV_ID)
+
+        self.assertEqual(plan["retry"], ["v1", "v2", "v3"])
+        self.assertEqual(plan["skip"], [])
+        self.assertEqual(plan["blocked"], {})
+        self.assertEqual(plan["manifest"]["metadata_status"], "interrupted")
+        self.assertEqual(plan["manifest"]["references_status"], "interrupted")
+        self.assertEqual(plan["manifest"]["status"], "interrupted")
+        self.assertEqual(self.store.read_metadata(MSSV, ARXIV_ID)["provenance"], provenance)
+        self.assertEqual(self.store.read_metadata(MSSV, ARXIV_ID)["status"], "interrupted")
+        self.assertEqual(self.store.read_references(MSSV, ARXIV_ID)["status"], "interrupted")
+        for name, record in plan["manifest"]["versions"].items():
+            self.assertEqual(record["status"], "pending")
+            self.assertFalse(self.store.version_destination(MSSV, ARXIV_ID, name).exists())
+        before = {p.name: p.read_bytes() for p in paper.glob("*.json")}
+        self.assertEqual(self.store.resume(MSSV, ARXIV_ID), plan)
+        self.assertEqual(before, {p.name: p.read_bytes() for p in paper.glob("*.json")})
+
 
 if __name__ == "__main__":
     unittest.main()

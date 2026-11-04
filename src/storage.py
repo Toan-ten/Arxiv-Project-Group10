@@ -726,6 +726,9 @@ class CorpusStorage:
             "metadata": self.read_metadata(mssv, arxiv_id),
             "references": self.read_references(mssv, arxiv_id),
         }
+        # Preflight cross-file coverage before persisting any recovery changes.
+        # Newer metadata may add versions after an interrupted manifest commit.
+        self._sync(manifest, stages["metadata"], stages["references"])
         for name, value in stages.items():
             if value["status"] == "in_progress":
                 value["status"] = "interrupted"

@@ -4,6 +4,7 @@
 Hiện có module quản lý ID, Entry Discovery, HTTP Client, Source Downloader
 và bộ đo benchmark nền. Các module crawler được kiểm thử offline, chưa thử
 tải source thật. Storage + Checkpoint/Resume giai đoạn 1 đã có và được kiểm thử offline.
+Pipeline v1 đã nối các module cho danh sách ID chỉ định và được kiểm thử offline.
 Chưa tích hợp Semantic Scholar hoặc pipeline crawl hàng loạt;
 chưa có benchmark M1 thực nghiệm.
 
@@ -16,6 +17,7 @@ src/arxiv_discovery.py        Phân tích Atom XML và xác định version
 src/arxiv_client.py           HTTP client cho một ID
 src/arxiv_source.py           Tải source và trích xuất TeX/BibTeX an toàn
 src/storage.py                Lưu JSON, kiểm tra source và checkpoint/resume offline
+src/pipeline.py               Điều phối tuần tự các ID chỉ định và resume
 src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
 docs/                         Hướng dẫn module và contract M1
 tests/                        Unit tests offline cho các module
@@ -60,6 +62,23 @@ Xem [hướng dẫn module ID](docs/id_ranges.md).
 
 API và source dùng chung pacing trong một process. Các tài liệu trên mô tả
 giao diện, trạng thái lỗi, kiểm thử và phạm vi thử mạng ở bước sau.
+
+## Pipeline v1
+
+`run_selected(pairs, corpus_root, ...)` trong `src.pipeline` nhận danh sách
+`(MSSV, base_arxiv_id)`, kiểm tra ownership rồi nối discovery, download và Storage.
+Khi chạy lại, pipeline dùng checkpoint và bỏ qua source còn hợp lệ; không ghi đè
+source hỏng/orphan. References mới vẫn not_attempted, paper chưa được coi complete.
+
+Kiểm thử riêng bằng fake HTTP, không gọi mạng thật:
+
+```powershell
+python -B -m unittest discover -s tests -p "test_pipeline.py" -v
+```
+
+Xem [cách gọi Python, summary và giới hạn resume](docs/pipeline.md).
+Hàm sử dụng HTTP thật nếu được gọi trực tiếp ngoài fake HTTP; chỉ thực hiện
+sau khi duyệt pilot có phạm vi cụ thể. V1 chưa có CLI hoặc request budget.
 
 ## Contract và benchmark foundation
 
