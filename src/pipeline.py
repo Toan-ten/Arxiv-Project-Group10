@@ -4,6 +4,7 @@ No requests or output are produced on import. Calls use the existing HTTP
 client; offline callers/tests must provide fake HTTP. Single writer only.
 """
 import math
+import re
 
 from src import arxiv_client, arxiv_source
 from src.storage import CorpusStorage, StorageError, TERMINAL, RETRYABLE
@@ -43,6 +44,20 @@ def _inputs(pairs, store, timeout, max_attempts, user_agent):
     return selected
 
 
+def _version_selection(versions):
+    if versions is None:
+        return None
+    if not isinstance(versions, (list, tuple)) or not versions:
+        raise ValueError("versions must be None or a nonempty list/tuple of vN names")
+    if any(not isinstance(name, str) or re.fullmatch(r"v[1-9][0-9]*", name) is None
+           for name in versions):
+        raise ValueError("Each selected version must be a canonical vN name, such as v1")
+    selected = frozenset(versions)
+    if len(selected) != len(versions):
+        raise ValueError("Duplicate version names are not allowed")
+    return selected
+
+
 def _error(paper, stage, kind, message, version=None):
     paper["errors"].append(dict(
         stage=stage, type=kind, message=str(message), version=version,
@@ -73,7 +88,7 @@ def _cached_snapshot(store, paper):
     return snapshot
 
 
-def _run_paper(store, paper, options):
+def _run_paper(store, paper, options, versions):
     mssv, arxiv_id = paper["mssv"], paper["arxiv_id"]
     _checkpoint(paper, store.initialize_paper(mssv, arxiv_id))
     if paper["discovery"]["status"] in {"found", "not_found"}:
@@ -106,6 +121,15 @@ def _run_paper(store, paper, options):
         _error(paper, "discovery", "needs_verification", "Version list is not resolved")
         return True
 
+    if versions is not None:
+        missing = versions.difference(paper["source"])
+        if missing:
+            for name in sorted(missing):
+                paper["blocked"][name] = "not_discovered"
+                _error(paper, "discovery", "not_discovered",
+                       f"Selected version {name} is not confirmed by discovery", name)
+            return True
+
     # Also checks orphan destinations for newly discovered versions.
     plan = store.resume(mssv, arxiv_id)
     _checkpoint(paper, plan["manifest"])
@@ -120,6 +144,8 @@ def _run_paper(store, paper, options):
         _error(paper, "source", reason, message, name)
 
     for name in sorted(plan["retry"], key=lambda value: int(value[1:])):
+        if versions is not None and name not in versions:
+            continue
         try:
             destination = store.begin_version(mssv, arxiv_id, name)
             if destination is None:
@@ -155,19 +181,23 @@ def _run_paper(store, paper, options):
 
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-    user_agent=arxiv_client.USER_AGENT,
+    user_agent=arxiv_client.USER_AGENT, versions=None,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
     All selections/options are checked before any HTTP or checkpoint writes.
     Duplicate IDs are rejected. There is no range expansion, outer retry loop,
     CLI, or Semantic Scholar stage. A resolved checkpoint is reused as-is.
+    versions=None processes all versions; a nonempty list/tuple of distinct vN
+    names limits source requests while retaining the full discovery/checkpoint.
+    An unconfirmed selected name blocks source requests for that paper.
 
     The returned summary separates operations from contract states: skipped,
     blocked and failed actions never replace a stored version's actual status.
     StorageError blocks one paper/version; fatal I/O or unexpected exceptions
     raise PipelineStopped with a partial summary. KeyboardInterrupt propagates.
     """
+    versions = _version_selection(versions)
     store = CorpusStorage(corpus_root, run_id=run_id)
     selected = _inputs(pairs, store, timeout, max_attempts, user_agent)
     options = dict(timeout=timeout, max_attempts=max_attempts, user_agent=user_agent)
@@ -182,7 +212,7 @@ def run_selected(
         )
         summary["papers"].append(paper)
         try:
-            if not _run_paper(store, paper, options):
+            if not _run_paper(store, paper, options, versions):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
         except StorageError as exc:

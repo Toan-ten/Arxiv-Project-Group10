@@ -641,6 +641,307 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(all(OTHER[1] in url for url in self.requests))
         self.assertEqual(self.outcomes, [])
 
+    def test_selected_v1_preserves_full_discovery_and_two_request_bound(self):
+        pilot = ("24120232", "2502.09992")
+        entries = {"main.tex": TEX, "nested/refs.bib": BIB}
+        self.outcomes = [xml_response(pilot[1], versions=3), Response(archive(entries))]
+
+        report = self.run_pairs([pilot], versions=("v1",), max_attempts=1)
+
+        self.assertFalse(report["stopped"])
+        paper = report["papers"][0]
+        manifest = self.manifest(pilot)
+        metadata = self.store().read_metadata(*pilot)
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.assertEqual(self.requests, [
+            client.API_URL + "?id_list=" + pilot[1] + "&start=0&max_results=1",
+            arxiv_source.SOURCE_URL + pilot[1] + "v1",
+        ])
+        self.assertEqual(self.starts, [0, 3])
+        self.assertEqual(self.outcomes, [])
+        self.assertEqual((metadata["mssv"], metadata["arxiv_id"]), pilot)
+        self.assertEqual((manifest["mssv"], manifest["arxiv_id"]), pilot)
+        expected_ids = [pilot[1] + name for name in ("v1", "v2", "v3")]
+        self.assertEqual([v["versioned_id"] for v in metadata["versions"]], expected_ids)
+        self.assertEqual(metadata["provenance"]["arxiv"]["snapshot"]["version_ids"], expected_ids)
+        self.assertEqual(set(manifest["versions"]), {"v1", "v2", "v3"})
+        self.assertEqual(paper["pending"], ["v2", "v3"])
+        self.assertEqual(paper["paper_status"], "partial")
+        self.assertEqual(paper["references_status"], "not_attempted")
+        self.assertEqual(self.store().read_references(*pilot)["items"], [])
+        record = manifest["versions"]["v1"]
+        self.assertEqual(record["status"], "success")
+        self.assertEqual(record["attempts"], 1)
+        self.assertEqual(record["kept_bytes"], sum(map(len, entries.values())))
+        for name, content in entries.items():
+            self.assertEqual((self.paper_path(pilot) / "v1" / name).read_bytes(), content)
+            self.assertEqual(record["file_checksums"][name], hashlib.sha256(content).hexdigest())
+        for name in ("v2", "v3"):
+            record = manifest["versions"][name]
+            self.assertEqual(record["status"], "pending")
+            self.assertEqual(record["attempts"], 0)
+            self.assertIsNone(record["source_status"])
+            self.assertFalse((self.paper_path(pilot) / name).exists())
+
+    def test_selected_v1_resume_sends_no_new_requests_with_versions_pending(self):
+        pilot = ("24120232", "2502.09992")
+        self.outcomes = [xml_response(pilot[1], versions=3), Response(TEX)]
+        self.run_pairs([pilot], versions=("v1",), max_attempts=1)
+        before = self.snapshot(pilot)
+        calls = self.opener.open.call_count
+        requests = list(self.requests)
+
+        paper = self.run_pairs([pilot], versions=("v1",), max_attempts=1)["papers"][0]
+
+        self.assertEqual(calls, 2)
+        self.assertEqual(self.opener.open.call_count, calls)
+        self.assertEqual(self.requests, requests)
+        self.assertEqual(self.snapshot(pilot), before)
+        self.assertEqual(paper["discovery"]["action"], "cached")
+        self.assertEqual(paper["skipped"], ["v1"])
+        self.assertEqual(paper["source"]["v1"]["action"], "skipped")
+        self.assertEqual(paper["pending"], ["v2", "v3"])
+        self.assertEqual(paper["paper_status"], "partial")
+        for name in ("v2", "v3"):
+            self.assertEqual(self.manifest(pilot)["versions"][name]["status"], "pending")
+            self.assertFalse((self.paper_path(pilot) / name).exists())
+
+    def test_selection_uses_exact_names_and_supports_multiple_versions(self):
+        self.outcomes = [xml_response(versions=3), Response(TEX)]
+        first = self.run_pairs(versions=["v3"])["papers"][0]
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.assertEqual(self.requests[-1], arxiv_source.SOURCE_URL + PAIR[1] + "v3")
+        self.assertEqual(first["pending"], ["v1", "v2"])
+        self.assertFalse((self.paper_path() / "v1").exists())
+        self.assertFalse((self.paper_path() / "v2").exists())
+        completed = (self.paper_path() / "v3/main.tex").read_bytes()
+        self.outcomes = [Response(TEX)]
+
+        second = self.run_pairs(versions=("v3", "v1"))["papers"][0]
+
+        self.assertEqual(self.opener.open.call_count, 3)
+        self.assertEqual(self.requests[-1], arxiv_source.SOURCE_URL + PAIR[1] + "v1")
+        self.assertEqual(second["pending"], ["v2"])
+        self.assertEqual(second["skipped"], ["v3"])
+        self.assertEqual((self.paper_path() / "v3/main.tex").read_bytes(), completed)
+        self.assertFalse((self.paper_path() / "v2").exists())
+
+    def test_invalid_version_selections_fail_before_http_or_checkpoint_writes(self):
+        invalid = [
+            "", "v1", 1, True, {}, {"v1"}, (), [], iter(("v1",)),
+            (None,), ({},), (1,), ("v1", "v1"), ("v0",), ("v01",),
+            ("V1",), ("v-1",), ("v1 ",), ("v1\n",), ("v1/v2",),
+            ("../v1",), ("2502.09992v1",), ("v1", []),
+        ]
+        for versions in invalid:
+            with self.subTest(versions=versions):
+                with self.assertRaises(ValueError):
+                    self.run_pairs(versions=versions)
+                self.opener.open.assert_not_called()
+                self.assertFalse(self.root.exists())
+        self.seed(versions=3, completed=True)
+        before = self.snapshot()
+        with self.assertRaises(ValueError):
+            self.run_pairs(versions=("v1", "v0"))
+        self.assertEqual(self.snapshot(), before)
+        self.opener.open.assert_not_called()
+
+    def test_selected_undiscovered_version_blocks_source_and_keeps_checkpoint(self):
+        self.outcomes = [xml_response(versions=3)]
+        with patch.object(arxiv_source, "download_source", wraps=arxiv_source.download_source) as download:
+            first = self.run_pairs(versions=("v1", "v4"))["papers"][0]
+            download.assert_not_called()
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertEqual(first["blocked"]["v4"], "not_discovered")
+        self.assertEqual(first["errors"][0]["version"], "v4")
+        self.assertEqual(first["pending"], ["v1", "v2", "v3"])
+        self.assertEqual(set(self.manifest()["versions"]), {"v1", "v2", "v3"})
+        for name in ("v1", "v2", "v3", "v4"):
+            self.assertFalse((self.paper_path() / name).exists())
+        before = self.snapshot()
+
+        second = self.run_pairs(versions=("v4",))["papers"][0]
+
+        self.assertEqual(second["blocked"]["v4"], "not_discovered")
+        self.assertEqual(second["discovery"]["action"], "cached")
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_selected_v1_not_found_and_unresolved_never_call_downloader(self):
+        for status in ("not_found", "unresolved"):
+            with self.subTest(discovery=status):
+                self.root = Path(self.temp.name) / status
+                self.opener.open.reset_mock()
+                response = (Response(
+                    b'<feed xmlns="http://www.w3.org/2005/Atom" '
+                    b'xmlns:o="http://a9.com/-/spec/opensearch/1.1/">'
+                    b'<o:totalResults>0</o:totalResults></feed>', "application/atom+xml")
+                    if status == "not_found" else xml_response(versions=None))
+                self.outcomes = [response]
+                with patch.object(arxiv_source, "download_source",
+                                  wraps=arxiv_source.download_source) as download:
+                    paper = self.run_pairs(versions=("v1",))["papers"][0]
+                    download.assert_not_called()
+                self.assertEqual(self.opener.open.call_count, 1)
+                self.assertEqual(self.manifest()["versions"], {})
+                self.assertFalse((self.paper_path() / "v1").exists())
+                self.assertEqual(paper["references_status"], "not_attempted")
+                if status == "not_found":
+                    self.assertEqual(paper["paper_status"], "not_found")
+                else:
+                    self.assertEqual(paper["blocked"]["discovery"], "needs_verification")
+
+    def test_selected_v1_discovery_errors_use_one_transport_attempt(self):
+        for code, expected in ((None, "timeout"), (429, "rate_limited"),
+                               (503, "server_error"), (302, "http_error")):
+            with self.subTest(http_status=code):
+                self.root = Path(self.temp.name) / str(code)
+                self.opener.open.reset_mock()
+                failure = URLError(TimeoutError("fixture timeout")) if code is None else http_error(code)
+                if code == 302:
+                    failure.headers["Location"] = "https://arxiv.org/abs/" + PAIR[1]
+                self.outcomes = [failure]
+                with patch.object(arxiv_source, "download_source",
+                                  wraps=arxiv_source.download_source) as download:
+                    paper = self.run_pairs(versions=("v1",), max_attempts=1)["papers"][0]
+                    download.assert_not_called()
+                self.assertEqual(self.opener.open.call_count, 1)
+                self.assertEqual(paper["discovery"]["status"], expected)
+                self.assertEqual(paper["discovery"]["attempts"], 1)
+                self.assertEqual(self.manifest()["versions"], {})
+                self.assertEqual(self.outcomes, [])
+                self.assertFalse((self.paper_path() / "v1").exists())
+
+    def test_selected_v1_source_errors_do_not_retry_or_download_other_versions(self):
+        for code, expected in ((None, "timeout"), (429, "rate_limited"),
+                               (503, "server_error"), (302, "http_error")):
+            with self.subTest(http_status=code):
+                self.root = Path(self.temp.name) / str(code)
+                self.opener.open.reset_mock()
+                failure = URLError(TimeoutError("fixture timeout")) if code is None else http_error(code)
+                if code == 302:
+                    failure.headers["Location"] = "https://arxiv.org/src/" + PAIR[1] + "v1"
+                self.outcomes = [xml_response(versions=3), failure]
+
+                paper = self.run_pairs(versions=("v1",), max_attempts=1)["papers"][0]
+
+                self.assertEqual(self.opener.open.call_count, 2)
+                self.assertEqual(self.requests[-1], arxiv_source.SOURCE_URL + PAIR[1] + "v1")
+                self.assertEqual(paper["source"]["v1"]["status"], expected)
+                self.assertEqual(paper["source"]["v1"]["attempts"], 1)
+                self.assertEqual(paper["pending"], ["v2", "v3"])
+                self.assertEqual(paper["references_status"], "not_attempted")
+                self.assertNotIn(paper["paper_status"], {"complete", "complete_with_no_tex"})
+                self.assertEqual(self.outcomes, [])
+                for name in ("v1", "v2", "v3"):
+                    self.assertFalse((self.paper_path() / name).exists())
+
+    def test_selected_v1_corrupt_checkpoints_are_preserved_without_http(self):
+        for corruption in ("invalid_json", "null_provenance"):
+            with self.subTest(checkpoint=corruption):
+                self.root = Path(self.temp.name) / corruption
+                store = self.seed(versions=3, completed=True)
+                if corruption == "invalid_json":
+                    (self.paper_path() / "manifest.json").write_bytes(b"{invalid")
+                else:
+                    metadata = store.read_metadata(*PAIR)
+                    metadata["provenance"]["arxiv"] = None
+                    store.save_metadata(*PAIR, metadata)
+                before = self.snapshot()
+
+                paper = self.run_pairs(versions=("v1",))["papers"][0]
+
+                self.assertIn("paper", paper["blocked"])
+                self.assertEqual(self.snapshot(), before)
+                self.opener.open.assert_not_called()
+
+    def test_selected_v1_checksum_damage_blocks_without_other_downloads(self):
+        self.seed(versions=3, completed=True)
+        source = self.paper_path() / "v1/main.tex"
+        source.write_bytes(TEX + b"fixture corruption")
+        before = source.read_bytes()
+
+        paper = self.run_pairs(versions=("v1",))["papers"][0]
+
+        self.assertEqual(paper["blocked"]["v1"], "validation_failed")
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(paper["pending"], ["v2", "v3"])
+        self.assertEqual(self.manifest()["versions"]["v1"]["status"], "validation_failed")
+        self.opener.open.assert_not_called()
+        for name in ("v2", "v3"):
+            self.assertFalse((self.paper_path() / name).exists())
+
+    def test_selected_v1_orphan_is_not_overwritten_or_downloaded_around(self):
+        self.seed(versions=3)
+        orphan = self.paper_path() / "v1/main.tex"
+        orphan.parent.mkdir()
+        orphan.write_bytes(b"orphan fixture")
+        before = self.snapshot()
+
+        paper = self.run_pairs(versions=("v1",))["papers"][0]
+
+        self.assertEqual(paper["blocked"]["v1"], "output_exists")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(paper["pending"], ["v1", "v2", "v3"])
+        self.opener.open.assert_not_called()
+        for name in ("v2", "v3"):
+            self.assertFalse((self.paper_path() / name).exists())
+
+    def test_versions_none_or_omitted_keeps_processing_all_versions(self):
+        for mode, options in (("omitted", {}), ("explicit_none", {"versions": None})):
+            with self.subTest(selection=mode):
+                self.root = Path(self.temp.name) / mode
+                self.opener.open.reset_mock()
+                self.outcomes = [xml_response(versions=3)] + [Response(TEX) for _ in range(3)]
+
+                paper = self.run_pairs(**options)["papers"][0]
+
+                self.assertEqual(self.opener.open.call_count, 4)
+                self.assertEqual(paper["pending"], [])
+                self.assertEqual(set(paper["source"]), {"v1", "v2", "v3"})
+                for name, record in self.manifest()["versions"].items():
+                    self.assertEqual(record["status"], "success")
+                    self.assertTrue((self.paper_path() / name / "main.tex").exists())
+
+    def test_selected_no_tex_is_terminal_and_resume_does_not_advance(self):
+        self.outcomes = [xml_response(versions=3), Response(b"%PDF-1.7\nfixture")]
+
+        first = self.run_pairs(versions=("v1",))["papers"][0]
+
+        self.assertEqual(first["source"]["v1"]["status"], "no_tex_source")
+        self.assertEqual(first["pending"], ["v2", "v3"])
+        self.assertFalse((self.paper_path() / "v1").exists())
+        before = self.snapshot()
+        second = self.run_pairs(versions=("v1",))["papers"][0]
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.assertEqual(second["skipped"], ["v1"])
+        self.assertEqual(second["pending"], ["v2", "v3"])
+        self.assertEqual(second["references_status"], "not_attempted")
+        self.assertEqual(second["paper_status"], "partial")
+        self.assertEqual(self.snapshot(), before)
+
+    def test_selection_preserves_existing_unselected_success_and_error_states(self):
+        store = self.seed(versions=3, completed=True)
+        source = self.paper_path() / "v1/main.tex"
+        before = source.read_bytes()
+        store.begin_version(*PAIR, "v2")
+        store.record_source_result(dict(
+            mssv=PAIR[0], arxiv_id=PAIR[1], versioned_id=PAIR[1] + "v2",
+            status="timeout", files=[], error="fixture timeout", attempts=1,
+        ))
+        previous_v2 = self.manifest()["versions"]["v2"]
+        self.outcomes = [Response(TEX)]
+
+        paper = self.run_pairs(versions=("v3",))["papers"][0]
+
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertEqual(self.requests, [arxiv_source.SOURCE_URL + PAIR[1] + "v3"])
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(self.manifest()["versions"]["v1"]["status"], "success")
+        self.assertEqual(self.manifest()["versions"]["v2"], previous_v2)
+        self.assertEqual(paper["source"]["v3"]["status"], "success")
+        self.assertFalse((self.paper_path() / "v2").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,7 @@ hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus
 ## Gọi từ Python
 
 `run_selected(pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-user_agent=arxiv_client.USER_AGENT)` trả dictionary summary.
+user_agent=arxiv_client.USER_AGENT, versions=None)` trả dictionary summary.
 
 Import module không gửi request hoặc ghi output. **Gọi hàm sẽ dùng HTTP client
 thật nếu không có fake HTTP.** Ví dụ dưới đây chỉ dùng sau khi được duyệt pilot,
@@ -32,23 +32,55 @@ không phải lệnh kiểm thử offline:
 from src.pipeline import run_selected
 
 summary = run_selected(
-    [("24120232", "2502.08235")],
-    "data/pipeline-pilot-01/corpus",
+    [("24120232", "2502.09992")],
+    "data/pilot-2502-09992-v1/corpus",
     run_id="pilot-01",
     timeout=15,
     max_attempts=1,
+    versions=("v1",),
 )
 ```
 
 Cặp trên thuộc assigned range, chưa khẳng định ID resolve được hay có TeX.
 Mỗi ID có thể có nhiều versions: trước pilot phải duyệt số request, dung lượng,
-đích lưu và điều kiện dừng. V1 chưa có ngân sách request/version hoặc CLI.
+đích lưu và điều kiện dừng. Chọn corpus root mới, không dùng chung dữ liệu cũ;
+giữ lại đường dẫn đó khi kiểm tra resume. V1 chưa có ngân sách request tổng quát hoặc CLI.
 Không chạy ví dụ để thay thế kiểm thử offline.
 
 `pairs` là list/tuple các cặp `(MSSV, base_arxiv_id)`, không nhận generator.
 Toàn bộ input, ownership, ID trùng và HTTP options được kiểm tra trước mọi HTTP
 hoặc ghi checkpoint. ID trùng bị từ chối; list rỗng không tạo output.
 Storage dùng config mặc định của repository; chưa hỗ trợ config riêng cho pipeline.
+
+## Chọn version và giới hạn pilot
+
+`versions=None` (mặc định) giữ hành vi xử lý mọi version. Có thể truyền list/tuple
+không rỗng, gồm các tên duy nhất theo dạng `v1`, `v2`...; không nhận string đơn,
+tên có số 0 ở đầu, đường dẫn hoặc tên trùng. Input sai gây `ValueError` trước
+HTTP hoặc ghi checkpoint.
+
+Pipeline lọc theo tên version chính xác trước `begin_version()`, không lấy phần
+tử đầu của retry. Metadata/manifest vẫn giữ toàn bộ versions discovery xác nhận.
+Các version chưa được chọn vẫn pending nếu chưa xử lý; trạng thái có sẵn được
+giữ theo cơ chế recovery/validation của Storage. Resume vẫn kiểm tra toàn bộ
+checkpoint và source, kể cả version ngoài lựa chọn.
+
+Discovery unresolved không được suy thành v1. Nếu một tên được chọn chưa có trong
+danh sách resolved, summary báo `blocked[version]="not_discovered"` và không tải
+source nào của paper đó trong lượt này. Không thêm version hoặc trạng thái mới
+vào manifest để đáp ứng lựa chọn không được xác nhận.
+
+Với đúng một paper, `versions=("v1",)`, `max_attempts=1`, lần chạy mới có tối đa
+**1 discovery + 1 source = 2 HTTP requests**, tính cả attempts/retry. HTTP client
+không tự theo redirect và pipeline không có vòng retry ngoài. Đây là giới hạn
+của cấu hình cụ thể này; thêm paper/version hoặc tăng attempts sẽ thay đổi giới hạn.
+Không cộng attempts của record cached/skipped thành request mới.
+
+Chạy lại cùng corpus root, run ID và lựa chọn v1 hợp lệ dùng discovery cached,
+skip v1 và không tải v2: **0 requests mới**. Không tự chạy lại sau lỗi để vượt
+ngân sách pilot; cần duyệt riêng lần thử mạng tiếp theo. Các tests xác minh số
+lần gọi fake HTTP opener, không gọi API thật. Ví dụ trên chưa phải bằng chứng
+ID tồn tại, có TeX hoặc pilot đã thành công.
 
 ## Luồng xử lý và resume
 
