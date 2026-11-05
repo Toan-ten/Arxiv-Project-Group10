@@ -408,8 +408,18 @@ class PipelineTests(unittest.TestCase):
         self.outcomes = [xml_response(), http_error(429, 15),
                          xml_response(OTHER[1]), Response(TEX)]
         report = self.run_pairs([PAIR, OTHER])
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["stop_reason"]["http_status"], 429)
+        self.assertEqual(len(report["papers"]), 1)
         self.assertEqual(report["papers"][0]["source"]["v1"]["status"], "rate_limited")
-        self.assertEqual(report["papers"][1]["source"]["v1"]["status"], "success")
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.assertFalse(self.paper_path(OTHER).exists())
+        self.assertEqual(self.starts, [0, 3])
+        # A separate, explicitly initiated run still honors the shared cooldown.
+        continued = self.run_pairs([OTHER])
+        self.assertFalse(continued["stopped"])
+        self.assertEqual(continued["papers"][0]["source"]["v1"]["status"], "success")
+        self.assertEqual(self.opener.open.call_count, 4)
         self.assertEqual(self.starts, [0, 3, 18, 21])
 
     def test_interrupt_during_download_leaves_intent_for_resume(self):
@@ -792,8 +802,9 @@ class PipelineTests(unittest.TestCase):
                     self.assertEqual(paper["blocked"]["discovery"], "needs_verification")
 
     def test_selected_v1_discovery_errors_use_one_transport_attempt(self):
-        for code, expected in ((None, "timeout"), (429, "rate_limited"),
-                               (503, "server_error"), (302, "http_error")):
+        for code, expected in ((None, "timeout"), (403, "http_error"),
+                               (429, "rate_limited"), (503, "server_error"),
+                               (302, "http_error")):
             with self.subTest(http_status=code):
                 self.root = Path(self.temp.name) / str(code)
                 self.opener.open.reset_mock()
@@ -803,8 +814,13 @@ class PipelineTests(unittest.TestCase):
                 self.outcomes = [failure]
                 with patch.object(arxiv_source, "download_source",
                                   wraps=arxiv_source.download_source) as download:
-                    paper = self.run_pairs(versions=("v1",), max_attempts=1)["papers"][0]
+                    report = self.run_pairs(versions=("v1",), max_attempts=1)
+                    paper = report["papers"][0]
                     download.assert_not_called()
+                self.assertEqual(report["stopped"], code in (403, 429))
+                if code in (403, 429):
+                    self.assertEqual(report["stop_reason"]["http_status"], code)
+                    self.assertEqual(report["stop_reason"]["stage"], "discovery")
                 self.assertEqual(self.opener.open.call_count, 1)
                 self.assertEqual(paper["discovery"]["status"], expected)
                 self.assertEqual(paper["discovery"]["attempts"], 1)
@@ -813,8 +829,9 @@ class PipelineTests(unittest.TestCase):
                 self.assertFalse((self.paper_path() / "v1").exists())
 
     def test_selected_v1_source_errors_do_not_retry_or_download_other_versions(self):
-        for code, expected in ((None, "timeout"), (429, "rate_limited"),
-                               (503, "server_error"), (302, "http_error")):
+        for code, expected in ((None, "timeout"), (403, "http_error"),
+                               (429, "rate_limited"), (503, "server_error"),
+                               (302, "http_error")):
             with self.subTest(http_status=code):
                 self.root = Path(self.temp.name) / str(code)
                 self.opener.open.reset_mock()
@@ -823,8 +840,13 @@ class PipelineTests(unittest.TestCase):
                     failure.headers["Location"] = "https://arxiv.org/src/" + PAIR[1] + "v1"
                 self.outcomes = [xml_response(versions=3), failure]
 
-                paper = self.run_pairs(versions=("v1",), max_attempts=1)["papers"][0]
+                report = self.run_pairs(versions=("v1",), max_attempts=1)
+                paper = report["papers"][0]
 
+                self.assertEqual(report["stopped"], code in (403, 429))
+                if code in (403, 429):
+                    self.assertEqual(report["stop_reason"]["http_status"], code)
+                    self.assertEqual(report["stop_reason"]["stage"], "source")
                 self.assertEqual(self.opener.open.call_count, 2)
                 self.assertEqual(self.requests[-1], arxiv_source.SOURCE_URL + PAIR[1] + "v1")
                 self.assertEqual(paper["source"]["v1"]["status"], expected)
@@ -941,6 +963,278 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(self.manifest()["versions"]["v2"], previous_v2)
         self.assertEqual(paper["source"]["v3"]["status"], "success")
         self.assertFalse((self.paper_path() / "v2").exists())
+
+    def test_second_discovery_403_stops_before_third_paper_after_checkpoint(self):
+        self.outcomes = [xml_response(), Response(TEX), http_error(403),
+                         xml_response(THIRD[1]), Response(TEX)]
+
+        report = self.run_pairs([PAIR, OTHER, THIRD], max_attempts=1)
+
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["stop_reason"], dict(
+            type="http_policy", stage="discovery", http_status=403,
+            mssv=OTHER[0], arxiv_id=OTHER[1], version=None, checkpoint_saved=True,
+        ))
+        self.assertEqual(len(report["papers"]), 2)
+        self.assertEqual(self.opener.open.call_count, 3)
+        self.assertEqual(len(self.outcomes), 2)
+        self.assertEqual(self.starts, [0, 3, 6])
+        self.assertFalse(self.paper_path(THIRD).exists())
+        middle = report["papers"][1]
+        self.assertEqual(middle["discovery"]["status"], "http_error")
+        self.assertEqual(middle["discovery"]["http_status"], 403)
+        self.assertEqual(middle["errors"][0]["type"], "http_error")
+        self.assertEqual(middle["source"], {})
+        self.assertEqual(middle["paper_status"], "failed")
+        self.assertEqual(self.manifest(OTHER)["discovery_status"], "http_error")
+        metadata = self.store().read_metadata(*OTHER)
+        self.assertEqual(metadata["status"], "failed")
+        self.assertEqual(metadata["provenance"]["arxiv"]["snapshot"]["http_status"], 403)
+        self.assertEqual(self.store().read_references(*OTHER)["status"], "not_attempted")
+        self.assertEqual((self.paper_path() / "v1/main.tex").read_bytes(), TEX)
+        self.assertTrue(self.store().should_skip_version(*PAIR, "v1"))
+        self.assertEqual(self.manifest()["versions"]["v1"]["file_checksums"]["main.tex"],
+                         hashlib.sha256(TEX).hexdigest())
+        self.assertEqual(report["papers"][0]["paper_status"], "partial")
+
+    def test_second_source_429_stops_before_next_version_and_third_paper(self):
+        self.outcomes = [
+            xml_response(), Response(TEX), xml_response(OTHER[1], versions=2),
+            http_error(429, 15), Response(TEX), xml_response(THIRD[1]), Response(TEX),
+        ]
+
+        report = self.run_pairs([PAIR, OTHER, THIRD], max_attempts=1)
+
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["stop_reason"], dict(
+            type="http_policy", stage="source", http_status=429,
+            mssv=OTHER[0], arxiv_id=OTHER[1], version="v1", checkpoint_saved=True,
+        ))
+        self.assertEqual(len(report["papers"]), 2)
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertEqual(len(self.outcomes), 3)
+        self.assertEqual(self.starts, [0, 3, 6, 9])
+        self.assertFalse(self.paper_path(THIRD).exists())
+        middle = report["papers"][1]
+        self.assertEqual(middle["source"]["v1"]["action"], "failed")
+        self.assertEqual(middle["source"]["v1"]["status"], "rate_limited")
+        self.assertEqual(middle["source"]["v1"]["http_status"], 429)
+        self.assertEqual(middle["source"]["v1"]["attempts"], 1)
+        self.assertEqual(middle["pending"], ["v2"])
+        manifest = self.manifest(OTHER)
+        self.assertEqual(manifest["versions"]["v1"]["status"], "rate_limited")
+        self.assertEqual(manifest["versions"]["v1"]["http_status"], 429)
+        self.assertIsNone(manifest["versions"]["v1"]["completed_at"])
+        self.assertEqual(manifest["versions"]["v2"]["status"], "pending")
+        self.assertEqual(manifest["versions"]["v2"]["attempts"], 0)
+        for name in ("v1", "v2"):
+            self.assertFalse((self.paper_path(OTHER) / name).exists())
+        self.assertEqual(middle["references_status"], "not_attempted")
+        self.assertEqual(middle["paper_status"], "partial")
+        self.assertEqual((self.paper_path() / "v1/main.tex").read_bytes(), TEX)
+        self.assertTrue(self.store().should_skip_version(*PAIR, "v1"))
+
+    def test_http_policy_stops_at_both_stages_with_default_or_selected_versions(self):
+        for stage in ("discovery", "source"):
+            for code in (403, 429):
+                for versions in (None, ("v1",)):
+                    with self.subTest(stage=stage, http_status=code, versions=versions):
+                        self.root = Path(self.temp.name) / (stage + str(code) + str(versions))
+                        self.opener.open.reset_mock()
+                        self.outcomes = ([http_error(code)] if stage == "discovery" else
+                                         [xml_response(versions=3), http_error(code)])
+                        self.outcomes.extend([xml_response(OTHER[1]), Response(TEX)])
+
+                        report = self.run_pairs([PAIR, OTHER], versions=versions, max_attempts=1)
+
+                        self.assertTrue(report["stopped"])
+                        self.assertEqual(report["stop_reason"]["stage"], stage)
+                        self.assertEqual(report["stop_reason"]["http_status"], code)
+                        self.assertEqual(report["stop_reason"]["arxiv_id"], PAIR[1])
+                        self.assertEqual(len(report["papers"]), 1)
+                        self.assertEqual(self.opener.open.call_count, 1 if stage == "discovery" else 2)
+                        self.assertEqual(len(self.outcomes), 2)
+                        self.assertFalse(self.paper_path(OTHER).exists())
+                        paper = report["papers"][0]
+                        self.assertEqual(paper["references_status"], "not_attempted")
+                        self.assertNotIn(paper["paper_status"], {"complete", "complete_with_no_tex"})
+                        if stage == "source":
+                            self.assertEqual(paper["pending"], ["v2", "v3"])
+                            self.assertEqual(self.manifest()["versions"]["v1"]["http_status"], code)
+                            for name in ("v2", "v3"):
+                                self.assertFalse((self.paper_path() / name).exists())
+
+    def test_not_found_and_404_continue_to_third_paper(self):
+        for failure in ("not_found", "discovery_404", "source_404"):
+            with self.subTest(second_paper=failure):
+                self.root = Path(self.temp.name) / failure
+                self.opener.open.reset_mock()
+                if failure == "not_found":
+                    middle = [Response(
+                        b'<feed xmlns="http://www.w3.org/2005/Atom" '
+                        b'xmlns:o="http://a9.com/-/spec/opensearch/1.1/">'
+                        b'<o:totalResults>0</o:totalResults></feed>', "application/atom+xml")]
+                elif failure == "discovery_404":
+                    middle = [http_error(404)]
+                else:
+                    middle = [xml_response(OTHER[1], versions=2), http_error(404), Response(TEX)]
+                expected_requests = 4 + len(middle)
+                self.outcomes = ([xml_response(), Response(TEX)] + middle +
+                                 [xml_response(THIRD[1]), Response(TEX)])
+
+                report = self.run_pairs([PAIR, OTHER, THIRD], max_attempts=1)
+
+                self.assertFalse(report["stopped"])
+                self.assertNotIn("stop_reason", report)
+                self.assertEqual(len(report["papers"]), 3)
+                self.assertEqual(self.opener.open.call_count, expected_requests)
+                self.assertEqual(report["papers"][2]["source"]["v1"]["status"], "success")
+                if failure == "not_found":
+                    self.assertEqual(report["papers"][1]["paper_status"], "not_found")
+                elif failure == "source_404":
+                    self.assertEqual(report["papers"][1]["source"]["v1"]["http_status"], 404)
+                    self.assertEqual(report["papers"][1]["source"]["v2"]["status"], "success")
+                else:
+                    self.assertEqual(report["papers"][1]["discovery"]["http_status"], 404)
+                self.assertEqual(self.outcomes, [])
+
+    def test_resume_after_policy_stop_skips_good_source_and_keeps_unselected_pending(self):
+        self.outcomes = [
+            xml_response(), Response(TEX), xml_response(OTHER[1], versions=2), http_error(429, 15),
+        ]
+        first = self.run_pairs([PAIR, OTHER, THIRD], versions=("v1",), max_attempts=1)
+        self.assertTrue(first["stopped"])
+        before = self.snapshot()
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.outcomes = [Response(TEX), xml_response(THIRD[1]), Response(TEX)]
+
+        # Explicit offline resume models a separately authorized later invocation.
+        second = self.run_pairs([PAIR, OTHER, THIRD], versions=("v1",), max_attempts=1)
+
+        self.assertFalse(second["stopped"])
+        self.assertNotIn("stop_reason", second)
+        self.assertEqual(self.opener.open.call_count, 7)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(second["papers"][0]["skipped"], ["v1"])
+        self.assertEqual(second["papers"][0]["discovery"]["action"], "cached")
+        self.assertEqual(second["papers"][1]["discovery"]["action"], "cached")
+        self.assertEqual(second["papers"][1]["source"]["v1"]["status"], "success")
+        self.assertEqual(second["papers"][1]["pending"], ["v2"])
+        self.assertEqual(second["papers"][2]["source"]["v1"]["status"], "success")
+        self.assertEqual(self.starts[4], 24)
+        self.assertFalse((self.paper_path(OTHER) / "v2").exists())
+        for paper in second["papers"]:
+            self.assertEqual(paper["references_status"], "not_attempted")
+            self.assertEqual(paper["paper_status"], "partial")
+
+    def test_checkpoint_write_failure_on_403_remains_a_fatal_pipeline_stopped(self):
+        self.seed(versions=1, completed=True)
+        before = self.snapshot()
+        self.outcomes = [http_error(403), xml_response(THIRD[1]), Response(TEX)]
+        original = storage._atomic_json
+        def disk_full(path, payload):
+            if (path.name == "manifest.json" and payload.get("arxiv_id") == OTHER[1]
+                    and payload.get("discovery_status") == "http_error"):
+                raise OSError("fixture cannot commit HTTP error")
+            return original(path, payload)
+        with patch.object(storage, "_atomic_json", side_effect=disk_full):
+            with self.assertRaises(PipelineStopped) as caught:
+                self.run_pairs([PAIR, OTHER, THIRD], max_attempts=1)
+
+        report = caught.exception.summary
+        self.assertTrue(report["stopped"])
+        self.assertNotIn("stop_reason", report)
+        self.assertEqual(report["papers"][1]["errors"][-1]["type"], "OSError")
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.paper_path(THIRD).exists())
+        self.assertEqual(self.manifest(OTHER)["discovery_status"], "not_attempted")
+        self.assertEqual(self.store().read_metadata(*OTHER)["provenance"]["arxiv"]["snapshot"]["http_status"], 403)
+
+    def test_intermediate_429_retry_success_is_not_visible_to_pipeline(self):
+        self.outcomes = [
+            xml_response(), http_error(429, 15), Response(TEX),
+            xml_response(OTHER[1]), Response(TEX),
+        ]
+
+        report = self.run_pairs([PAIR, OTHER], versions=("v1",), max_attempts=2)
+
+        self.assertFalse(report["stopped"])
+        self.assertNotIn("stop_reason", report)
+        self.assertEqual(len(report["papers"]), 2)
+        self.assertEqual(self.opener.open.call_count, 5)
+        self.assertEqual(report["papers"][0]["source"]["v1"]["http_status"], 200)
+        self.assertEqual(report["papers"][0]["source"]["v1"]["attempts"], 2)
+        self.assertEqual(report["papers"][1]["source"]["v1"]["status"], "success")
+        self.assertEqual(self.starts, [0, 3, 18, 21, 24])
+
+    def test_final_429_after_retries_stops_before_following_requests(self):
+        self.outcomes = ([xml_response(versions=2)] + [http_error(429) for _ in range(3)] +
+                         [Response(TEX), xml_response(OTHER[1]), Response(TEX)])
+
+        report = self.run_pairs([PAIR, OTHER], max_attempts=3)
+
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["stop_reason"]["http_status"], 429)
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertEqual(len(report["papers"]), 1)
+        self.assertEqual(report["papers"][0]["source"]["v1"]["attempts"], 3)
+        self.assertEqual(self.manifest()["versions"]["v1"]["status"], "rate_limited")
+        self.assertEqual(report["papers"][0]["pending"], ["v2"])
+        self.assertFalse((self.paper_path() / "v2").exists())
+        self.assertFalse(self.paper_path(OTHER).exists())
+        self.assertEqual(len(self.outcomes), 3)
+
+    def test_cached_old_rate_limit_does_not_stop_a_selected_valid_version(self):
+        store = self.seed(versions=2, completed=True)
+        store.begin_version(*PAIR, "v2")
+        store.record_source_result(dict(
+            mssv=PAIR[0], arxiv_id=PAIR[1], versioned_id=PAIR[1] + "v2",
+            status="rate_limited", http_status=429, attempts=1, files=[], error="old fixture 429",
+        ))
+        before = self.snapshot()
+
+        report = self.run_pairs(versions=("v1",), max_attempts=1)
+
+        self.assertFalse(report["stopped"])
+        self.assertNotIn("stop_reason", report)
+        self.assertEqual(report["papers"][0]["skipped"], ["v1"])
+        self.assertEqual(self.snapshot(), before)
+        self.opener.open.assert_not_called()
+
+    def test_storage_validation_failure_on_policy_results_stops_without_more_requests(self):
+        for stage, code in (("discovery", 403), ("source", 429)):
+            with self.subTest(stage=stage, http_status=code):
+                self.root = Path(self.temp.name) / stage
+                self.opener.open.reset_mock()
+                self.seed(versions=1, completed=True)
+                before = self.snapshot()
+                self.outcomes = ([http_error(code)] if stage == "discovery" else
+                                 [xml_response(OTHER[1], versions=2), http_error(code)])
+                self.outcomes.extend([xml_response(THIRD[1]), Response(TEX)])
+                method = "record_discovery" if stage == "discovery" else "record_source_result"
+                original = getattr(CorpusStorage, method)
+                rejected = {}
+                def reject(instance, result):
+                    if result["arxiv_id"] == OTHER[1] and result.get("http_status") == code:
+                        rejected["bytes"] = self.snapshot(OTHER)
+                        raise storage.StorageError("fixture rejected policy checkpoint")
+                    return original(instance, result)
+                with patch.object(CorpusStorage, method, new=reject):
+                    report = self.run_pairs([PAIR, OTHER, THIRD], max_attempts=1)
+
+                self.assertTrue(report["stopped"])
+                self.assertEqual(report["stop_reason"]["http_status"], code)
+                self.assertFalse(report["stop_reason"]["checkpoint_saved"])
+                self.assertEqual(report["papers"][1]["errors"][-1]["type"], "StorageError")
+                self.assertEqual(self.opener.open.call_count, 1 if stage == "discovery" else 2)
+                self.assertEqual(self.snapshot(OTHER), rejected["bytes"])
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse(self.paper_path(THIRD).exists())
+                if stage == "source":
+                    self.assertEqual(self.manifest(OTHER)["versions"]["v1"]["status"], "in_progress")
+                else:
+                    self.assertEqual(self.manifest(OTHER)["discovery_status"], "not_attempted")
 
 
 if __name__ == "__main__":

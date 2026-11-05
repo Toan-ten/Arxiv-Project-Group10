@@ -98,7 +98,9 @@ ID tồn tại, có TeX hoặc pilot đã thành công.
 6. Source hợp lệ được skip. File thiếu/checksum sai, orphan hoặc checkpoint hỏng
    được giữ để audit. Không xóa, tải đè hoặc tự công nhận `output_exists`.
 
-Một version lỗi không ngăn các version/paper khác tiến triển nếu còn an toàn.
+Một version lỗi thông thường không ngăn các version/paper khác tiến triển nếu còn
+an toàn. Kết quả HTTP 403/429 do client trả về sẽ dừng toàn bộ batch sau khi thử
+lưu kết quả qua Storage; không tải version hoặc paper tiếp theo.
 Mỗi version được gọi downloader tối đa một lần trong một lần chạy pipeline;
 retry bên trong HTTP client vẫn theo `max_attempts`, gồm lần thử đầu.
 Dùng chung pacing/lock, backoff và Retry-After của client hiện tại; không reset limiter.
@@ -106,7 +108,12 @@ Chỉ chạy một process/writer; chưa có khóa giữa nhiều process.
 
 ## Summary và lỗi
 
-Top-level có `run_id`, `papers`, `stopped`. Mỗi paper có:
+Top-level có `run_id`, `papers`, `stopped`. Khi dừng do HTTP 403/429, summary
+còn có `stop_reason` với `type="http_policy"`, `stage`, `http_status`,
+`mssv`, `arxiv_id`, `version` (null ở discovery), `checkpoint_saved`.
+Các paper đã xử lý và paper
+gây dừng vẫn có trong `papers`; paper chưa chạy không được khởi tạo thêm.
+Mỗi paper có:
 
 - `mssv`, `arxiv_id`, `paper_status`, `metadata_status`, `references_status`;
 - `discovery`: action queried/cached/not_attempted, status, version_status,
@@ -121,11 +128,31 @@ checkpoint pending; timeout không bị đổi thành chưa chạy.
 HTTP fields/attempts của record cached/skipped thuộc lần thu thập đã lưu,
 không phải request mới trong phiên hiện tại.
 
+Dừng theo chính sách HTTP trả summary bình thường với `stopped=True`, không ném
+`PipelineStopped`. Bình thường `checkpoint_saved=True`: kết quả và lỗi
+discovery/source được lưu trước khi dừng:
+403 giữ `http_error`, 429 giữ `rate_limited`; các version chưa tải vẫn pending.
+`not_found` hoặc HTTP 404 không tự dừng toàn batch, vẫn theo hành vi lỗi paper
+hiện tại. Source 404 không được đổi thành `not_found` hoặc `no_tex_source`.
+
 StorageError/IntegrityError được ghi vào summary và chặn paper/version liên quan.
 Lỗi I/O khi ghi JSON, downloader trả storage_error hoặc exception bất thường
 dừng run bằng `PipelineStopped`; đọc `exception.summary` để xem phần đã xử lý.
 KeyboardInterrupt được truyền ra, giữ checkpoint đã commit để lần sau resume.
-`stopped=False` chỉ nghĩa không có lỗi nghiêm trọng dừng run, không phải mọi paper thành công.
+`stopped=False` chỉ nghĩa không có chính sách/lỗi nghiêm trọng dừng run, không
+phải mọi paper thành công. Nếu Storage từ chối checkpoint 403/429 bằng
+StorageError, batch vẫn dừng và báo `checkpoint_saved=False` cùng lỗi storage;
+không tự sửa dữ liệu hoặc gửi request tiếp theo. Lỗi I/O khi ghi vẫn ném
+`PipelineStopped`; không báo một lần dừng HTTP đã lưu thành công.
+
+Chính sách xét HTTP status cuối cùng mà client trả về. Với `max_attempts=1`,
+không có request tiếp theo sau khi gặp 403/429. Với attempts lớn hơn 1, client
+vẫn có thể retry 429 trước khi trả kết quả; nếu retry thành công hoặc kết thúc
+bằng status khác, pipeline không biết 429 trung gian và có thể tiếp tục.
+Muốn dừng ở từng attempt cần thay đổi giao diện client ở bước sau. Pilot cần
+giữ `max_attempts=1`; không tự gọi lại pipeline sau khi bị dừng. Pacing và
+Retry-After trong cùng process được giữ nguyên, chưa có cooldown bền vững qua
+restart. Summary policy cũng chưa được ghi thành run log.
 
 Paper mới vẫn partial khi chỉ thu xong source: references giữ not_attempted,
 items rỗng và coverage chưa complete. Không gọi Semantic Scholar hoặc tạo references.

@@ -18,6 +18,18 @@ class PipelineStopped(RuntimeError):
         self.summary = summary
 
 
+class _HttpPolicyStop(Exception):
+    """Internal signal to stop the batch for a final 403/429 result."""
+
+    def __init__(self, paper, stage, http_status, version, *, checkpoint_saved=True):
+        self.reason = dict(
+            type="http_policy", stage=stage, http_status=http_status,
+            mssv=paper["mssv"], arxiv_id=paper["arxiv_id"], version=version,
+            checkpoint_saved=checkpoint_saved,
+        )
+        super().__init__(f"Batch stopped after HTTP {http_status} at {stage}")
+
+
 def _inputs(pairs, store, timeout, max_attempts, user_agent):
     if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
             or not math.isfinite(timeout) or timeout <= 0):
@@ -64,6 +76,11 @@ def _error(paper, stage, kind, message, version=None):
     ))
 
 
+def _stop_on_http(paper, stage, http_status, version=None):
+    if http_status in (403, 429):
+        raise _HttpPolicyStop(paper, stage, http_status, version)
+
+
 def _checkpoint(paper, manifest):
     paper["paper_status"] = manifest["status"]
     paper["metadata_status"] = manifest["metadata_status"]
@@ -88,6 +105,22 @@ def _cached_snapshot(store, paper):
     return snapshot
 
 
+def _record_http_result(paper, stage, result, save, version=None):
+    try:
+        manifest = save(result)
+    except StorageError as exc:
+        if result.get("http_status") in (403, 429):
+            # A rejected checkpoint must not allow another HTTP request either.
+            paper["blocked"][version or "paper"] = type(exc).__name__
+            _error(paper, "storage", type(exc).__name__, exc, version)
+            raise _HttpPolicyStop(
+                paper, stage, result["http_status"], version, checkpoint_saved=False,
+            ) from exc
+        raise
+    _checkpoint(paper, manifest)
+    return manifest
+
+
 def _run_paper(store, paper, options, versions):
     mssv, arxiv_id = paper["mssv"], paper["arxiv_id"]
     _checkpoint(paper, store.initialize_paper(mssv, arxiv_id))
@@ -104,7 +137,7 @@ def _run_paper(store, paper, options, versions):
     else:
         snapshot = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
         paper["discovery"]["action"] = "queried"
-        _checkpoint(paper, store.record_discovery(snapshot))
+        _record_http_result(paper, "discovery", snapshot, store.record_discovery)
     paper["discovery"].update(
         http_status=snapshot.get("http_status"), attempts=snapshot.get("attempts", 0),
         error=snapshot.get("error"),
@@ -115,6 +148,7 @@ def _run_paper(store, paper, options, versions):
         return True
     if status != "found":
         _error(paper, "discovery", status, snapshot.get("error") or status)
+        _stop_on_http(paper, "discovery", snapshot.get("http_status"))
         return True
     if paper["discovery"]["version_status"] != "resolved":
         paper["blocked"]["discovery"] = "needs_verification"
@@ -155,8 +189,9 @@ def _run_paper(store, paper, options, versions):
             _checkpoint(paper, store.read_manifest(mssv, arxiv_id))
             paper['source'][name]['action'] = 'in_progress'
             result = arxiv_source.download_source(mssv, arxiv_id + name, destination, **options)
-            manifest = store.record_source_result(result)
-            _checkpoint(paper, manifest)
+            manifest = _record_http_result(
+                paper, "source", result, store.record_source_result, name,
+            )
         except StorageError as exc:
             # Storage may already have persisted validation_failed.
             manifest = store.read_manifest(mssv, arxiv_id)
@@ -176,6 +211,7 @@ def _run_paper(store, paper, options, versions):
                 paper["blocked"][name] = state
             if state == "storage_error":
                 return False  # Disk/permissions failures can affect all papers.
+            _stop_on_http(paper, "source", result.get("http_status"), name)
     return True
 
 
@@ -194,6 +230,8 @@ def run_selected(
 
     The returned summary separates operations from contract states: skipped,
     blocked and failed actions never replace a stored version's actual status.
+    A final HTTP 403/429 result stops the batch after attempting persistence.
+    The summary has stopped=True and stop_reason; intermediate retries are client-owned.
     StorageError blocks one paper/version; fatal I/O or unexpected exceptions
     raise PipelineStopped with a partial summary. KeyboardInterrupt propagates.
     """
@@ -215,6 +253,9 @@ def run_selected(
             if not _run_paper(store, paper, options, versions):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
+        except _HttpPolicyStop as exc:
+            summary.update(stopped=True, stop_reason=exc.reason)
+            break
         except StorageError as exc:
             paper["blocked"]["paper"] = type(exc).__name__
             _error(paper, "checkpoint", type(exc).__name__, exc)
