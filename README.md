@@ -12,7 +12,11 @@ chưa có benchmark M1 thực nghiệm.
 
 ```text
 config/group10_id_ranges.json  Khoảng ID theo MSSV
+config/pilot_10.json          Bộ ID smoke test
+config/pilot_500.json         Bộ ID pilot/benchmark
+scripts/make_pilots.py        Sinh lại hai bộ pilot
 src/id_ranges.py              Đọc cấu hình, kiểm tra và sinh ID
+src/pilots.py                 Chọn pilot deterministic từ các range
 src/arxiv_discovery.py        Phân tích Atom XML và xác định version
 src/arxiv_client.py           HTTP client cho một ID
 src/arxiv_source.py           Tải source và trích xuất TeX/BibTeX an toàn
@@ -21,6 +25,7 @@ src/pipeline.py               Điều phối tuần tự các ID chỉ định v
 src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
 docs/                         Hướng dẫn module và contract M1
 tests/                        Unit tests offline cho các module
+tests/test_pilot_sets.py      Unit tests cho pilot sets
 ```
 
 ## Chạy module ID
@@ -50,6 +55,24 @@ thành viên, tổng **20.000 ID ứng viên**, không đồng nghĩa 20.000 pub
 hợp lệ. Folder key dùng cho lưu trữ; ID gốc vẫn được giữ khi gọi API.
 Xem [hướng dẫn module ID](docs/id_ranges.md).
 
+## Pilot sets
+
+Hai bộ ID dưới đây được chọn deterministic từ cấu hình gốc, dùng cho smoke
+test và benchmark; chúng **không thay thế** 20.000 ID ứng viên của full run.
+
+- `config/pilot_10.json`: 2 boundary ID mỗi range, cộng 2 midpoint.
+- `config/pilot_500.json`: 125 ID mỗi range, trải đều và gồm hai boundary.
+
+Sinh lại và kiểm tra:
+
+```powershell
+python -B scripts/make_pilots.py
+python -B -m unittest discover -s tests -p "test_pilot_sets.py" -v
+```
+
+Các danh sách chỉ chọn ID ứng viên, không xác nhận publication tồn tại và
+không tự chạy crawler. Kích thước 10/500 không phải ngân sách HTTP requests.
+
 ## Entry Discovery, HTTP Client và Source Downloader
 
 - [Entry Discovery](docs/arxiv_discovery.md): `parse_arxiv_response(xml, mssv, arxiv_id)`
@@ -69,6 +92,10 @@ giao diện, trạng thái lỗi, kiểm thử và phạm vi thử mạng ở b�
 `(MSSV, base_arxiv_id)`, kiểm tra ownership rồi nối discovery, download và Storage.
 Khi chạy lại, pipeline dùng checkpoint và bỏ qua source còn hợp lệ; không ghi đè
 source hỏng/orphan. References mới vẫn not_attempted, paper chưa được coi complete.
+
+`versions=None` xử lý mọi version đã xác minh; `versions=("v1",)` chỉ chọn v1
+nếu Discovery xác nhận phiên bản đó. HTTP 403/429 trả về sẽ dừng batch; cấu hình
+`max_attempts=1` không retry thêm sau lỗi.
 
 Kiểm thử riêng bằng fake HTTP, không gọi mạng thật:
 
