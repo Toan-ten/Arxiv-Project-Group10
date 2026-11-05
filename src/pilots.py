@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from .id_ranges import AssignedRange, format_arxiv_id
+from .id_ranges import AssignedRange, _ensure_no_overlaps, format_arxiv_id
 
 DEFAULT_SMOKE_PER_RANGE = 2
 DEFAULT_PILOT_PER_RANGE = 125
@@ -27,9 +27,17 @@ class PilotEntry:
     reason: str
 
 
+def _validate_ranges(members: Sequence[AssignedRange]) -> None:
+    if not members:
+        raise ValueError("at least one assigned range is required")
+    for member in members:
+        if member.start_month != member.end_month:
+            raise ValueError(f"{member.mssv}: pilot sets require a same-month range")
+    # Index keys retain every range, including repeated ownership values.
+    _ensure_no_overlaps({str(index): member for index, member in enumerate(members)})
+
+
 def _entry(member: AssignedRange, serial: int, reason: str) -> PilotEntry:
-    if member.start_month != member.end_month:
-        raise ValueError(f"{member.mssv}: pilot sets require a same-month range")
     return PilotEntry(
         arxiv_id=format_arxiv_id(member.start_month, serial),
         mssv=member.mssv,
@@ -53,8 +61,7 @@ def _dedupe(entries: list[PilotEntry]) -> list[PilotEntry]:
 def build_smoke_set(members: Sequence[AssignedRange]) -> list[PilotEntry]:
     """Return two boundary IDs per range, plus midpoints for the first two ranges."""
 
-    if not members:
-        raise ValueError("at least one assigned range is required")
+    _validate_ranges(members)
 
     entries: list[PilotEntry] = []
     for member in members:
@@ -90,8 +97,7 @@ def build_pilot_set(
 ) -> list[PilotEntry]:
     """Return a deterministic, evenly spread set including both boundaries."""
 
-    if not members:
-        raise ValueError("at least one assigned range is required")
+    _validate_ranges(members)
 
     entries: list[PilotEntry] = []
     for member in members:
