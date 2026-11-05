@@ -22,7 +22,7 @@ hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus
 ## Gọi từ Python
 
 `run_selected(pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-user_agent=arxiv_client.USER_AGENT, versions=None)` trả dictionary summary.
+user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None)` trả dictionary summary.
 
 Import module không gửi request hoặc ghi output. **Gọi hàm sẽ dùng HTTP client
 thật nếu không có fake HTTP.** Ví dụ dưới đây chỉ dùng sau khi được duyệt pilot,
@@ -158,11 +158,20 @@ Paper mới vẫn partial khi chỉ thu xong source: references giữ not_attemp
 items rỗng và coverage chưa complete. Không gọi Semantic Scholar hoặc tạo references.
 Metadata/references đã có được giữ nguyên; paper complete từ trước có thể được skip.
 
-V1 chưa có run manifest/log lịch sử HTTP attempts bền vững, request budget,
-Semantic Scholar, đầy đủ ngày revision, CLI hoặc benchmark M1.
-Summary được trả trong bộ nhớ; tiến độ bền vững nằm trong checkpoint từng paper.
+Pipeline chưa có log từng HTTP attempt, request budget, Semantic Scholar,
+đầy đủ ngày revision, CLI hoặc benchmark M1. Summary được trả trong bộ nhớ;
+checkpoint từng paper do Storage quản lý. [Batch Runner](batch.md) bổ sung
+run logs và lịch sử attempt qua progress callback.
 Benchmark foundation không đọc summary để xác định corpus success; không dùng
 dummy benchmark hoặc fixtures làm kết quả corpus thật.
 
 Nguồn quy định: [contract v2](m1_contract.md), [Storage](storage.md),
 [HTTP client](arxiv_client.md), [Source Downloader](arxiv_source.md).
+
+## Progress callback
+
+`on_progress(event, summary_copy)` nhận `paper_started` trước xử lý và
+`paper_finished` sau mỗi paper, kể cả khi dừng 403/429. Snapshot là bản sao độc lập.
+Lỗi callback truyền ra ngay, không chuyển sang HTTP tiếp theo. Lỗi nghiêm trọng
+hoặc KeyboardInterrupt có thể không có callback kết thúc; bên gọi phải ghi trạng thái
+cuối từ exception. [Batch Runner](batch.md) dùng callback để lưu tiến độ atomic.

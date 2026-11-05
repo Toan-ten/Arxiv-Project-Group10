@@ -1236,6 +1236,47 @@ class PipelineTests(unittest.TestCase):
                 else:
                     self.assertEqual(self.manifest(OTHER)["discovery_status"], "not_attempted")
 
+    def test_progress_hook_gets_isolated_snapshots_in_paper_order(self):
+        events = []
+        def progress(event, summary):
+            events.append((event, len(summary["papers"])))
+            summary["papers"].clear()
+        self.outcomes = [xml_response(), Response(TEX), xml_response(OTHER[1]), Response(TEX)]
+        result = self.run_pairs([PAIR, OTHER], on_progress=progress)
+        self.assertEqual(len(result["papers"]), 2)
+        self.assertEqual(events, [("paper_started", 1), ("paper_finished", 1),
+                                  ("paper_started", 2), ("paper_finished", 2)])
+
+    def test_progress_hook_failure_is_fatal_even_for_storage_error(self):
+        for event_to_fail in ("paper_started", "paper_finished"):
+            with self.subTest(event=event_to_fail):
+                self.root = Path(self.temp.name) / event_to_fail
+                self.opener.open.reset_mock()
+                self.outcomes = [xml_response(), Response(TEX)]
+                def progress(event, summary):
+                    if event == event_to_fail:
+                        raise storage.StorageError("fixture log failure")
+                with self.assertRaises(storage.StorageError):
+                    self.run_pairs([PAIR, OTHER], on_progress=progress)
+                self.assertEqual(self.opener.open.call_count, 0 if event_to_fail == "paper_started" else 2)
+                self.assertFalse(self.paper_path(OTHER).exists())
+
+    def test_progress_hook_observes_policy_stop_before_return(self):
+        events = []
+        self.outcomes = [http_error(429)]
+        result = self.run_pairs([PAIR, OTHER], on_progress=lambda event, summary: events.append((event, summary)))
+        self.assertTrue(result["stopped"])
+        self.assertEqual([event for event, summary in events], ["paper_started", "paper_finished"])
+        self.assertTrue(events[-1][1]["stopped"])
+        self.assertEqual(events[-1][1]["stop_reason"]["http_status"], 429)
+        self.assertEqual(self.opener.open.call_count, 1)
+
+    def test_invalid_progress_hook_fails_before_io(self):
+        with self.assertRaises(ValueError):
+            self.run_pairs(on_progress=42)
+        self.opener.open.assert_not_called()
+        self.assertFalse(self.root.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

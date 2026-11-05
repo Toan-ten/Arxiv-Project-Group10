@@ -3,6 +3,7 @@
 No requests or output are produced on import. Calls use the existing HTTP
 client; offline callers/tests must provide fake HTTP. Single writer only.
 """
+import copy
 import math
 import re
 
@@ -217,7 +218,7 @@ def _run_paper(store, paper, options, versions):
 
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-    user_agent=arxiv_client.USER_AGENT, versions=None,
+    user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
@@ -234,7 +235,11 @@ def run_selected(
     The summary has stopped=True and stop_reason; intermediate retries are client-owned.
     StorageError blocks one paper/version; fatal I/O or unexpected exceptions
     raise PipelineStopped with a partial summary. KeyboardInterrupt propagates.
+    on_progress(event, summary_copy) runs before/after each paper. Callback
+    exceptions propagate immediately and prevent the next HTTP operation.
     """
+    if on_progress is not None and not callable(on_progress):
+        raise ValueError("on_progress must be callable or None")
     versions = _version_selection(versions)
     store = CorpusStorage(corpus_root, run_id=run_id)
     selected = _inputs(pairs, store, timeout, max_attempts, user_agent)
@@ -249,13 +254,14 @@ def run_selected(
             source={}, skipped=[], pending=[], blocked={}, errors=[],
         )
         summary["papers"].append(paper)
+        if on_progress is not None:
+            on_progress("paper_started", copy.deepcopy(summary))
         try:
             if not _run_paper(store, paper, options, versions):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
         except _HttpPolicyStop as exc:
             summary.update(stopped=True, stop_reason=exc.reason)
-            break
         except StorageError as exc:
             paper["blocked"]["paper"] = type(exc).__name__
             _error(paper, "checkpoint", type(exc).__name__, exc)
@@ -266,4 +272,8 @@ def run_selected(
             stage = "storage" if isinstance(exc, OSError) else "pipeline"
             _error(paper, stage, type(exc).__name__, exc)
             raise PipelineStopped(str(exc), summary) from exc
+        if on_progress is not None:
+            on_progress("paper_finished", copy.deepcopy(summary))
+        if summary["stopped"]:
+            break
     return summary
