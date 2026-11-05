@@ -129,6 +129,15 @@ trung bình mỗi paper và discovery.
 Entry point `python -m src.benchmark` hiện chạy dummy crawler, không phải
 benchmark M1 thực nghiệm trên Colab CPU-only.
 
+## Benchmark Adapter v1
+
+`src.benchmark_runner.run_benchmark()` đo một invocation Batch bằng foundation
+hiện có rồi kiểm chứng corpus theo Storage/checksum. `aggregate_batch()` chỉ đọc
+logs và dữ liệu để tổng hợp nhiều attempts, không đếm trùng paper/version.
+Trạng thái thực thi, batch finished/stopped, độ phủ source và publication complete
+được trình bày riêng; references chưa thu thập vẫn là dữ liệu chưa biết.
+Xem [API, schema report, phạm vi đo và giới hạn](docs/benchmark_runner.md).
+
 ## Chạy toàn bộ unit tests
 
 Từ thư mục gốc repository:
