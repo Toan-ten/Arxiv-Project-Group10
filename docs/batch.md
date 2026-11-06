@@ -11,7 +11,7 @@ run_batch(
     pairs, corpus_root, *,
     batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None,
 )
 ```
 
@@ -26,6 +26,10 @@ thay thế cho not_found. Giới hạn này là số ID, không phải request b
 `versions`, timeout và attempts được chuyển vào Pipeline. Giữ nguyên limiter
 dùng chung, retry hữu hạn, version selection và chính sách 403/429. Mặc định của
 Batch Runner là `max_attempts=1`; Pipeline gọi trực tiếp vẫn giữ mặc định cũ.
+
+`s2_config=None` tắt S2; dictionary bật và được lưu trong run definition.
+Đổi cấu hình hoặc bật S2 trên batch cũ cần batch_id mới. Logs arXiv-only vẫn đọc
+được. Xem [S2 integration](s2_integration.md); giữ hai progress callbacks hiện có.
 
 ## Log bền vững
 
@@ -109,8 +113,8 @@ RAM/disk peak, số bytes/files hoặc toàn bộ metrics M1 trong module này.
 Các lần thử giả lập trong tests không phải benchmark crawler thật.
 
 finished chỉ nghĩa Pipeline đã xử lý hết danh sách, có thể gồm failed/blocked
-hoặc not_found. Không đồng nghĩa corpus/publication complete; references hiện
-vẫn not_attempted. Benchmark foundation được adapter dùng lại; xem
+hoặc not_found. Không đồng nghĩa corpus/publication complete; khi S2 tắt,
+references mới vẫn not_attempted. Benchmark foundation được adapter dùng lại; xem
 [Benchmark Adapter v1](benchmark_runner.md) để phân biệt execution, batch và độ phủ dữ liệu.
 
 ## Kiểm thử offline trên PowerShell

@@ -2,7 +2,8 @@
 
 `src.semantic_scholar` dùng thư viện chuẩn Python để gọi
 `POST /graph/v1/paper/batch` và lấy references qua endpoint phân trang.
-Hai API chưa nối Pipeline/Storage, không ghi corpus và không gọi mạng khi import. API được đối chiếu với
+Hai API không tự ghi corpus hoặc gọi mạng khi import. Pipeline/Storage có lớp
+[S2 integration opt-in](s2_integration.md). API được đối chiếu với
 [Issue #5](https://github.com/Toan-ten/Arxiv-Project-Group10/issues/5) và
 [tài liệu Semantic Scholar](https://api.semanticscholar.org/api-docs).
 

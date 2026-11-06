@@ -22,7 +22,7 @@ hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus
 ## Gọi từ Python
 
 `run_selected(pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None)` trả dictionary summary.
+user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None)` trả dictionary summary.
 
 Import module không gửi request hoặc ghi output. **Gọi hàm sẽ dùng HTTP client
 thật nếu không có fake HTTP.** Ví dụ dưới đây chỉ dùng sau khi được duyệt pilot,
@@ -154,11 +154,13 @@ giữ `max_attempts=1`; không tự gọi lại pipeline sau khi bị dừng. Pa
 Retry-After trong cùng process được giữ nguyên, chưa có cooldown bền vững qua
 restart. Summary policy cũng chưa được ghi thành run log.
 
-Paper mới vẫn partial khi chỉ thu xong source: references giữ not_attempted,
-items rỗng và coverage chưa complete. Không gọi Semantic Scholar hoặc tạo references.
+Khi S2 mặc định tắt, paper mới vẫn partial nếu chỉ thu xong source:
+references giữ not_attempted, items rỗng và coverage chưa complete.
 Metadata/references đã có được giữ nguyên; paper complete từ trước có thể được skip.
+Truyền `s2_config={...}` để bật metadata và references theo publication;
+xem [S2 integration](s2_integration.md) về cache, checkpoint và dừng 429.
 
-Pipeline chưa có log từng HTTP attempt, request budget, Semantic Scholar,
+Pipeline chưa có log từng HTTP attempt, request budget,
 đầy đủ ngày revision, CLI hoặc benchmark M1. Summary được trả trong bộ nhớ;
 checkpoint từng paper do Storage quản lý. [Batch Runner](batch.md) bổ sung
 run logs và lịch sử attempt qua progress callback.

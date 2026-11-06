@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from src import arxiv_client, pipeline
+from src import arxiv_client, pipeline, s2_integration
 from src.pilots import PilotEntry
 from src.storage import CorpusStorage, _atomic_json, _pairs
 
@@ -146,7 +146,7 @@ def _history(directory, batch_id, selection):
 def run_batch(
     pairs, corpus_root, *, batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
@@ -164,6 +164,7 @@ def run_batch(
     if type(resume) is not bool:
         raise BatchError("resume must be bool")
     chosen_versions = pipeline._version_selection(versions)
+    s2_config = s2_integration.configuration(s2_config)
     store = CorpusStorage(corpus_root)
     validated = pipeline._inputs(pairs, store, timeout, max_attempts, user_agent)
     selection = [list(pair) for pair in validated[:max_ids]]
@@ -180,6 +181,8 @@ def run_batch(
         versions=None if chosen_versions is None else sorted(chosen_versions, key=lambda v: int(v[1:])),
         timeout=float(timeout), max_attempts=max_attempts, user_agent=user_agent,
     )
+    if s2_config is not None:
+        definition["s2"] = s2_config
     if directory.exists():
         manifest = _read(manifest_path)
         if (manifest.get("schema_version") != 1 or manifest.get("batch_id") != batch_id or
@@ -248,6 +251,7 @@ def run_batch(
             selection, corpus, run_id=run_id, timeout=timeout,
             max_attempts=max_attempts, user_agent=user_agent,
             versions=definition["versions"], on_progress=progress,
+            **({"s2_config": s2_config} if s2_config is not None else {}),
         )
     except BatchLogError:
         raise  # Preserve the last durable snapshot; never continue/retry.

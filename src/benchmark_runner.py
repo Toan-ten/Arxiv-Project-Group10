@@ -14,7 +14,7 @@ import re
 import subprocess
 from uuid import uuid4
 
-from src import arxiv_client, batch, benchmark, pipeline
+from src import arxiv_client, batch, benchmark, pipeline, s2_integration
 from src.benchmark_metrics import sampling_config, timing_summary
 from src.storage import CorpusStorage, StorageError, TERMINAL, DISCOVERY_STATES, SOURCE_ERRORS, _atomic_json
 
@@ -49,18 +49,22 @@ def _fingerprint(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent):
+def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config=None):
     _require(type(max_ids) is int and max_ids > 0)
     chosen = pipeline._version_selection(versions)
     validated = pipeline._inputs(pairs, CorpusStorage(corpus), timeout, max_attempts, user_agent)
     _require(bool(validated))
-    return dict(
+    definition = dict(
         input_pairs=[list(pair) for pair in validated],
         selection=[list(pair) for pair in validated[:max_ids]],
         corpus_root=os.path.normcase(str(corpus)), max_ids=max_ids,
         versions=None if chosen is None else sorted(chosen, key=lambda v: int(v[1:])),
         timeout=float(timeout), max_attempts=max_attempts, user_agent=user_agent,
     )
+    s2_config = s2_integration.configuration(s2_config)
+    if s2_config is not None:
+        definition["s2"] = s2_config
+    return definition
 
 
 def _locations(corpus_root, log_root, batch_id):
@@ -78,7 +82,7 @@ def _load_evidence(directory, batch_id, corpus):
     expected = _definition(
         definition["input_pairs"], corpus, definition["max_ids"],
         definition["versions"], definition["timeout"], definition["max_attempts"],
-        definition["user_agent"],
+        definition["user_agent"], definition.get("s2"),
     )
     _require(definition == expected)
     history = batch._history(batch._safe(directory / "attempts"), batch_id, definition["selection"])
@@ -131,7 +135,8 @@ def _stop_reason(attempt):
         return None
     return dict(
         type="http_policy" if reason.get("type") == "http_policy" else "unclassified",
-        stage=reason.get("stage") if reason.get("stage") in ("source", "discovery") else None,
+        stage=reason.get("stage") if reason.get("stage") in (
+            "source", "discovery", "s2_metadata", "s2_references") else None,
         http_status=reason.get("http_status") if reason.get("http_status") in (403, 429) else None,
         arxiv_id=reason.get("arxiv_id") if any(
             row["arxiv_id"] == reason.get("arxiv_id") for row in attempt["papers"]) else None,
@@ -166,16 +171,22 @@ def _history_summary(history):
                     action = source["action"]
                     if action in {"downloaded", "skipped", "failed"}:
                         operations["source_" + action] += 1
+                for stage in ("s2_metadata", "s2_references"):
+                    action = result.get(stage, {}).get("action")
+                    if action in {"queried", "resumed", "cached", "blocked"}:
+                        key = stage + "_" + action
+                        operations[key] = operations.get(key, 0) + 1
             for error in result["errors"]:
                 errors.append(dict(
                     attempt_id=attempt["attempt_id"], arxiv_id=row["arxiv_id"],
                     mssv=row["mssv"],
                     stage=error["stage"] if error["stage"] in {
                         "source", "discovery", "storage", "checkpoint", "pipeline",
+                        "s2_metadata", "s2_references",
                     } else "unclassified",
                     type=error["type"] if error["type"] in SOURCE_ERRORS | DISCOVERY_STATES | {
                         "needs_verification", "not_discovered", "StorageError", "IntegrityError",
-                        "OSError", "RuntimeError", "ValueError", "PipelineStopped",
+                        "OSError", "RuntimeError", "ValueError", "PipelineStopped", "pagination_limit",
                     } else "unclassified",
                     version=error.get("version"),
                 ))  # Deliberately omit free-form messages and tracebacks.
@@ -203,10 +214,12 @@ def _history_summary(history):
     )
 
 
-def _paper(store, pair, batch_id, known_runs):
+def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
     mssv, identifier = pair
     manifest = store.read_manifest(*pair)
     metadata, references = store.read_metadata(*pair), store.read_references(*pair)
+    if s2_enabled:
+        s2_integration.validate_checkpoint(store, *pair, for_resume=False)
     # _sync validates dependencies but writes nothing. Compare its in-memory
     # result to refuse incomplete multi-JSON commits rather than repairing them.
     synced = copy.deepcopy(manifest)
@@ -389,6 +402,8 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
     }
     report["configuration"]["selection_fingerprint"] = _fingerprint(selection)
     report["configuration"]["user_agent"] = "not_recorded"
+    if "s2" in definition:
+        report["configuration"]["s2"] = copy.deepcopy(definition["s2"])
     store = CorpusStorage(corpus)
     papers = []
     runs = {a["run_id"] for a in history}
@@ -402,7 +417,7 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
             papers.append(dict(mssv=pair[0], arxiv_id=pair[1], checkpoint_status="not_created"))
             continue
         try:
-            paper = _paper(store, pair, batch_id, runs)
+            paper = _paper(store, pair, batch_id, runs, s2_enabled="s2" in definition)
         except (OSError, StorageError, BenchmarkError, KeyError, TypeError, AttributeError):
             report["issues"].append(dict(
                 scope="checkpoint", code="missing_inconsistent_or_invalid_source",
@@ -487,7 +502,7 @@ def run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
@@ -496,7 +511,7 @@ def run_benchmark(
     Historical attempts have logs only, not retroactively measured RAM/time.
     """
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
-    definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent)
+    definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config)
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
     sampling = sampling_config(corpus, sample_interval, disk_interval, disk_roots)
     previous = []
@@ -528,6 +543,8 @@ def run_benchmark(
         resources_path=str(destination / "resources.json"),
         previous_attempt_ids=[a["attempt_id"] for a in previous],
     )
+    if "s2" in definition:
+        intent["configuration"]["s2"] = copy.deepcopy(definition["s2"])
     _atomic_json(destination / "intent.json", intent)
     failure, measured_failure = [], None
 
@@ -537,6 +554,7 @@ def run_benchmark(
                 pairs, corpus, batch_id=batch_id, max_ids=max_ids, log_root=logs,
                 resume=resume, versions=versions, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
+                **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:
             failure.append(exc)

@@ -8,7 +8,7 @@ import math
 import re
 import time
 
-from src import arxiv_client, arxiv_source
+from src import arxiv_client, arxiv_source, semantic_scholar, s2_integration
 from src.storage import CorpusStorage, StorageError, TERMINAL, RETRYABLE
 
 
@@ -130,6 +130,8 @@ def _run_paper(store, paper, options, versions):
         paper["discovery"]["action"] = "cached"
         # Reject invalid cached evidence before resume can write recovery state.
         _cached_snapshot(store, paper)
+    if "s2_metadata" in paper:
+        s2_integration.validate_checkpoint(store, mssv, arxiv_id)
     plan = store.resume(mssv, arxiv_id)
     _checkpoint(paper, plan["manifest"])
 
@@ -224,15 +226,104 @@ def _run_paper(store, paper, options, versions):
     return True
 
 
+
+def _save_s2_result(store, paper, stage, result, build, save, *, references=False):
+    """Preserve the HTTP stop signal even when validation/persistence fails."""
+    http = s2_integration.http_status(result, references=references)
+    try:
+        manifest = save(build())
+    except Exception as exc:
+        if http in (403, 429):
+            paper["blocked"][stage] = "checkpoint_write_failed"
+            _error(paper, "storage", type(exc).__name__, "S2 checkpoint was not committed")
+            raise _HttpPolicyStop(
+                paper, stage, http, None, checkpoint_saved=False,
+            ) from None
+        raise
+    _checkpoint(paper, manifest)
+    _stop_on_http(paper, stage, http)
+
+
+def _run_s2(store, paper, config, limiter):
+    mssv, identifier = paper["mssv"], paper["arxiv_id"]
+    if paper["discovery"]["status"] != "found":
+        return
+    # Source corruption/orphans are audit conditions, not permission for more HTTP.
+    if any(row["action"] == "blocked" for row in paper["source"].values()):
+        for stage in ("s2_metadata", "s2_references"):
+            paper[stage]["action"] = "blocked"
+            paper["blocked"][stage] = "source_requires_audit"
+        return
+    metadata = store.read_metadata(mssv, identifier)
+    if s2_integration.metadata_cached(metadata):
+        paper["s2_metadata"].update(action="cached", status="found")
+    else:
+        intent = copy.deepcopy(metadata)
+        intent["status"] = "in_progress"
+        _checkpoint(paper, store.save_metadata(mssv, identifier, intent))
+        info = paper["s2_metadata"]
+        info.update(action="queried", status="in_progress")
+        options = {k: config[k] for k in ("timeout", "max_attempts", "max_response_bytes")}
+        result = semantic_scholar.fetch_metadata(
+            [identifier], limiter=limiter, require_arxiv_identity=True, **options,
+        )[0]
+        info.update(status=result["status"], http_status=result["http_status"],
+                    attempts=result["attempts"], error=result["error"])
+        if result["status"] not in {"found", "not_found"}:
+            _error(paper, "s2_metadata", result["status"], result["error"])
+        _save_s2_result(
+            store, paper, "s2_metadata", result,
+            lambda: s2_integration.metadata_snapshot(metadata, result),
+            lambda value: store.save_metadata(mssv, identifier, value),
+        )
+        if result["status"] == "invalid_response":
+            paper["blocked"]["s2_metadata"] = "invalid_response"
+            return
+
+    previous = store.read_references(mssv, identifier)
+    action = s2_integration.references_evidence(previous, identifier, for_resume=True)
+    info = paper["s2_references"]
+    if action == "cached":
+        info.update(action="cached", status="complete")
+        return
+    if action == "fresh" and previous["status"] != "not_found":
+        intent = copy.deepcopy(previous)
+        intent["status"] = "in_progress"
+        _checkpoint(paper, store.save_references(mssv, identifier, intent))
+    info.update(action=action if action == "resumed" else "queried", status="in_progress")
+    options = {k: config[k] for k in ("timeout", "max_attempts", "max_response_bytes", "max_pages")}
+    result = semantic_scholar.fetch_references(
+        identifier, limit=config["reference_limit"], limiter=limiter,
+        resume_from=previous if action == "resumed" else None, **options,
+    )
+    error = result.get("error")
+    info.update(status=result["status"], http_status=s2_integration.http_status(result, references=True),
+                attempts=(error or {}).get("attempts"), error=error)
+    if error:
+        _error(paper, "s2_references", error["type"], error["message"])
+    try:
+        _save_s2_result(
+            store, paper, "s2_references", result,
+            lambda: s2_integration.reference_result(previous, result),
+            lambda value: store.save_references(mssv, identifier, value), references=True,
+        )
+    except StorageError:
+        paper["blocked"]["s2_references"] = "invalid_reference_result"
+        _error(paper, "s2_references", "StorageError", "Reference result requires audit")
+        # Existing partial snapshots remain byte-for-byte intact on a conflict.
+        # Never roll back a result that Storage may already have saved.
+        raise
+
+
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-    user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None,
+    user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
     All selections/options are checked before any HTTP or checkpoint writes.
     Duplicate IDs are rejected. There is no range expansion, outer retry loop,
-    CLI, or Semantic Scholar stage. A resolved checkpoint is reused as-is.
+    or CLI. S2 is opt-in via s2_config (None disables it). A resolved checkpoint is reused as-is.
     versions=None processes all versions; a nonempty list/tuple of distinct vN
     names limits source requests while retaining the full discovery/checkpoint.
     An unconfirmed selected name blocks source requests for that paper.
@@ -251,6 +342,10 @@ def run_selected(
     versions = _version_selection(versions)
     store = CorpusStorage(corpus_root, run_id=run_id)
     selected = _inputs(pairs, store, timeout, max_attempts, user_agent)
+    s2_config = s2_integration.configuration(s2_config)
+    if s2_config is not None:
+        semantic_scholar._key_from_environment()  # Validate header before any I/O.
+    limiter = None if s2_config is None else semantic_scholar.RateLimiter(s2_config["min_interval"])
     options = dict(timeout=timeout, max_attempts=max_attempts, user_agent=user_agent)
     summary = dict(run_id=run_id, papers=[], stopped=False)
     for mssv, arxiv_id in selected:
@@ -262,6 +357,10 @@ def run_selected(
                            wall_seconds=None, timing_status="not_attempted"),
             source={}, skipped=[], pending=[], blocked={}, errors=[],
         )
+        if s2_config is not None:
+            for stage in ("s2_metadata", "s2_references"):
+                paper[stage] = dict(action="not_attempted", status=None, http_status=None,
+                                    attempts=None, error=None)
         summary["papers"].append(paper)
         if on_progress is not None:
             on_progress("paper_started", copy.deepcopy(summary))
@@ -269,6 +368,8 @@ def run_selected(
             if not _run_paper(store, paper, options, versions):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
+            if s2_config is not None:
+                _run_s2(store, paper, s2_config, limiter)
         except _HttpPolicyStop as exc:
             summary.update(stopped=True, stop_reason=exc.reason)
         except StorageError as exc:

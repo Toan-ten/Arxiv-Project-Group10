@@ -11,7 +11,7 @@ run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None,
 )
 aggregate_batch(corpus_root, *, batch_id, log_root)
 ```
@@ -242,3 +242,12 @@ contract v2, không đổi vì benchmark hoặc batch kết thúc.
 Fixtures dùng corpus/logs TEMP, fake HTTP/Pipeline và mock engine đo; có ca gọi
 foundation thật trên fixture nhỏ để kiểm tra semantics và lược bỏ exception.
 Đây là kiểm thử phần mềm, không phải số liệu benchmark crawler thực tế.
+
+## S2 opt-in
+
+`run_benchmark(..., s2_config={...})` truyền cùng cấu hình qua Batch/Pipeline và
+lưu cấu hình không có key trong report/run definition. Mặc định None giữ logs
+arXiv-only; đổi cấu hình cần batch_id mới. Xem [S2 integration](s2_integration.md).
+Wall time/resource sampling bao gồm S2; Discovery timing vẫn chỉ thuộc arXiv.
+History nhận diện stage s2_metadata/s2_references, nhưng không suy HTTP counts
+từ attempts hoặc số items. References chưa complete vẫn có count unknown.

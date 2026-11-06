@@ -5,7 +5,7 @@ Hiện có module quản lý ID, Entry Discovery, HTTP Client, Source Downloader
 và bộ đo benchmark nền. Các module crawler được kiểm thử offline, chưa thử
 tải source thật. Storage + Checkpoint/Resume giai đoạn 1 đã có và được kiểm thử offline.
 Pipeline v1 đã nối các module cho danh sách ID chỉ định và được kiểm thử offline.
-Chưa tích hợp Semantic Scholar hoặc pipeline crawl hàng loạt;
+Semantic Scholar đã nối Pipeline theo chế độ opt-in, mặc định tắt;
 chưa có benchmark M1 thực nghiệm.
 
 ## Cấu trúc repository
@@ -20,7 +20,8 @@ src/pilots.py                 Chọn pilot deterministic từ các range
 src/arxiv_discovery.py        Phân tích Atom XML và xác định version
 src/arxiv_client.py           HTTP client cho một ID
 src/arxiv_source.py           Tải source và trích xuất TeX/BibTeX an toàn
-src/semantic_scholar.py       Client metadata/references S2 độc lập, chưa nối Pipeline
+src/semantic_scholar.py       HTTP client metadata/references S2
+src/s2_integration.py         Identity, cache và chuyển dữ liệu S2 sang contract v2
 src/storage.py                Lưu JSON, kiểm tra source và checkpoint/resume offline
 src/pipeline.py               Điều phối tuần tự các ID chỉ định và resume
 src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
@@ -93,16 +94,18 @@ Client `src.semantic_scholar.fetch_metadata()` đã có để truy vấn metadat
 batch ID gốc, mặc định 100 và tối đa 500 ID/request. Có limiter S2 dùng chung,
 timeout, retry hữu hạn và dừng lời gọi khi hết attempts mà vẫn bị HTTP 429.
 `fetch_references()` lấy references phân trang và chuẩn hóa snapshot contract v2
-trong bộ nhớ, giữ cả references thiếu arXiv ID. Cả hai API chỉ được kiểm thử offline,
-chưa tích hợp Pipeline/Storage và không ghi corpus.
+trong bộ nhớ, giữ cả references thiếu arXiv ID. Client không ghi corpus;
+Pipeline có thể lưu qua Storage khi bật `s2_config`. Tích hợp mới được kiểm thử offline.
 Xem [API, cấu hình key/pacing và các trạng thái kết quả](docs/semantic_scholar.md).
+Xem [S2 integration: bật/tắt, cache, resume và batch stop](docs/s2_integration.md).
 
 ## Pipeline v1
 
 `run_selected(pairs, corpus_root, ...)` trong `src.pipeline` nhận danh sách
 `(MSSV, base_arxiv_id)`, kiểm tra ownership rồi nối discovery, download và Storage.
 Khi chạy lại, pipeline dùng checkpoint và bỏ qua source còn hợp lệ; không ghi đè
-source hỏng/orphan. References mới vẫn not_attempted, paper chưa được coi complete.
+source hỏng/orphan. Khi S2 tắt, references mới vẫn not_attempted. Khi bật,
+publication chỉ complete nếu đủ mọi stage và version theo contract v2.
 
 `versions=None` xử lý mọi version đã xác minh; `versions=("v1",)` chỉ chọn v1
 nếu Discovery xác nhận phiên bản đó. HTTP 403/429 trả về sẽ dừng batch; cấu hình
@@ -124,7 +127,7 @@ sau khi duyệt pilot có phạm vi cụ thể. V1 chưa có CLI hoặc request 
 `metadata.json`, `references.json`, `manifest.json`, trạng thái và log.
 Contract phiên bản 2 đã được đối chiếu với giao diện crawler hiện tại.
 Storage + Checkpoint/Resume giai đoạn 1 đã được triển khai theo contract;
-CLI, tích hợp Semantic Scholar vào Pipeline và bước export vẫn chưa có.
+S2 integration dùng API Storage hiện có; CLI và bước export vẫn chưa có.
 
 [Hướng dẫn Storage](docs/storage.md) mô tả giao diện, atomic JSON, checksum
 và kế hoạch resume. Storage không gọi mạng và không tạo sẵn thư mục version;
