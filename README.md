@@ -124,12 +124,13 @@ hàm crawler để đo wall time, RAM đầu/cuối/đỉnh và kích thước c
 rồi ghi báo cáo cùng môi trường và commit. Khi có `psutil`, bộ đo lấy RAM
 của process và các process con; fallback phụ thuộc hệ điều hành.
 
-Bộ đo nền chưa có RAM trung bình, disk peak hoặc thời gian từng paper,
-trung bình mỗi paper và discovery.
+Metrics v2 bổ sung RAM trung bình/peak và disk peak qua lấy mẫu; adapter tổng hợp
+thời gian paper và Discovery từ durable logs. Phạm vi disk mặc định là corpus,
+chưa bao gồm archive nằm trong TEMP ngoài corpus.
 Entry point `python -m src.benchmark` hiện chạy dummy crawler, không phải
 benchmark M1 thực nghiệm trên Colab CPU-only.
 
-## Benchmark Adapter v1
+## Benchmark Adapter và Metrics v2
 
 `src.benchmark_runner.run_benchmark()` đo một invocation Batch bằng foundation
 hiện có rồi kiểm chứng corpus theo Storage/checksum. `aggregate_batch()` chỉ đọc

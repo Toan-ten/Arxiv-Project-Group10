@@ -15,6 +15,7 @@ import subprocess
 from uuid import uuid4
 
 from src import arxiv_client, batch, benchmark, pipeline
+from src.benchmark_metrics import sampling_config, timing_summary
 from src.storage import CorpusStorage, StorageError, TERMINAL, DISCOVERY_STATES, SOURCE_ERRORS, _atomic_json
 
 
@@ -149,7 +150,8 @@ def _history_summary(history):
             "started_at", "ended_at", "wall_seconds",
         )})
         attempts[-1].update(stop_reason=_stop_reason(attempt),
-                            environment_provenance=None, resource_measurements=None)
+                            environment_provenance=None, resource_measurements=None,
+                            timing_metrics=timing_summary([attempt]))
         for row in attempt["papers"]:
             result = row["result"]
             if result is None:
@@ -189,6 +191,7 @@ def _history_summary(history):
             missing_intervals=sum(d is None for d in durations),
         ))
     return dict(
+        timings=timing_summary(history),
         attempts=attempts, error_history=errors, operations=operations,
         operations_scope="final processed-paper snapshots; not HTTP request counts",
         logged_attempt_wall_seconds=sum(a["wall_seconds"] for a in history),
@@ -255,6 +258,108 @@ def _paper(store, pair, batch_id, known_runs):
     )
 
 
+def _valid_resources(value):
+    """Validate v2 numeric invariants before including a persisted measurement."""
+    _require(isinstance(value, dict) and value["schema_version"] == 2
+             and _number(value["wall_seconds"]))
+    for key in ("ram", "disk"):
+        series = value[key]
+        _require(isinstance(series, dict) and series["unit"] == "bytes")
+        count = series["sample_count"]
+        _require(type(count) is int and count >= 0)
+        _require(series["status"] in {"collected", "partial", "not_collected"})
+        if count:
+            _require(series["status"] != "not_collected")
+            _require(all(_number(series[f]) for f in (
+                "sum_sample_bytes", "initial_bytes", "final_bytes", "sampled_peak_bytes",
+            )))
+            _require(series["sampled_peak_bytes"] >= max(series["initial_bytes"], series["final_bytes"])
+                     and series["sampled_peak_bytes"] <= series["sum_sample_bytes"]
+                     <= series["sampled_peak_bytes"] * count)
+            if key == "ram":
+                _require(_number(series["average_bytes"])
+                         and math.isclose(series["average_bytes"], series["sum_sample_bytes"] / count))
+        else:
+            _require(series["status"] == "not_collected")
+            _require(all(series[f] is None for f in (
+                "sum_sample_bytes", "sampled_peak_bytes", "initial_bytes", "final_bytes",
+            )))
+            if key == "ram":
+                _require(series["average_bytes"] is None)
+    disk = value["disk"]
+    _require(disk["final_corpus_bytes"] is None or _number(disk["final_corpus_bytes"]))
+    _require(isinstance(disk["roots"], list) and bool(disk["roots"])
+             and all(isinstance(p, str) for p in disk["roots"]))
+    _require(isinstance(value["ram"]["source"], str) and isinstance(value["ram"]["scope"], str))
+    _require(isinstance(value["sampling"], dict))
+    # Do not propagate unknown fields such as credentials from edited sidecars.
+    result = {k: value[k] for k in ("schema_version", "wall_seconds", "sampling")}
+    if "wall_scope" in value:
+        result["wall_scope"] = value["wall_scope"]
+    fields = {
+        "status", "reason", "failure_reasons", "unit", "sample_count", "failed_sample_count",
+        "sum_sample_bytes", "initial_bytes", "final_bytes", "sampled_peak_bytes",
+        "average_bytes", "average_method", "first_sample_seconds", "last_sample_seconds",
+        "source", "scope", "backend_version", "peak_method", "roots", "corpus_root", "final_corpus_bytes",
+        "final_corpus_status",
+    }
+    for kind in ("ram", "disk"):
+        result[kind] = {k: v for k, v in value[kind].items() if k in fields}
+    return result
+
+
+def _measurement_summary(attempts, directory, fingerprint):
+    observations, missing, invalid = [], [], []
+    for attempt in attempts:
+        path = directory / "measurements" / (attempt["attempt_id"] + ".json")
+        if not path.exists():
+            missing.append(attempt["attempt_id"])
+            continue
+        try:
+            value = batch._read(path)
+            _require(value["schema_version"] == 2
+                     and value["batch_id"] == directory.name
+                     and value["attempt_id"] == attempt["attempt_id"]
+                     and value["run_id"] == attempt["run_id"]
+                     and value["selection_fingerprint"] == fingerprint)
+            resources = _valid_resources(value["resources"])
+            observations.append(dict(
+                attempt_id=attempt["attempt_id"], run_id=attempt["run_id"],
+                resources=resources, environment={k: v for k, v in value["environment"].items()
+                    if k in {"git_commit", "git_dirty", "python", "operating_system",
+                             "cpu_count", "measurement_environment"}},
+                report_path=value["report_path"],
+            ))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            invalid.append(attempt["attempt_id"])
+    complete = bool(attempts) and not missing and not invalid
+    resources = [o["resources"] for o in observations]
+    rams, disks = [r["ram"] for r in resources], [r["disk"] for r in resources]
+    ram_scopes = {(r["source"], r["scope"]) for r in rams}
+    disk_scopes = {tuple(sorted(d["roots"])) for d in disks}
+    good_ram = complete and len(ram_scopes) == 1 and all(r["status"] == "collected" for r in rams)
+    good_disk = complete and len(disk_scopes) == 1 and all(d["status"] == "collected" for d in disks)
+    samples = sum(r["sample_count"] for r in rams)
+    last = next((o["resources"] for o in observations
+                 if o["attempt_id"] == attempts[-1]["attempt_id"]), None) if attempts else None
+    return dict(
+        status="collected" if complete and good_ram and good_disk else
+               "partial" if observations else "not_collected",
+        missing_attempt_ids=missing, invalid_attempt_ids=invalid,
+        scope_mismatch=dict(ram=len(ram_scopes) > 1, disk=len(disk_scopes) > 1),
+        attempts=observations, unit_bytes="bytes", unit_time="seconds",
+        end_to_end_wall_seconds=sum(r["wall_seconds"] for r in resources) if complete else None,
+        known_end_to_end_wall_seconds=sum(r["wall_seconds"] for r in resources),
+        wall_scope="sum of measured callback intervals only; never calendar gaps or logged Batch time again",
+        average_ram_bytes=sum(r["sum_sample_bytes"] or 0 for r in rams) / samples if good_ram and samples else None,
+        average_ram_method="sample-count weighted mean across all valid per-attempt RSS observations",
+        sampled_peak_ram_bytes=max((r["sampled_peak_bytes"] for r in rams), default=None) if good_ram else None,
+        sampled_peak_disk_bytes=max((d["sampled_peak_bytes"] for d in disks), default=None) if good_disk else None,
+        final_corpus_bytes=last["disk"]["final_corpus_bytes"] if last else None,
+        final_size_scope="last measured attempt's corpus snapshot; never a sum across attempts or a fresh audit size",
+    )
+
+
 def aggregate_batch(corpus_root, *, batch_id, log_root):
     """Read one batch's entire history and cohort Storage without any writes.
 
@@ -265,11 +370,15 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
     report = dict(
         schema_version=1, batch_id=batch_id, audited_at=batch._now(),
         corpus_root=str(corpus), log_root=str(logs), issues=[],
-        configuration=None, history=None, data_coverage=None, publication_complete=None,
+        configuration=None, history=None, benchmark_metrics=None,
+        data_coverage=None, publication_complete=None,
     )
     try:
         definition, history = _load(directory, batch_id, corpus)
         report["history"] = _history_summary(history)
+        report["benchmark_metrics"] = _measurement_summary(
+            report["history"]["attempts"], directory, _fingerprint(definition["selection"]),
+        )
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         report["issues"].append(dict(scope="run_logs", code="missing_or_invalid_history"))
         report["status"] = "incomplete"
@@ -378,6 +487,7 @@ def run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
+    disk_interval=30.0, disk_roots=None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
@@ -388,6 +498,7 @@ def run_benchmark(
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
     definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent)
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
+    sampling = sampling_config(corpus, sample_interval, disk_interval, disk_roots)
     previous = []
     if directory.exists():
         existing, previous = _load(directory, batch_id, corpus)
@@ -407,6 +518,7 @@ def run_benchmark(
     intent = dict(
         schema_version=1, experiment_id=experiment_id, batch_id=batch_id,
         started_at=started_at, environment=_environment(),
+        metrics_version=2, measurement_configuration=sampling,
         configuration={k: definition[k] for k in (
             "selection", "max_ids", "versions", "timeout", "max_attempts",
         )},
@@ -438,6 +550,7 @@ def run_benchmark(
             measured_batch, corpus_output_dir=corpus,
             report_path=destination / "resources.json",
             sample_interval=sample_interval, verbose=False,
+            disk_interval=disk_interval, disk_roots=disk_roots,
         )
     except BaseException as exc:
         measured_failure = exc
@@ -455,6 +568,36 @@ def run_benchmark(
     old_ids = set(intent["previous_attempt_ids"])
     current = [a for a in history["attempts"] if a["attempt_id"] not in old_ids] if history else []
     batch_status = current[0]["status"] if len(current) == 1 and current[0]["status"] != "running" else None
+    sidecar_issue, current_v2 = None, None
+    if len(current) == 1 and resources is not None and "metrics_v2" in resources:
+        try:
+            sampled = _valid_resources(resources["metrics_v2"])
+            current_v2 = sampled
+            measurements = batch._safe(directory / "measurements")
+            measurements.mkdir(exist_ok=True)
+            path = batch._safe(measurements / (current[0]["attempt_id"] + ".json"))
+            _require(not path.exists())
+            _atomic_json(path, dict(
+                schema_version=2, batch_id=batch_id,
+                attempt_id=current[0]["attempt_id"], run_id=current[0]["run_id"],
+                selection_fingerprint=intent["selection_fingerprint"],
+                resources=sampled, environment=intent["environment"],
+                report_path=intent["report_path"],
+            ))
+            audit["benchmark_metrics"] = _measurement_summary(
+                history["attempts"], directory, intent["selection_fingerprint"],
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            sidecar_issue = "measurement_not_persisted"
+    metrics = audit.get("benchmark_metrics")
+    timings = history["timings"] if history else None
+    unavailable = dict(http_requests=None, http_errors=None)
+    if not current_v2 or current_v2["ram"]["average_bytes"] is None:
+        unavailable["average_ram_bytes"] = None
+    if not current_v2 or current_v2["disk"]["sampled_peak_bytes"] is None:
+        unavailable["peak_disk_bytes"] = None
+    if not timings or timings["discovery_wall_seconds"] is None:
+        unavailable["discovery_wall_seconds"] = None
     execution_status = "raised" if failure or measured_failure else "returned"
     report = dict(
         **intent, ended_at=batch._now(), execution_status=execution_status,
@@ -466,17 +609,16 @@ def run_benchmark(
         run_ids=[a["run_id"] for a in current],
         measurement_status="recorded" if resources is not None else "not_collected",
         resource_metrics=resources,
+        benchmark_metrics=metrics, measurement_issue=sidecar_issue,
+        timing_metrics=timings,
         foundation_status_semantics="execution only; never corpus or publication success",
         resource_scope="one invocation including pacing/retry; excludes adapter aggregation and session gaps",
-        resource_size_scope="foundation disk_corpus_size_mb is a best-effort whole-root snapshot, including non-cohort files",
+        resource_size_scope="whole-root logical bytes, including non-cohort files; v2 strict scan, legacy reports may be best-effort",
         resource_units="foundation *_mb fields are MiB (1024**2 bytes); elapsed time is seconds",
         aggregation=audit,
         data_coverage=audit["data_coverage"],
         publication_complete=audit["publication_complete"],
-        unavailable_metrics=dict(
-            http_requests=None, http_errors=None, average_ram_bytes=None,
-            peak_disk_bytes=None, discovery_wall_seconds=None,
-        ),
+        unavailable_metrics=unavailable,
     )
     if len(current) != 1:
         report["aggregation"]["issues"].append(dict(scope="attempt_link", code="missing_or_ambiguous_attempt"))

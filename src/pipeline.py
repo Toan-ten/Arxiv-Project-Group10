@@ -6,6 +6,7 @@ client; offline callers/tests must provide fake HTTP. Single writer only.
 import copy
 import math
 import re
+import time
 
 from src import arxiv_client, arxiv_source
 from src.storage import CorpusStorage, StorageError, TERMINAL, RETRYABLE
@@ -135,9 +136,16 @@ def _run_paper(store, paper, options, versions):
     if paper["discovery"]["status"] in {"found", "not_found"}:
         paper["discovery"]["action"] = "cached"
         snapshot = _cached_snapshot(store, paper)
+        paper["discovery"].update(wall_seconds=0.0, timing_status="cached")
     else:
-        snapshot = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
         paper["discovery"]["action"] = "queried"
+        started = time.perf_counter()
+        try:
+            snapshot = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
+        finally:
+            paper["discovery"].update(
+                wall_seconds=max(0.0, time.perf_counter() - started), timing_status="measured",
+            )
         _record_http_result(paper, "discovery", snapshot, store.record_discovery)
     paper["discovery"].update(
         http_status=snapshot.get("http_status"), attempts=snapshot.get("attempts", 0),
@@ -250,7 +258,8 @@ def run_selected(
             mssv=mssv, arxiv_id=arxiv_id, paper_status=None,
             metadata_status=None, references_status=None,
             discovery=dict(action="not_attempted", status=None, version_status=None,
-                           http_status=None, attempts=0, error=None),
+                           http_status=None, attempts=0, error=None,
+                           wall_seconds=None, timing_status="not_attempted"),
             source={}, skipped=[], pending=[], blocked={}, errors=[],
         )
         summary["papers"].append(paper)

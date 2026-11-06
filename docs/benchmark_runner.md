@@ -1,4 +1,4 @@
-# Benchmark Adapter v1
+# Benchmark Adapter và Metrics v2
 
 Module `src.benchmark_runner` nối Batch Runner với `benchmark_pipeline()` của
 benchmark foundation. Adapter không đổi engine đo, contract v2, HTTP, cách chọn
@@ -11,6 +11,7 @@ run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
+    disk_interval=30.0, disk_roots=None,
 )
 aggregate_batch(corpus_root, *, batch_id, log_root)
 ```
@@ -114,31 +115,122 @@ Report schema version 1 gồm:
 - `unavailable_metrics` chứa null cho các phép đo chưa triển khai.
 
 Git provenance là code **hiện tại**, không gán ngược cho các attempts cũ.
-Trong aggregate, environment/resource measurements của từng attempt lịch sử là
-null vì durable logs cũ chưa thu thông tin đó. Giữ các report experiment riêng
-để truy xuất phép đo/provenance của từng invocation mới.
+Durable logs cũ chưa có environment/resource measurements. Lượt đo v2 lưu chúng
+trong measurements sidecar; aggregate đọc từng sidecar theo attempt ID. Lượt cũ
+không có sidecar giữ null/missing, không được điền ngược. Giữ các report experiment
+riêng để truy xuất provenance của từng invocation.
 
-## Phạm vi đo và giới hạn
+## Benchmark Metrics v2: công thức và phạm vi
 
-- Foundation đo wall time của invocation Batch, có pacing/retry; không gồm kiểm
-  checksum/tổng hợp sau đo của adapter. RAM peak là RSS lấy mẫu theo backend
-  foundation; MB trong tên trường thực chất là MiB. Backend unavailable được
-  trình bày null trong report adapter; resources.json vẫn giữ output foundation.
-- `logged_attempt_wall_seconds` cộng các khoảng perf_counter đã ghi trong logs,
-  không lấy end-start lịch để cộng khoảng nghỉ giữa sessions. Snapshot running
-  chỉ cung cấp lower bound. Đây không phải wall time end-to-end đã đo ngược cho
-  các attempts cũ và không được cộng thêm resource elapsed vào cùng tổng.
-- Thời gian mỗi paper là tổng các interval đã có; `missing_intervals` chỉ rõ
-  khoảng chưa có phép đo. Chưa có thời gian discovery riêng.
-- Resource corpus size của foundation là snapshot toàn root, có thể chứa paper
-  ngoài cohort và là phép đọc best-effort. Số source bytes được kiểm chứng của
-  cohort nằm riêng trong coverage. Không cộng corpus size giữa attempts.
-- HTTP requests/errors, tổng download traffic, RAM average, disk peak và môi
-  trường Colab CPU-only chưa được instrument/xác minh. Chưa có Semantic Scholar.
-- Logs không phải nhật ký chống sửa/xóa: phát hiện được sequence thiếu, file hỏng
-  và run ID checkpoint thuộc batch nhưng mất log; không chứng minh được lịch sử
-  chưa từng bị xóa ở cuối nếu không còn dấu vết. Không coi thống kê logs là
-  chứng nhận đầy đủ của mọi HTTP attempt.
+Các yêu cầu về thời gian, RAM và disk được đối chiếu với
+[đề M1 chính thức](https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/crawling/).
+Tool đo là lựa chọn kỹ thuật; môi trường benchmark cuối theo đề là Colab CPU-only.
+
+| Chỉ số | Định nghĩa trong code |
+| --- | --- |
+| Wall time end-to-end | `metrics_v2.wall_seconds`: perf_counter trước/sau toàn callback Batch; gồm setup Batch, checkpoint, pacing, retry và log cuối của Batch |
+| Trung bình mỗi paper | `timing_metrics.average_paper_seconds`: tổng interval paper đã ghi qua các attempts / số ID duy nhất trong cohort |
+| Entry Discovery | `timing_metrics.discovery_wall_seconds`: tổng thời gian quanh `query_arxiv()`, gồm chờ limiter, retry và parsing; không gồm cache hoặc ghi Storage |
+| RAM peak | `ram.sampled_peak_bytes`: RSS lớn nhất trong các mẫu hợp lệ |
+| RAM average | `ram.average_bytes = sum_sample_bytes / sample_count`; trung bình số học các quan sát, không phải trung bình theo thời gian |
+| Disk peak | `disk.sampled_peak_bytes`: tổng logical bytes các thư mục đo tại mỗi lần quét, lấy giá trị lớn nhất |
+| Final corpus size | `disk.final_corpus_bytes`: dung lượng file của riêng corpus tại lần quét cuối |
+
+Wall time không gồm khởi động Python, setup/final probes của sampler, serialize
+benchmark report và audit sau crawl. RAM endpoint probes nằm sát hai đầu callback;
+probe RAM cuối không chờ disk scan dài. Thời gian paper nằm giữa hai callback
+hiện có, không gồm toàn bộ overhead cấp Batch. Mẫu số là **ID ứng viên được chọn**,
+gồm cả not_found/failed và công việc lặp do resume, không phải số paper thành công.
+Nếu còn ID chưa xử lý hoặc mất interval do gián đoạn, average để null; subtotal
+đã biết và số interval thiếu vẫn được ghi.
+
+Discovery timing được thêm trực tiếp vào summary của Pipeline:
+`discovery.wall_seconds` và `timing_status=measured|cached|not_attempted`.
+Cached có 0 giây gọi API và không tăng số queried. Không thêm observer, không thêm
+sự kiện mới vào `on_progress`; Batch tiếp tục nhận đúng paper_started/paper_finished.
+Log cũ thiếu timing không được suy ra thời gian Discovery từ thời gian paper.
+
+### Lấy mẫu resource
+
+`sample_interval` mặc định 0.1 giây cho RAM, tối thiểu hiệu dụng 0.01 giây.
+`disk_interval` mặc định 30 giây, tối thiểu hiệu dụng 1 giây; disk dùng thread
+riêng để không quét corpus ở mỗi RAM tick. Có mẫu ở endpoints. Chu kỳ thực tế có
+thể dài hơn do chi phí đọc. Sampler lưu thống kê tổng hợp, không giữ chuỗi mẫu
+tăng vô hạn trong RAM.
+
+Mỗi chuỗi có status, reason/failure_reasons, sample_count, failed_sample_count,
+đơn vị bytes và thời điểm mẫu đầu/cuối theo giây tương đối. Không có mẫu hợp lệ:
+`not_collected`, các giá trị đo là null. Một số probe lỗi: `partial`; trung bình
+nếu có chỉ mô tả những mẫu hợp lệ còn lại. Không dùng 0 thay cho lỗi phép đo.
+
+Khi có psutil, RAM gồm process Python hiện tại và các descendant quan sát được,
+cộng RSS; có thể tính trùng shared pages giữa process. Child đã thoát trước khi
+đọc không còn được cộng; access denied làm probe lỗi, không âm thầm bỏ process.
+Backend/version/scope được ghi rõ. Khi thiếu psutil trên Linux, fallback
+`/proc/self/statm` chỉ đo process hiện tại; không được gọi đó là RAM toàn hệ thống
+nếu có subprocess. Windows thiếu psutil ghi backend_missing/not_collected.
+Không dùng ru_maxrss lịch sử để tính average RSS.
+
+Peak RAM/disk là **sampled peak**, có thể bỏ sót spike hoặc file tạm sống ngắn.
+Disk đo logical bytes của regular files, không phải allocated blocks hay toàn
+bộ dung lượng filesystem. Scan thiếu/lỗi không được thay bằng 0.
+
+### Corpus, scratch và Colab
+
+`disk_roots=None` chỉ đo corpus. Có thể truyền list/tuple gồm corpus và các thư mục
+scratch riêng, không trùng/lồng nhau. Final corpus size vẫn tách khỏi tổng scratch.
+
+Downloader hiện dùng TEMP của process để chứa archive; thư mục extraction nằm
+dưới corpus. Vì vậy, **mặc định chưa bao gồm archive ngoài corpus**. Muốn đo phạm vi
+đó trong benchmark thật, chuẩn bị scratch riêng và cấu hình TEMP/TMP trên Windows
+hoặc TMPDIR trên Linux **trước khi khởi động Python**, rồi thêm scratch vào
+disk_roots. Không thay TEMP toàn máy, không trỏ vào TEMP dùng chung, không quét
+toàn bộ /tmp. Sampler không tự tạo/xóa dữ liệu hoặc đổi môi trường.
+
+Code dùng Python/threading/pathlib và psutil tùy chọn, chạy được trên Windows;
+Linux có fallback nêu trên. Chưa chạy Colab và chưa xác minh CPU-only runtime.
+Benchmark cuối vẫn cần chạy trên Colab, chọn phạm vi disk đầy đủ và ghi môi trường
+thật. Không có notebook Colab hoặc crawler thật được chạy trong lượt triển khai.
+
+### Lưu và tổng hợp nhiều attempts
+
+Ngoài các file experiment, lượt đo mới ghi:
+`<log_root>/<batch_id>/measurements/<attempt_id>.json`.
+File này chứa schema_version=2, batch/run/attempt IDs, selection fingerprint,
+resources, environment và report_path. Ghi atomic, không ghi đè file đã tồn tại;
+không sửa attempt log cũ hoặc Storage JSON. Lỗi lưu measurement được ghi riêng
+trong report, không biến số liệu thiếu thành collected.
+
+Report adapter giữ schema v1 với các trường bổ sung metrics_version=2:
+- `resource_metrics.metrics_v2`: phép đo invocation hiện tại.
+- `benchmark_metrics`: tổng hợp resources đã lưu của tất cả attempts thuộc batch.
+- `timing_metrics`: thời gian paper/Discovery tổng hợp từ durable logs.
+- `history.attempts[].timing_metrics`: thời gian từng attempt.
+- `measurement_configuration`: interval và roots thực tế.
+- `measurement_issue` và `unavailable_metrics`: thông tin chưa có hoặc không lưu được.
+
+Công thức tổng hợp:
+- Wall time: cộng từng interval callback đã đo đúng một lần; không cộng lịch
+  end-start, khoảng nghỉ giữa phiên hoặc cộng lại logged Batch time.
+- RAM average: tổng sum_sample_bytes / tổng sample_count; không lấy trung bình
+  các average của attempts có số mẫu khác nhau. Chỉ hợp nhất khi backend/scope
+  tương thích và samples đầy đủ; nếu không, aggregate để null và giữ từng attempt.
+- Peak RAM/disk: max của các sampled peaks cùng phạm vi, không cộng peaks.
+- Final size: chỉ snapshot của attempt cuối đã đo, không cộng snapshots và không
+  thế snapshot cũ nếu attempt cuối thiếu. Đây là size tại thời điểm đo, không phải
+  một phép đo mới tại thời điểm aggregate.
+- Paper/version coverage vẫn do Storage/checksum xác nhận; không lấy số attempts
+  làm số paper hoặc cached/skipped làm download mới.
+
+Legacy logs/reports vẫn đọc được. Attempt cũ không có measurement giữ missing,
+full aggregate để null, có known subtotal riêng. Không gán commit hay môi trường
+mới cho lượt cũ. Sidecar hỏng hoặc sai identity/fingerprint được liệt kê trong
+invalid_attempt_ids, giữ nguyên để audit. Mất report do hard kill không được suy
+ra là zero resource usage.
+
+HTTP requests/errors và tổng download traffic vẫn not_collected; chưa thay HTTP
+client để instrument từng attempt. `publication_complete` tiếp tục tuân thủ
+contract v2, không đổi vì benchmark hoặc batch kết thúc.
 
 ## Kiểm thử offline
 

@@ -31,6 +31,8 @@ try:
 except ImportError:  # pragma: no cover - Windows
     resource = None
 
+from src.benchmark_metrics import ResourceSampler
+
 CrawlerCallable = Callable[[], None]
 
 
@@ -220,6 +222,8 @@ def benchmark_pipeline(
     report_path: str | os.PathLike[str] = "./benchmark_results/m1_benchmark.json",
     sample_interval: float = 0.1,
     verbose: bool = True,
+    disk_interval: float = 30.0,
+    disk_roots=None,
 ) -> dict:
     """Run ``crawler_main_func`` and write a benchmark report.
 
@@ -240,13 +244,21 @@ def benchmark_pipeline(
         print("=" * 60)
         print(f"--> Đang thực thi: {getattr(crawler_main_func, '__name__', 'crawler')}")
 
-    monitor = _RssMonitor(sample_interval)
-    initial_disk_used = shutil.disk_usage(filesystem_root).used
+    monitor = ResourceSampler(
+        corpus_dir, sample_interval=sample_interval,
+        disk_interval=disk_interval, disk_roots=disk_roots,
+    )
+    def filesystem_used():
+        try:
+            return shutil.disk_usage(filesystem_root).used
+        except OSError:
+            return None
+    initial_disk_used = filesystem_used()
+    monitor.start()
     started_at = _utc_now()
     started_perf = time.perf_counter()
     failure: BaseException | None = None
     failure_info: dict | None = None
-    monitor.start()
 
     try:
         crawler_main_func()
@@ -260,24 +272,35 @@ def benchmark_pipeline(
             ),
         }
     finally:
-        monitor.stop()
         elapsed = time.perf_counter() - started_perf
-        final_disk_used = shutil.disk_usage(filesystem_root).used
+        ended_at = _utc_now()
+        monitor.stop()
+        sampled = monitor.report()
+        ram, disk = sampled["ram"], sampled["disk"]
+        final_disk_used = filesystem_used()
+        def optional_mb(value):
+            return _mb(value) if value is not None else None
         total_ram = _total_ram_bytes()
         report = {
             "status": "failed" if failure is not None else "success",
             "crawler": getattr(crawler_main_func, "__name__", repr(crawler_main_func)),
             "started_at": started_at,
-            "ended_at": _utc_now(),
+            "ended_at": ended_at,
             "elapsed_seconds": round(elapsed, 3),
             "elapsed_minutes": round(elapsed / 60, 3),
-            "initial_ram_mb": _mb(monitor.initial_bytes),
-            "final_ram_mb": _mb(_current_rss_bytes()),
-            "peak_ram_mb": _mb(monitor.peak_bytes),
-            "ram_source": _ram_source(),
-            "ram_sample_interval_seconds": monitor.interval_seconds,
-            "disk_corpus_size_mb": _mb(get_directory_size(corpus_dir)),
-            "disk_used_diff_mb": _mb(final_disk_used - initial_disk_used),
+            "initial_ram_mb": optional_mb(ram["initial_bytes"]),
+            "final_ram_mb": optional_mb(ram["final_bytes"]),
+            "peak_ram_mb": optional_mb(ram["sampled_peak_bytes"]),
+            "average_ram_mb": optional_mb(ram["average_bytes"]),
+            "ram_source": ram["source"],
+            "ram_sample_interval_seconds": sampled["sampling"]["ram_interval_seconds"],
+            "disk_corpus_size_mb": optional_mb(disk["final_corpus_bytes"]),
+            "disk_used_diff_mb": (_mb(final_disk_used - initial_disk_used)
+                                  if final_disk_used is not None and initial_disk_used is not None else None),
+            "metrics_v2": dict(
+                **sampled, wall_seconds=elapsed,
+                wall_scope="whole crawler callback, including Batch setup, pacing, retry and final Batch log; excludes sampler setup/final probes and report serialization",
+            ),
             "corpus_output_dir": str(corpus_dir.expanduser().resolve()),
             "filesystem_path": str(filesystem_root),
             "report_path": str(report_file.expanduser().resolve()),
