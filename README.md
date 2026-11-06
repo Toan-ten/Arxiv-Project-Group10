@@ -20,6 +20,7 @@ src/pilots.py                 Chọn pilot deterministic từ các range
 src/arxiv_discovery.py        Phân tích Atom XML và xác định version
 src/arxiv_client.py           HTTP client cho một ID
 src/arxiv_source.py           Tải source và trích xuất TeX/BibTeX an toàn
+src/semantic_scholar.py       Client batch metadata S2 độc lập, chưa nối Pipeline
 src/storage.py                Lưu JSON, kiểm tra source và checkpoint/resume offline
 src/pipeline.py               Điều phối tuần tự các ID chỉ định và resume
 src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
@@ -86,6 +87,14 @@ không tự chạy crawler. Kích thước 10/500 không phải ngân sách HTTP
 API và source dùng chung pacing trong một process. Các tài liệu trên mô tả
 giao diện, trạng thái lỗi, kiểm thử và phạm vi thử mạng ở bước sau.
 
+## Semantic Scholar metadata
+
+Client `src.semantic_scholar.fetch_metadata()` đã có để truy vấn metadata theo
+batch ID gốc, mặc định 100 và tối đa 500 ID/request. Có limiter S2 dùng chung,
+timeout, retry hữu hạn và dừng lời gọi khi hết attempts mà vẫn bị HTTP 429.
+Client chỉ được kiểm thử offline; chưa thu references hoặc tích hợp Pipeline/Storage.
+Xem [API, cấu hình key/pacing và các trạng thái kết quả](docs/semantic_scholar.md).
+
 ## Pipeline v1
 
 `run_selected(pairs, corpus_root, ...)` trong `src.pipeline` nhận danh sách
@@ -113,7 +122,7 @@ sau khi duyệt pilot có phạm vi cụ thể. V1 chưa có CLI hoặc request 
 `metadata.json`, `references.json`, `manifest.json`, trạng thái và log.
 Contract phiên bản 2 đã được đối chiếu với giao diện crawler hiện tại.
 Storage + Checkpoint/Resume giai đoạn 1 đã được triển khai theo contract;
-CLI, Semantic Scholar và bước export vẫn chưa có.
+CLI, tích hợp Semantic Scholar vào Pipeline và bước export vẫn chưa có.
 
 [Hướng dẫn Storage](docs/storage.md) mô tả giao diện, atomic JSON, checksum
 và kế hoạch resume. Storage không gọi mạng và không tạo sẵn thư mục version;
