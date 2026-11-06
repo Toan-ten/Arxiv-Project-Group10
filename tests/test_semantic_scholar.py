@@ -275,10 +275,11 @@ class SemanticScholarTests(unittest.TestCase):
         self.assertTrue(all(r["status"] == "invalid_response" for r in result))
 
     def test_missing_optional_metadata_is_not_fabricated(self):
-        self.outcomes = [Response([{"paperId": "fixture"}])]
+        record = {"paperId": "fixture", "externalIds": {"ArXiv": identifiers(1)[0]}}
+        self.outcomes = [Response([record])]
         result = self.fetch()
         self.assertEqual(result[0]["status"], "found")
-        self.assertEqual(result[0]["paper"], {"paperId": "fixture"})
+        self.assertEqual(result[0]["paper"], record)
         self.assertNotIn("title", result[0]["paper"])
         self.assertNotIn("submission_date", result[0]["paper"])
 
@@ -289,7 +290,10 @@ class SemanticScholarTests(unittest.TestCase):
                 record = paper(ids[0])
                 record["externalIds"] = external
                 self.outcomes = [Response([record])]
-                self.assertEqual(self.fetch()[0]["status"], "found")
+                result = self.fetch()[0]
+                self.assertEqual(result["status"], "found" if external and external["ArXiv"] else "invalid_response")
+                if result["status"] == "invalid_response":
+                    self.assertEqual(result["error"], "arxiv_identity_unverified")
 
     def test_invalid_field_types_are_not_accepted_as_found(self):
         for field, value in (("corpusId", True), ("authors", ["name"]), ("abstract", {}),
@@ -574,6 +578,157 @@ class SemanticScholarTests(unittest.TestCase):
                 self.assertEqual(result[0]["status"], status)
                 if status == "found":
                     self.assertEqual(result[0]["paper"]["authors"], [author])
+
+    def test_strict_identity_rejects_missing_external_id_by_default(self):
+        for external in (None, {}, {"ArXiv": None}):
+            with self.subTest(external=external):
+                record = paper(identifiers(1)[0])
+                record["externalIds"] = external
+                self.outcomes = [Response([record])]
+                result = self.fetch()
+                self.assertEqual(result[0]["status"], "invalid_response")
+                self.assertEqual(result[0]["error"], "arxiv_identity_unverified")
+                self.assertIsNone(result[0]["paper"])
+
+    def test_explicit_positional_opt_in_preserves_unverified_record(self):
+        self.outcomes = [Response([{"paperId": "unverified-paper"}])]
+        result = self.fetch(require_arxiv_identity=False)
+        self.assertEqual(result[0]["status"], "found")
+        self.assertEqual(result[0]["paper"], {"paperId": "unverified-paper"})
+        self.assertEqual(set(result[0]), {"arxiv_id", "status", "http_status", "attempts", "paper", "error"})
+
+    def test_positional_opt_in_still_rejects_contradictory_external_identity(self):
+        ids = identifiers(2)
+        self.outcomes = [Response([paper(ids[1]), paper(ids[0])])]
+        result = self.fetch(ids, require_arxiv_identity=False)
+        self.assertTrue(all(r["status"] == "invalid_response" for r in result))
+        self.assertTrue(all(r["error"] == "arxiv_identity_mismatch" for r in result))
+
+    def test_missing_identity_in_mixed_chunk_quarantines_whole_chunk(self):
+        ids = identifiers(3)
+        self.outcomes = [Response([paper(ids[0]), {"paperId": "unknown"}, paper(ids[2])])]
+        result = self.fetch(ids)
+        self.assertEqual([r["arxiv_id"] for r in result], ids)
+        self.assertTrue(all(r["status"] == "invalid_response" and r["paper"] is None for r in result))
+
+    def test_reordered_missing_id_records_are_not_silently_assigned(self):
+        ids = identifiers(2)
+        self.outcomes = [Response([{"paperId": "paper-B"}, {"paperId": "paper-A"}])]
+        result = self.fetch(ids)
+        self.assertTrue(all(r["error"] == "arxiv_identity_unverified" for r in result))
+
+    def test_strict_identity_null_result_still_not_found(self):
+        self.outcomes = [Response([None])]
+        self.assertEqual(self.fetch()[0]["status"], "not_found")
+
+    def test_missing_response_element_remains_error_in_strict_mode(self):
+        ids = identifiers(2)
+        self.outcomes = [Response([paper(ids[0])])]
+        result = self.fetch(ids)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(r["error"] == "invalid_batch_length_or_structure" for r in result))
+
+    def test_identity_policy_validation_before_http(self):
+        for value in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.fetch(require_arxiv_identity=value)
+        self.transport.open.assert_not_called()
+
+    def test_429_close_failure_never_allows_next_chunk(self):
+        class BrokenClose(HTTPError):
+            def close(self):
+                super().close()
+                raise OSError("fixture-private-close")
+        ids = identifiers(2)
+        self.outcomes = [BrokenClose(s2.BATCH_URL, 429, "fixture", {}, io.BytesIO())]
+        result = self.fetch(ids, batch_size=1, max_attempts=3)
+        self.assertEqual(self.transport.open.call_count, 1)
+        self.assertEqual(result[0]["status"], "rate_limited")
+        self.assertEqual(result[0]["http_status"], 429)
+        self.assertEqual(result[0]["error"], "http_429")
+        self.assertEqual(result[1]["attempts"], 0)
+        self.assertNotIn("fixture-private-close", json.dumps(result))
+
+    def test_observed_429_survives_response_context_cleanup_failure(self):
+        class BrokenResponse(Response):
+            def __exit__(self, *args):
+                super().__exit__(*args)
+                raise OSError("fixture-private-cleanup")
+        self.outcomes = [BrokenResponse(status=429)]
+        result = self.fetch(max_attempts=3)
+        self.assertEqual(result[0]["status"], "rate_limited")
+        self.assertEqual(result[0]["http_status"], 429)
+        self.assertEqual(result[0]["attempts"], 1)
+        self.assertEqual(self.transport.open.call_count, 1)
+
+    def test_413_does_not_split_retry_or_lose_later_ids(self):
+        ids = identifiers(3)
+        self.outcomes = [http_error(413), self.success(ids[2:])]
+        result = self.fetch(ids, batch_size=2)
+        self.assertEqual([r["arxiv_id"] for r in result], ids)
+        self.assertEqual([r["status"] for r in result], ["http_error", "http_error", "found"])
+        self.assertEqual(self.transport.open.call_count, 2)
+
+    def test_oversize_chunk_does_not_repeat_or_shift_subsequent_chunk(self):
+        ids = identifiers(3)
+        self.outcomes = [Response(body=b"x" * 30), self.success(ids[2:])]
+        # The valid fixture needs more than 30 bytes, so the cap applies to both chunks.
+        result = self.fetch(ids, batch_size=2, max_response_bytes=20)
+        self.assertEqual([r["arxiv_id"] for r in result], ids)
+        self.assertEqual(self.transport.open.call_count, 2)
+        self.assertTrue(all(r["status"] == "invalid_response" and r["attempts"] == 1 for r in result))
+
+    def assert_status_exception_cleanup(self, *, response_cleanup_fails):
+        created, closed_before_response_exit = [], []
+        owner = self
+        class TrackedHTTPError(HTTPError):
+            def __init__(self, *args):
+                super().__init__(*args)
+                created.append(self)
+                # Keep test fixtures owned even if a regression assertion fails.
+                owner.addCleanup(self.close)
+        class StatusResponse(Response):
+            def __exit__(self, *args):
+                closed_before_response_exit.append(created[-1].closed)
+                super().__exit__(*args)
+                if response_cleanup_fails:
+                    raise OSError("fixture response cleanup failed")
+        for code in (403, 429):
+            with self.subTest(code=code):
+                response = StatusResponse(status=code)
+                self.outcomes = [response]
+                before_errors = len(created)
+                before_requests = self.transport.open.call_count
+                with patch.object(s2, "HTTPError", TrackedHTTPError):
+                    result = self.fetch(max_attempts=1)
+                self.assertEqual(len(created), before_errors + 1)
+                self.assertTrue(closed_before_response_exit[-1])
+                self.assertTrue(created[-1].closed)
+                self.assertTrue(response.closed)
+                self.assertEqual(result[0]["status"], "rate_limited" if code == 429 else "http_error")
+                self.assertEqual(result[0]["http_status"], code)
+                self.assertEqual(result[0]["attempts"], 1)
+                self.assertEqual(self.transport.open.call_count, before_requests + 1)
+
+    def test_synthetic_http_error_closed_before_response_context_exits(self):
+        self.assert_status_exception_cleanup(response_cleanup_fails=False)
+
+    def test_synthetic_http_error_closed_when_response_cleanup_raises(self):
+        self.assert_status_exception_cleanup(response_cleanup_fails=True)
+
+    def test_http_error_from_transport_closes_its_owned_stream(self):
+        for code in (403, 429):
+            with self.subTest(code=code):
+                body = io.BytesIO(b"offline error body")
+                failure = HTTPError(s2.BATCH_URL, code, "fixture", {}, body)
+                self.addCleanup(failure.close)
+                self.outcomes = [failure]
+                with patch.object(failure, "close", wraps=failure.close) as close:
+                    result = self.fetch(max_attempts=1)
+                    close.assert_called_once()
+                self.assertTrue(failure.closed)
+                self.assertTrue(body.closed)
+                self.assertEqual(result[0]["status"], "rate_limited" if code == 429 else "http_error")
 
 
 if __name__ == "__main__":
