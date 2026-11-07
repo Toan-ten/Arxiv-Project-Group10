@@ -204,6 +204,51 @@ class LocalEnvClientTests(unittest.TestCase):
             self.assertEqual(call.args[0].get_header("X-api-key"), SECRET)
         self.assertNotIn(SECRET, json.dumps(snapshot))
 
+    def test_dotenv_header_survives_real_urllib_handler_to_http_connection(self):
+        # Run the actual opener/HTTPS handler; only the final connection is fake.
+        from urllib.request import ProxyHandler, build_opener
+
+        captured = []
+        response = metadata_fx.Response([metadata_fx.paper(metadata_fx.identifiers(1)[0])])
+        self.addCleanup(response.close)
+        response.code, response.reason = 200, "OK"
+        response.info = lambda: response.headers
+
+        class Connection:
+            def __init__(self, host, timeout, **options):
+                self.sock = None
+                captured.append({"host": host, "timeout": timeout})
+
+            def set_debuglevel(self, level):
+                pass
+
+            def request(self, method, target, body, headers, **options):
+                captured[-1].update(method=method, target=target, body=body, headers=headers)
+
+            def getresponse(self):
+                return response
+
+            def close(self):
+                pass  # No socket or external resource is ever created.
+
+        opener = build_opener(ProxyHandler({}), s2._NoRedirect())
+        with patch.object(s2, "_opener", opener), patch("http.client.HTTPSConnection", Connection):
+            result = self.fetch(max_attempts=1)
+        self.assertEqual(result[0]["status"], "found")
+        self.assertEqual(len(captured), 1)
+        actual = captured[0]
+        self.assertEqual((actual["host"], actual["timeout"], actual["method"]),
+                         ("api.semanticscholar.org", 15, "POST"))
+        headers = {key.lower(): value for key, value in actual["headers"].items()}
+        self.assertEqual(headers["x-api-key"], SECRET)
+        self.assertEqual(headers["content-type"], "application/json")
+        self.assertEqual(headers["host"], "api.semanticscholar.org")
+        self.assertEqual(int(headers["content-length"]), len(actual["body"]))
+        self.assertEqual(json.loads(actual["body"]), {"ids": ["ARXIV:" + metadata_fx.identifiers(1)[0]]})
+        self.assertTrue(actual["target"].startswith("/graph/v1/paper/batch?fields="))
+        self.assertTrue(response.closed)
+        self.assertNotIn(SECRET, json.dumps(result))
+
     def test_no_file_keeps_header_absent(self):
         self.env_file.unlink()  # Only this test's temporary fixture.
         self.outcomes = [self.success(metadata_fx.identifiers(1))]
@@ -302,6 +347,78 @@ class LocalEnvEntrypointTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(report))
         for path in Path(self.temp.name).rglob("*.json"):
             self.assertNotIn(SECRET, path.read_text(encoding="utf-8"))
+
+    def _execute_fake_smoke(self):
+        # Exercise the real script -> Batch -> Pipeline -> S2 path, never CLI --live.
+        self.root = self.output / "corpus"
+        options = smoke.parse_args(["--output", str(self.output)])
+        options.live = True
+        plan = smoke.make_plan(options)
+        with patch.object(smoke, "LOCK_PATH", Path(self.temp.name) / "fixture-smoke.lock"):
+            return smoke._execute_live(plan)
+
+    def test_full_smoke_dotenv_metadata_request_429_has_key_and_stops(self):
+        from urllib.parse import parse_qs, urlsplit
+
+        pair = smoke.DEFAULT_PAIR
+        self.arxiv_success((pair,), versions=3)
+        self.s2_outcomes = [metadata_fx.http_error(429)]
+        report, code = self._execute_fake_smoke()
+
+        self.assertEqual(code, 3)
+        self.assertEqual(report["smoke_status"], "stopped")
+        self.assertEqual(report["stop_reason"]["stage"], "s2_metadata")
+        self.assertTrue(report["stop_reason"]["checkpoint_saved"])
+        self.assertEqual(report["verification"]["integrity_status"], "verified")
+        self.assertEqual((len(self.requests), len(self.s2_requests)), (2, 1))
+        self.assertEqual(len(self.limiters), 1)
+        request = self.s2_requests[0]
+        parts = urlsplit(request.full_url)
+        self.assertEqual((parts.scheme, parts.netloc, parts.path),
+                         ("https", "api.semanticscholar.org", "/graph/v1/paper/batch"))
+        expected_fields = (
+            "paperId,corpusId,externalIds,title,abstract,authors,year,venue,"
+            "publicationVenue,publicationTypes,journal,citationCount,"
+            "influentialCitationCount,referenceCount,fieldsOfStudy,"
+            "s2FieldsOfStudy,openAccessPdf,url")
+        self.assertEqual(parse_qs(parts.query), {"fields": [expected_fields]})
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(json.loads(request.data), {"ids": ["ARXIV:" + pair[1]]})
+        headers = {key.lower(): value for key, value in request.header_items()}
+        self.assertEqual(headers["x-api-key"], SECRET)
+        self.assertEqual(headers["content-type"], "application/json")
+        self.assertEqual(headers["accept"], "application/json")
+        self.assertEqual(headers["accept-encoding"], "identity")
+        self.assertEqual(headers["user-agent"], s2.USER_AGENT)
+        self.assertNotIn(KEY, os.environ)
+        self.assertEqual(self.s2_starts[0], self.starts[-1])  # Fresh S2 limiter has no initial delay.
+        manifest = self.store().read_manifest(*pair)
+        self.assertEqual([manifest["versions"][v]["status"] for v in ("v1", "v2", "v3")],
+                         ["success", "pending", "pending"])
+        self.assertTrue(self.store().should_skip_version(*pair, "v1"))
+        self.assertEqual(self.store().read_references(*pair)["status"], "not_attempted")
+        snapshot = self.store().read_metadata(*pair)["provenance"]["semantic_scholar"]["snapshot"]
+        self.assertEqual((snapshot["status"], snapshot["http_status"], snapshot["attempts"]),
+                         ("rate_limited", 429, 1))
+        self.assertNotIn(SECRET, json.dumps(report))
+        for path in self.output.rglob("*.json"):
+            self.assertNotIn(SECRET, path.read_text(encoding="utf-8"))
+
+    def test_full_smoke_dotenv_metadata_and_references_share_limiter(self):
+        pair = smoke.DEFAULT_PAIR
+        self.arxiv_success((pair,), versions=3)
+        self.s2_success((pair,))
+        report, code = self._execute_fake_smoke()
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.limiters), 1)
+        self.assertEqual(self.limiters[0].min_interval, 2)
+        self.assertEqual((len(self.requests), len(self.s2_requests)), (2, 2))
+        self.assertGreaterEqual(self.s2_starts[1] - self.s2_starts[0], 2)
+        self.assertEqual([request.get_method() for request in self.s2_requests], ["POST", "GET"])
+        self.assertTrue(all(request.get_header("X-api-key") == SECRET
+                            for request in self.s2_requests))
+        self.assertTrue(report["verification"]["reference_coverage_verified"])
+        self.assertNotIn(SECRET, json.dumps(report))
 
     def test_s2_off_does_not_read_even_malformed_dotenv(self):
         self.env_file.write_text(SECRET + " invalid assignment", encoding="utf-8")
