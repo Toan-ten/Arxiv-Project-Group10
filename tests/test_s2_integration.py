@@ -69,7 +69,7 @@ class S2IntegrationTests(unittest.TestCase):
 
     def run_on(self, pairs=None, **changes):
         options = dict(timeout=15, max_attempts=1, versions=("v1",),
-                       run_id="offline-fixture", s2_config=self.config())
+                       run_id="offline-fixture", s2_config=self.config(), revision_history=False)
         options.update(changes)
         return pipeline.run_selected([PAIR] if pairs is None else pairs, self.root, **options)
 
@@ -104,7 +104,7 @@ class S2IntegrationTests(unittest.TestCase):
 
     def settings(self, **changes):
         result = dict(batch_id="s2-offline", max_ids=3, versions=("v1",),
-                      timeout=15, max_attempts=1, s2_config=self.config(),
+                      timeout=15, max_attempts=1, s2_config=self.config(), revision_history=False,
                       log_root=Path(self.temp.name) / "logs")
         result.update(changes)
         return result

@@ -49,8 +49,10 @@ def _fingerprint(value):
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config=None):
+def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config=None,
+                revision_history=False):
     _require(type(max_ids) is int and max_ids > 0)
+    _require(type(revision_history) is bool)
     chosen = pipeline._version_selection(versions)
     validated = pipeline._inputs(pairs, CorpusStorage(corpus), timeout, max_attempts, user_agent)
     _require(bool(validated))
@@ -61,6 +63,8 @@ def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_ag
         versions=None if chosen is None else sorted(chosen, key=lambda v: int(v[1:])),
         timeout=float(timeout), max_attempts=max_attempts, user_agent=user_agent,
     )
+    if revision_history:
+        definition["revision_history"] = True
     s2_config = s2_integration.configuration(s2_config)
     if s2_config is not None:
         definition["s2"] = s2_config
@@ -82,7 +86,7 @@ def _load_evidence(directory, batch_id, corpus):
     expected = _definition(
         definition["input_pairs"], corpus, definition["max_ids"],
         definition["versions"], definition["timeout"], definition["max_attempts"],
-        definition["user_agent"], definition.get("s2"),
+        definition["user_agent"], definition.get("s2"), definition.get("revision_history", False),
     )
     _require(definition == expected)
     history = batch._history(batch._safe(directory / "attempts"), batch_id, definition["selection"])
@@ -136,7 +140,7 @@ def _stop_reason(attempt):
     return dict(
         type="http_policy" if reason.get("type") == "http_policy" else "unclassified",
         stage=reason.get("stage") if reason.get("stage") in (
-            "source", "discovery", "s2_metadata", "s2_references") else None,
+            "source", "discovery", "s2_metadata", "s2_references", "revision_history") else None,
         http_status=reason.get("http_status") if reason.get("http_status") in (403, 429) else None,
         arxiv_id=reason.get("arxiv_id") if any(
             row["arxiv_id"] == reason.get("arxiv_id") for row in attempt["papers"]) else None,
@@ -182,7 +186,7 @@ def _history_summary(history):
                     mssv=row["mssv"],
                     stage=error["stage"] if error["stage"] in {
                         "source", "discovery", "storage", "checkpoint", "pipeline",
-                        "s2_metadata", "s2_references",
+                        "s2_metadata", "s2_references", "revision_history",
                     } else "unclassified",
                     type=error["type"] if error["type"] in SOURCE_ERRORS | DISCOVERY_STATES | {
                         "needs_verification", "not_discovered", "StorageError", "IntegrityError",
@@ -502,21 +506,28 @@ def run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None, s2_config=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
     Reports are isolated in a newly reserved experiment directory. Exceptions
     produce a failed execution report then re-raise the original exception.
     Historical attempts have logs only, not retroactively measured RAM/time.
+    revision_history follows Batch: enabled for new definitions, inherited on
+    resume. Sampling and wall time enclose the automatic history step.
     """
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
-    definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config)
+    _require(revision_history is None or type(revision_history) is bool)
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
     sampling = sampling_config(corpus, sample_interval, disk_interval, disk_roots)
-    previous = []
+    previous, existing = [], None
     if directory.exists():
         existing, previous = _load(directory, batch_id, corpus)
+    if revision_history is None:
+        revision_history = existing.get("revision_history", False) if existing else True
+    definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts,
+                             user_agent, s2_config, revision_history)
+    if existing is not None:
         _require(resume and existing == definition)
     else:
         _require(not resume)
@@ -543,6 +554,8 @@ def run_benchmark(
         resources_path=str(destination / "resources.json"),
         previous_attempt_ids=[a["attempt_id"] for a in previous],
     )
+    if "revision_history" in definition:
+        intent["configuration"]["revision_history"] = definition["revision_history"]
     if "s2" in definition:
         intent["configuration"]["s2"] = copy.deepcopy(definition["s2"])
     _atomic_json(destination / "intent.json", intent)
@@ -554,6 +567,7 @@ def run_benchmark(
                 pairs, corpus, batch_id=batch_id, max_ids=max_ids, log_root=logs,
                 resume=resume, versions=versions, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
+                revision_history=revision_history,
                 **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:

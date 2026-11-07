@@ -22,7 +22,7 @@ hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus
 ## Gọi từ Python
 
 `run_selected(pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None)` trả dictionary summary.
+user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None, revision_history=True)` trả dictionary summary.
 
 Import module không gửi request hoặc ghi output. **Gọi hàm sẽ dùng HTTP client
 thật nếu không có fake HTTP.** Ví dụ dưới đây chỉ dùng sau khi được duyệt pilot,
@@ -38,6 +38,7 @@ summary = run_selected(
     timeout=15,
     max_attempts=1,
     versions=("v1",),
+    revision_history=False,  # bounded source-only-version pilot
 )
 ```
 
@@ -177,3 +178,38 @@ Nguồn quy định: [contract v2](m1_contract.md), [Storage](storage.md),
 Lỗi callback truyền ra ngay, không chuyển sang HTTP tiếp theo. Lỗi nghiêm trọng
 hoặc KeyboardInterrupt có thể không có callback kết thúc; bên gọi phải ghi trạng thái
 cuối từ exception. [Batch Runner](batch.md) dùng callback để lưu tiến độ atomic.
+
+
+## Tự động bổ sung lịch sử version
+
+`revision_history=True` là mặc định khi gọi Pipeline trực tiếp. Sau khi xử lý
+source, Pipeline gọi `enrich_version_history()` một lần cho paper đã resolve,
+trước Semantic Scholar. Chọn `versions=("v1",)` chỉ giới hạn source; history
+vẫn xác minh ngày của toàn bộ versions được Discovery phát hiện. Để giữ ngân
+sách pilot v1 cũ, truyền `revision_history=False`; Live Smoke cố định đã tắt
+bước này, không thêm CLI flag hoặc thay đổi marker của smoke cũ.
+
+V1 có ngày submission và bằng chứng Discovery hợp lệ không cần request thêm.
+History đầy đủ được kiểm chứng lại từ cache; không gọi lại API. Paper nhiều
+versions chưa có history cần tối đa N request phiên bản nếu `max_attempts=1`,
+ngoài Discovery và source. Mỗi response phải khớp đúng ID version và ngày có
+múi giờ. Không suy ngày các revision từ `updated` của latest. HTTP client,
+lock, pacing >= 3 giây, retry hữu hạn và HTTP metrics hiện có được dùng chung.
+
+Summary có `revision_history`: action/status, provider/query ID, retrieved_at,
+observed_at, received_versions, HTTP status/error và wall_seconds. XML đầy đủ
+chỉ nằm trong metadata provenance khi history đã xác minh, không nhân bản vào
+run logs. Các callback vẫn chỉ là `paper_started` và `paper_finished`.
+
+Khi history timeout/response thiếu ngày, metadata chưa đủ ngày vẫn partial;
+ngày đã biết và source/S2/references cũ được giữ. Kết quả lỗi và provenance truy
+vấn nằm trong summary/run log hiện có. Prefix history nhận được trước lỗi chưa
+được checkpoint riêng: resume skip source tốt rồi thử lại history từ đầu.
+Cache hỏng/mâu thuẫn bị blocked để audit, không tự refetch đè. Lỗi ghi I/O
+nghiêm trọng dừng Pipeline; 403/429 history dừng toàn batch trước S2/ID kế tiếp.
+History failure không được ghi đè metadata tốt: stop_reason.checkpoint_saved
+là false cho lỗi history; diagnostic vẫn được callback ghi vào attempt log.
+
+History thành công không tự hoàn thành publication. Metadata còn partial nếu
+thiếu title/authors/ngày hoặc chưa có S2 verified; publication còn partial nếu
+thiếu source versions hoặc references theo contract. Xem [M1 finalization](m1_finalization.md).

@@ -4,11 +4,12 @@ No requests or output are produced on import. Calls use the existing HTTP
 client; offline callers/tests must provide fake HTTP. Single writer only.
 """
 import copy
+from datetime import datetime, timezone
 import math
 import re
 import time
 
-from src import arxiv_client, arxiv_source, semantic_scholar, s2_integration
+from src import arxiv_client, arxiv_source, arxiv_history, semantic_scholar, s2_integration
 from src.storage import CorpusStorage, StorageError, TERMINAL, RETRYABLE
 
 
@@ -227,6 +228,54 @@ def _run_paper(store, paper, options, versions):
 
 
 
+def _run_history(store, paper, options):
+    info = paper["revision_history"]
+    if (paper["discovery"]["status"] != "found"
+            or paper["discovery"]["version_status"] != "resolved"):
+        return
+    if paper["blocked"]:
+        info.update(action="blocked", status="blocked")
+        return
+    mssv, identifier = paper["mssv"], paper["arxiv_id"]
+    started = time.perf_counter()
+    info.update(action="in_progress", status="in_progress",
+                observed_at=datetime.now(timezone.utc).isoformat())
+    try:
+        result = arxiv_history.enrich_version_history(store, mssv, identifier, **options)
+    except StorageError as exc:
+        info.update(action="blocked", status="blocked", error=dict(type=type(exc).__name__))
+        paper["blocked"]["revision_history"] = type(exc).__name__
+        _error(paper, "revision_history", type(exc).__name__, exc)
+        raise
+    except BaseException as exc:
+        info.update(action="failed", status="interrupted" if isinstance(
+            exc, (KeyboardInterrupt, SystemExit)) else "failed", error=dict(type=type(exc).__name__))
+        raise
+    finally:
+        info["wall_seconds"] = max(0.0, time.perf_counter() - started)
+    info.update(action=result["action"], status=result["status"],
+                http_status=result.get("http_status"), error=result["error"])
+    # Keep large raw XML in metadata provenance, not every run-log snapshot.
+    info["received_versions"] = [r["versioned_id"] for r in result["records"]]
+    metadata = store.read_metadata(mssv, identifier)
+    provenance = metadata["provenance"]["version_history"]
+    info["retrieved_at"] = provenance.get("retrieved_at") if provenance else None
+    if result["action"] == "cached" and provenance is None:
+        discovery = metadata["provenance"]["arxiv"]
+        source = discovery.get("field_sources", {}).get("published", discovery)
+        info.update(provider="arxiv_discovery", retrieved_at=source["retrieved_at"])
+    _checkpoint(paper, store.read_manifest(mssv, identifier))
+    if result["error"]:
+        error = result["error"]
+        version = error["versioned_id"][len(identifier):]
+        _error(paper, "revision_history", error["type"], error["message"], version)
+        # Failed history leaves good checkpoint JSON intact. The existing paper
+        # callback persists its diagnostic and stop reason before the next paper.
+        if result["stopped"]:
+            raise _HttpPolicyStop(paper, "revision_history", result["http_status"],
+                                  version, checkpoint_saved=False)
+
+
 def _save_s2_result(store, paper, stage, result, build, save, *, references=False):
     """Preserve the HTTP stop signal even when validation/persistence fails."""
     http = s2_integration.http_status(result, references=references)
@@ -320,6 +369,7 @@ def _run_s2(store, paper, config, limiter):
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
     user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None,
+    revision_history=True,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
@@ -329,6 +379,10 @@ def run_selected(
     versions=None processes all versions; a nonempty list/tuple of distinct vN
     names limits source requests while retaining the full discovery/checkpoint.
     An unconfirmed selected name blocks source requests for that paper.
+    revision_history=True enriches confirmed version dates after source and
+    before S2, including when versions limits only the source selection. False
+    preserves the bounded legacy profile. History shares arXiv pacing/retries
+    and HTTP metrics; no new progress events are emitted.
 
     The returned summary separates operations from contract states: skipped,
     blocked and failed actions never replace a stored version's actual status.
@@ -339,6 +393,8 @@ def run_selected(
     on_progress(event, summary_copy) runs before/after each paper. Callback
     exceptions propagate immediately and prevent the next HTTP operation.
     """
+    if type(revision_history) is not bool:
+        raise ValueError("revision_history must be bool")
     if on_progress is not None and not callable(on_progress):
         raise ValueError("on_progress must be callable or None")
     versions = _version_selection(versions)
@@ -359,6 +415,12 @@ def run_selected(
                            wall_seconds=None, timing_status="not_attempted"),
             source={}, skipped=[], pending=[], blocked={}, errors=[],
         )
+        if revision_history:
+            paper["revision_history"] = dict(
+                action="not_attempted", status=None, http_status=None, error=None,
+                provider="arxiv_atom_versioned", query_identifier=arxiv_id,
+                retrieved_at=None, received_versions=[], wall_seconds=None,
+            )
         if s2_config is not None:
             for stage in ("s2_metadata", "s2_references"):
                 paper[stage] = dict(action="not_attempted", status=None, http_status=None,
@@ -370,6 +432,8 @@ def run_selected(
             if not _run_paper(store, paper, options, versions):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
+            if revision_history:
+                _run_history(store, paper, options)
             if s2_config is not None:
                 _run_s2(store, paper, s2_config, limiter)
         except _HttpPolicyStop as exc:

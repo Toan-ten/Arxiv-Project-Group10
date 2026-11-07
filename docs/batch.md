@@ -11,7 +11,7 @@ run_batch(
     pairs, corpus_root, *,
     batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT, s2_config=None,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None, revision_history=None,
 )
 ```
 
@@ -203,3 +203,19 @@ Giữ arXiv max_attempts=1 để chính sách dừng tại 403/429 không đổi
 Chỉ một process/writer được dùng corpus. Kiểm tra process cũ đã dừng và review
 cooldown trước khi tiếp tục sau 403/429. Batch API không tự lặp lại attempt.
 Không chạy lệnh live trong lượt triển khai/kiểm thử offline này.
+
+
+## Revision history và tương thích batch cũ
+
+`revision_history=None` bật history cho batch mới. Khi resume, None kế thừa
+cấu hình đã lưu; batch cũ thiếu field này được hiểu là tắt history. False giữ
+định dạng legacy không có field, True lưu `definition.revision_history=true`.
+Đổi chế độ trên cùng batch ID bị từ chối trước HTTP/ghi log. Muốn bổ sung history
+cho corpus cũ, dùng batch ID mới trên cùng corpus với `revision_history=True`;
+source/discovery tốt tiếp tục được skip và log cũ giữ nguyên.
+
+Bước history nằm trong hai callback paper hiện có nên attempt wall time,
+paper wall time và bộ đếm HTTP chung bao gồm cả request/pacing/retry history.
+Không có hệ thống logging mới. Lỗi 403/429 tại history ghi stopped; lỗi timeout
+thông thường giữ partial, cho phép resume sau khi được duyệt. Đừng tự lặp batch
+sau policy stop. Xem [Pipeline](pipeline.md) về số request và cache.

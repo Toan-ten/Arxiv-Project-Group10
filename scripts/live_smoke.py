@@ -278,7 +278,8 @@ def _execute_live(plan):
             outcome = batch.run_batch(
                 [tuple(plan["pair"])], root / "corpus", batch_id=BATCH_ID, max_ids=1,
                 log_root=root / "logs", resume=plan["resume"], versions=("v1",),
-                timeout=plan["timeout"], max_attempts=1, s2_config=plan["s2_config"])
+                timeout=plan["timeout"], max_attempts=1, s2_config=plan["s2_config"],
+                revision_history=False)
         except (KeyboardInterrupt, SystemExit):
             execution_status, error_type = "interrupted", "interrupted"
         except Exception as exc:

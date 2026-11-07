@@ -224,7 +224,7 @@ class IntegratedMetricsTests(unittest.TestCase):
             batch_id="metrics-batch", max_ids=2,
             log_root=Path(self.temp.name) / "logs",
             report_root=Path(self.temp.name) / "reports",
-            versions=("v1",), timeout=15, max_attempts=1,
+            versions=("v1",), timeout=15, max_attempts=1, revision_history=False,
         )
 
     def engine(self, callback, *, report_path, **kwargs):

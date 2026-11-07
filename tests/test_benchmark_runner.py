@@ -27,7 +27,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
             batch_id="offline-benchmark", max_ids=3,
             log_root=Path(self.temp.name) / "logs",
             report_root=Path(self.temp.name) / "reports",
-            versions=("v1",), timeout=15, max_attempts=1,
+            versions=("v1",), timeout=15, max_attempts=1, revision_history=False,
         )
 
     def fake_benchmark(self, call, *, corpus_output_dir, report_path, **kwargs):

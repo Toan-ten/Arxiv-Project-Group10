@@ -11,7 +11,7 @@ run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None, s2_config=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
 )
 aggregate_batch(corpus_root, *, batch_id, log_root)
 ```
@@ -273,3 +273,18 @@ thay đổi. Audit Storage/checksum vẫn độc lập với HTTP metrics. Đổ
 batch ID mới với cùng corpus sẽ tái sử dụng dữ liệu, nhưng metrics/thời gian của
 batch mới chỉ đo phần chạy mới; không tự gộp các cấu hình khác nhau thành một
 benchmark hoàn chỉnh. Không cộng lại dung lượng snapshot corpus qua nhiều attempts.
+
+
+## Phạm vi đo revision history
+
+`revision_history` được chuyển vào Batch, bật mặc định với batch mới và kế thừa
+cấu hình khi resume; batch legacy thiếu field vẫn tắt. Không nâng cấp log cũ.
+Config true được giữ trong intent/report. Muốn đổi chế độ cần batch ID mới.
+
+Callback benchmark bao trọn bước history trong Pipeline: wall time tổng và từng
+paper, RAM sampling, disk sampling và HTTP counts hiện có đều bao gồm nó.
+Không đổi công thức RAM/disk hoặc foundation. `discovery_wall_seconds` vẫn đo
+riêng `query_arxiv()` cho Entry Discovery; không gộp history thành số discovery
+API calls. Thời gian history có trong result.revision_history.wall_seconds của
+mỗi paper/attempt, không có phép đo hồi tố cho logs cũ. Chỉ gọi run_benchmark()
+mới có resource sampling; run_batch() đơn thuần không tạo số đo RAM/disk.

@@ -146,13 +146,16 @@ def _history(directory, batch_id, selection):
 def run_batch(
     pairs, corpus_root, *, batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT, s2_config=None,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None, revision_history=None,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
     Existing batches require resume=True, including an explicitly authorized
     restart after 403/429. Every invocation uses Storage/checksum again.
     Log failures and interrupts propagate. No automatic outer retries.
+    revision_history=None enables history for a new batch and inherits an
+    existing definition (missing flag means legacy/off). An explicit change
+    requires a new batch_id; no old definition or log is rewritten.
     """
     if (not isinstance(batch_id, str) or
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", batch_id) is None or
@@ -163,6 +166,8 @@ def run_batch(
         raise BatchError("max_ids must be a positive integer")
     if type(resume) is not bool:
         raise BatchError("resume must be bool")
+    if revision_history is not None and type(revision_history) is not bool:
+        raise BatchError("revision_history must be bool or None")
     chosen_versions = pipeline._version_selection(versions)
     s2_config = s2_integration.configuration(s2_config)
     store = CorpusStorage(corpus_root)
@@ -175,16 +180,25 @@ def run_batch(
     directory = _safe(logs / batch_id)
     manifest_path = directory / "batch.json"
     attempts = _safe(directory / "attempts")
+    existing = _read(manifest_path) if directory.exists() else None
+    if existing is not None and not isinstance(existing.get("definition"), dict):
+        raise BatchError("Invalid batch definition")
+    if revision_history is None:
+        revision_history = existing["definition"].get("revision_history", False) if existing else True
+    if type(revision_history) is not bool:
+        raise BatchError("Invalid stored revision_history")
     definition = dict(
         input_pairs=[list(pair) for pair in validated], selection=selection,
         corpus_root=os.path.normcase(str(corpus)), max_ids=max_ids,
         versions=None if chosen_versions is None else sorted(chosen_versions, key=lambda v: int(v[1:])),
         timeout=float(timeout), max_attempts=max_attempts, user_agent=user_agent,
     )
+    if revision_history:
+        definition["revision_history"] = True
     if s2_config is not None:
         definition["s2"] = s2_config
     if directory.exists():
-        manifest = _read(manifest_path)
+        manifest = existing
         if (manifest.get("schema_version") != 1 or manifest.get("batch_id") != batch_id or
                 manifest.get("definition") != definition):
             raise BatchError("Batch definition changed; create a new batch_id")
@@ -261,6 +275,7 @@ def run_batch(
                 selection, corpus, run_id=run_id, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
                 versions=definition["versions"], on_progress=progress,
+                revision_history=revision_history,
                 **({"s2_config": s2_config} if s2_config is not None else {}),
             )
     except BatchLogError:

@@ -30,7 +30,7 @@ class BatchTests(unittest.TestCase):
         settings = dict(
             batch_id="offline-batch", max_ids=3,
             log_root=Path(self.temp.name) / "logs", versions=("v1",),
-            timeout=15, max_attempts=1,
+            timeout=15, max_attempts=1, revision_history=False,
         )
         settings.update(options)
         return batch.run_batch(

@@ -104,6 +104,10 @@ Biến môi trường được ưu tiên; không commit `.env`. Bộ đọc dùn
 không cần cài thêm package. [Live Smoke](docs/live_smoke.md) mặc định chỉ dry run.
 Xem [S2 integration: bật/tắt, cache, resume và batch stop](docs/s2_integration.md).
 
+Xem [ngày revision, S2 batching và arXiv-first](docs/m1_finalization.md).
+Pipeline và batch mới tự bổ sung ngày từng version; history đã xác minh được cache.
+Live Smoke có ngân sách cố định giữ chế độ history tắt.
+
 ## Pipeline v1
 
 `run_selected(pairs, corpus_root, ...)` trong `src.pipeline` nhận danh sách

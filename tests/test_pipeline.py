@@ -101,7 +101,7 @@ class PipelineTests(unittest.TestCase):
         return outcome
 
     def run_pairs(self, pairs=None, **options):
-        settings = dict(run_id="offline-fixture", timeout=15, max_attempts=1)
+        settings = dict(run_id="offline-fixture", timeout=15, max_attempts=1, revision_history=False)
         settings.update(options)
         return run_selected([PAIR] if pairs is None else pairs, self.root, **settings)
 
