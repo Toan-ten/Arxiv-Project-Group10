@@ -57,12 +57,16 @@ def parse_args(argv=None):
 
 
 def _redact(value):
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
-    if isinstance(value, dict):
-        return {k: _redact(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_redact(v) for v in value]
-    return value.replace(key, "[REDACTED]") if key and isinstance(value, str) else value
+    key = semantic_scholar._key_from_environment()
+
+    def redact(item):
+        if isinstance(item, dict):
+            return {k: redact(v) for k, v in item.items()}
+        if isinstance(item, list):
+            return [redact(v) for v in item]
+        return item.replace(key, "[REDACTED]") if key and isinstance(item, str) else item
+
+    return redact(value)
 
 
 def _local_drive(path):
@@ -90,7 +94,7 @@ def _safe_output(value):
         raise SmokeError("Output must be outside both repositories and their ancestor directories")
     if any((parent / ".git").exists() for parent in (path, *path.parents)):
         raise SmokeError("Output inside a Git repository is forbidden")
-    key = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()
+    key = semantic_scholar._key_from_environment()
     if key and key in str(path):
         raise SmokeError("Output path contains a secret")
     return path

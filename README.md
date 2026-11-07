@@ -97,6 +97,11 @@ timeout, retry hữu hạn và dừng lời gọi khi hết attempts mà vẫn b
 trong bộ nhớ, giữ cả references thiếu arXiv ID. Client không ghi corpus;
 Pipeline có thể lưu qua Storage khi bật `s2_config`. Tích hợp mới được kiểm thử offline.
 Xem [API, cấu hình key/pacing và các trạng thái kết quả](docs/semantic_scholar.md).
+
+Có thể lưu key S2 một lần trong `.env` tại root; dùng `.env.example` làm mẫu
+và làm theo [hướng dẫn cấu hình local](docs/semantic_scholar.md#api-key-môi-trường-hoặc-env-tại-root).
+Biến môi trường được ưu tiên; không commit `.env`. Bộ đọc dùng thư viện chuẩn,
+không cần cài thêm package. [Live Smoke](docs/live_smoke.md) mặc định chỉ dry run.
 Xem [S2 integration: bật/tắt, cache, resume và batch stop](docs/s2_integration.md).
 
 ## Pipeline v1

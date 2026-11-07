@@ -125,11 +125,77 @@ Nếu 429 còn tồn tại sau attempts cuối:
   Đây là ID chưa gửi do dừng theo chính sách, không phải một HTTP 429 đã quan sát.
 - Kết quả các chunk trước được giữ nguyên.
 
-Key chỉ đọc từ biến môi trường `SEMANTIC_SCHOLAR_API_KEY` khi gọi hàm với đầu
-vào không rỗng. Chỉ thêm `x-api-key` khi có key; chuỗi rỗng không tạo header.
-Key có ký tự không hợp lệ bị từ chối bằng lỗi cố định, không in giá trị.
+## API key: môi trường hoặc .env tại root
+
+Metadata, References và các entrypoint Pipeline/Batch/Benchmark bật S2 dùng chung
+`src.local_config.get_semantic_scholar_api_key()`. Live Smoke dùng cùng bộ đọc
+để kiểm tra cấu hình và che secret, kể cả ở dry run. Không đọc key khi import;
+Pipeline tắt S2 không cần đọc `.env`.
+
+Bộ đọc dùng thư viện chuẩn, không cần cài package mới. Nó chỉ mở `.env` cạnh
+thư mục `src/` của repository đã clone, không tìm theo working directory,
+thư mục cha hoặc home. Không nạp các biến khác vào `os.environ`.
+
+Từ root repository, tạo file một lần nếu chưa có:
+
+```powershell
+if (-not (Test-Path -LiteralPath .env)) {
+    Copy-Item -LiteralPath .env.example -Destination .env
+}
+notepad .env
+```
+
+Điền key vào giá trị đang trống của `SEMANTIC_SCHOLAR_API_KEY=`, lưu file và
+đóng trình soạn thảo. Chỉ sửa file local; không dán key vào command, source,
+notebook, log hoặc tài liệu. `.env` bị Git ignore; `.env.example` chỉ chứa
+placeholder rỗng và được phép commit.
+
+Thứ tự ưu tiên:
+
+1. Biến môi trường đã được đặt có ưu tiên cao hơn `.env`. Biến rỗng hoặc chỉ
+   có khoảng trắng giữ hành vi cũ: không gửi key và không fallback sang file.
+2. Khi biến môi trường không tồn tại, đọc key từ `.env` tại root.
+3. Thiếu file, thiếu biến hoặc giá trị rỗng: client tiếp tục không có key.
+   Truy cập không key có thể bị hạn chế; không coi đó là key đã được cấu hình.
+
+Key sai định dạng bị từ chối bằng lỗi cố định, không in giá trị và không âm
+thầm đổi sang key khác. Chỉ gửi header `x-api-key` khi có key hợp lệ về định dạng.
+Kiểm tra này không xác thực quyền truy cập API hay phát hiện mọi ký tự gõ sai.
+
+Kiểm tra local, không gọi API và chỉ in trạng thái có/không:
+
+```powershell
+.\venv\Scripts\python.exe -B -c "from src.local_config import get_semantic_scholar_api_key; print('S2 key configured:', bool(get_semantic_scholar_api_key()))"
+git check-ignore -v .env
+```
+
+Nếu Windows đang giữ biến môi trường cũ/sai, xóa riêng biến đó trong phiên
+PowerShell hiện tại rồi chạy lại kiểm tra để dùng `.env`:
+
+```powershell
+Remove-Item Env:SEMANTIC_SCHOLAR_API_KEY -ErrorAction SilentlyContinue
+```
+
+Nếu trước đây đã lưu biến ở cấp User và muốn bỏ nó cho các phiên sau:
+
+```powershell
+[Environment]::SetEnvironmentVariable('SEMANTIC_SCHOLAR_API_KEY', $null, 'User')
+```
+
+Sau đó mở lại PowerShell/VS Code để tránh kế thừa biến cũ từ process cha.
+Biến cấp Machine, nếu có, vẫn có thể được kế thừa; không tự thay đổi cấp đó.
+Key sai một ký tự nhưng vẫn đúng định dạng ASCII sẽ không bị phát hiện offline.
+
+Định dạng file hỗ trợ: UTF-8 (có thể có BOM), LF/CRLF, comment `#`, dòng
+`KEY=value`, tùy chọn `export`, giá trị một dòng có hoặc không có dấu nháy.
+Comment cuối giá trị không nháy phải cách bằng khoảng trắng. Không hỗ trợ
+multiline, escape sequences hoặc nội suy biến/lệnh; duplicate key, cú pháp
+sai, file quá 64 KiB hoặc symlink bị từ chối bằng thông báo không chứa secret.
+Đây là bộ đọc cấu hình S2 nhỏ, không phải toàn bộ cú pháp của python-dotenv.
+
+Trên Colab có thể đặt `os.environ["SEMANTIC_SCHOLAR_API_KEY"]` từ Colab Secrets;
+không cần tạo `.env`. Bộ đọc không thay đổi biến môi trường hoặc limiter.
 Client không log request headers, key, response body hoặc raw exception text.
-Không đặt key vào file nguồn, README, notebook hay command có thể lưu lịch sử.
 
 ## Kiểm thử offline và giới hạn
 

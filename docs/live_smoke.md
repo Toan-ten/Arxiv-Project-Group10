@@ -48,15 +48,20 @@ Thư mục đã tồn tại bị từ chối nếu chưa chọn resume; không t
 
 ## Người dùng tự chạy live sau khi review
 
-Nếu có API key, có thể nhập vào môi trường phiên PowerShell mà không ghi literal
-vào script/history:
+Có thể lưu key một lần trong `.env` tại root theo
+[hướng dẫn cấu hình S2](semantic_scholar.md#api-key-môi-trường-hoặc-env-tại-root).
+Các lần chạy sau tự đọc file; biến môi trường đã đặt luôn được ưu tiên.
+Nếu biến Windows cũ đang sai, xem hướng dẫn gỡ biến ở liên kết trên.
+
+Kiểm tra đã nạp key mà không hiển thị secret hoặc gọi API:
 
 ```powershell
-$env:SEMANTIC_SCHOLAR_API_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'S2 API key' -AsSecureString)).Password
+.\venv\Scripts\python.exe -B -c "from src.local_config import get_semantic_scholar_api_key; print('S2 key configured:', bool(get_semantic_scholar_api_key()))"
 ```
 
 Không bắt buộc có key để dùng client, nhưng truy cập không key có thể bị hạn chế.
-Không gửi key qua argument, không chép key vào tài liệu/log.
+Không gửi key qua argument, không chép key vào tài liệu/log. Dry run vẫn không
+gọi mạng hoặc ghi corpus; cấu hình key sai định dạng sẽ bị từ chối an toàn.
 
 **Lệnh bên dưới dùng mạng thật; tác vụ chuẩn bị chưa thực hiện lệnh này:**
 

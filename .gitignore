@@ -228,6 +228,7 @@ __marimo__/
 
 # Local environment overrides
 .env.*
+!/.env.example
 
 # Crawl data and runtime files
 /data/

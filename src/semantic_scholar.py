@@ -8,7 +8,6 @@ from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import json
 import math
-import os
 import random
 from threading import Lock
 import time
@@ -20,6 +19,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import ssl
 
 from src.arxiv_discovery import ID_PATTERN
+from src.local_config import get_semantic_scholar_api_key
 
 
 BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
@@ -109,18 +109,8 @@ def _retry_after(value):
 
 
 def _key_from_environment():
-    value = os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "")
-    if not value:
-        return None
-    if "\r" in value or "\n" in value:
-        raise ValueError("Invalid SEMANTIC_SCHOLAR_API_KEY header")
-    value = value.strip()
-    if not value:
-        return None
-    if not value.isascii() or any(ord(c) < 33 or ord(c) > 126 for c in value):
-        raise ValueError("Invalid SEMANTIC_SCHOLAR_API_KEY header")
-    return value
-
+    # Keep the existing integration boundary; resolve the optional root .env lazily.
+    return get_semantic_scholar_api_key()
 
 def _json_object(pairs):
     result = {}
