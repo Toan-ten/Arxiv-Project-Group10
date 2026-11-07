@@ -158,3 +158,48 @@ print(result["status"], result["stats"], result["stop_reason"])
 
 Dùng đích mới cho pilot. Chỉ thêm `resume=True` ở một lần chạy lại được chủ động
 cho phép sau khi kiểm tra log và bảo đảm process cũ dừng. Không tự chạy Pilot 10/500.
+
+## HTTP metrics và cấu hình S2 retry
+
+Mỗi run_batch() tạo một HttpMetrics collector riêng cho attempt mới. Client ghi
+số lần thực sự gọi HTTP opener, không suy từ source_downloaded/cached/skipped.
+Các request arXiv và S2 được ghi riêng, không đổi pacing/retry arXiv.
+
+Attempt JSON thêm trường tùy chọn http_metrics (schema_version=1):
+
+- providers.arxiv và providers.semantic_scholar: attempts, completed_attempts,
+  retry_attempts, http_errors, without_http_response, status_counts, wait_seconds.
+- total: tổng hai providers.
+- status: collected khi attempt đã kết thúc và mọi transport call đã đóng;
+  partial khi running hoặc bị ngắt trong transport.
+
+http_errors đếm response >=400; timeout/network không có HTTP status được tách
+vào without_http_response. HTTP 200 với JSON lỗi không phải HTTP error.
+Đếm transport attempts không chứng minh server đã nhận request.
+wait_seconds là sleep thực đo bằng monotonic; phần pacing/backoff chồng nhau chỉ
+đếm một lần. Không gồm thời gian I/O, lock contention, khoảng nghỉ giữa sessions.
+Không ghi URL/body/headers/key hoặc exception text.
+
+Metrics được flush cùng các log progress/final hiện có; không thêm stage event
+vào on_progress. Hard kill có thể làm mất phần chưa flush, vì vậy log running
+không được coi là metrics đầy đủ. Không khôi phục số request từ checkpoint.
+
+Legacy definitions giữ nguyên: ba policy keys max_retry_wait, backoff_base,
+backoff_cap chỉ được thêm vào fingerprint nếu caller chỉ định. Batch cũ vẫn có
+thể Resume với đúng cấu hình max_attempts=1; attempt mới có metrics, log cũ
+không bị sửa hoặc điền ngược số liệu.
+
+Để đổi S2 max_attempts từ 1 sang 3, không sửa batch.json và không bỏ fingerprint:
+dùng batch_id mới, cùng corpus_root, cùng danh sách input và log_root. Đặt
+resume=False cho lần đầu của batch mới, sau đó resume=True với đúng cấu hình mới.
+Các source/metadata/references hợp lệ được đọc lại và skip qua Storage; không copy,
+xóa hoặc tải đè source. Manifest run_id có thể cập nhật theo lần chạy mới.
+
+Cấu hình S2 mới đề xuất:
+dict(min_interval=2, max_attempts=3, max_retry_wait=60, backoff_base=5,
+     backoff_cap=30, timeout=30, reference_limit=100, max_pages=3).
+Giữ arXiv max_attempts=1 để chính sách dừng tại 403/429 không đổi.
+
+Chỉ một process/writer được dùng corpus. Kiểm tra process cũ đã dừng và review
+cooldown trước khi tiếp tục sau 403/429. Batch API không tự lặp lại attempt.
+Không chạy lệnh live trong lượt triển khai/kiểm thử offline này.

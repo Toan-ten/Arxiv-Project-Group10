@@ -14,7 +14,7 @@ import re
 import subprocess
 from uuid import uuid4
 
-from src import arxiv_client, batch, benchmark, pipeline, s2_integration
+from src import arxiv_client, batch, benchmark, pipeline, s2_integration, http_metrics
 from src.benchmark_metrics import sampling_config, timing_summary
 from src.storage import CorpusStorage, StorageError, TERMINAL, DISCOVERY_STATES, SOURCE_ERRORS, _atomic_json
 
@@ -209,7 +209,7 @@ def _history_summary(history):
         wall_scope="sum of Batch persisted perf_counter intervals; excludes session gaps and final log writes",
         wall_status="lower_bound" if any(a["status"] == "running" for a in history) else "logged_intervals",
         paper_wall_seconds=paper_times,
-        http_requests=None, http_errors=None, http_metrics_status="not_collected",
+        **http_metrics.summarize(history),
         downloaded_bytes=None, downloaded_bytes_status="not_collected",
     )
 

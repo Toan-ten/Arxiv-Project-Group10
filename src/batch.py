@@ -12,7 +12,7 @@ import time
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from src import arxiv_client, pipeline, s2_integration
+from src import arxiv_client, pipeline, s2_integration, http_metrics
 from src.pilots import PilotEntry
 from src.storage import CorpusStorage, _atomic_json, _pairs
 
@@ -225,10 +225,19 @@ def run_batch(
         ) for index, pair in enumerate(selection)],
     )
     paper_starts = {}
+    metrics = http_metrics.HttpMetrics()
 
     def persist():
         value["wall_seconds"] = max(0.0, time.perf_counter() - started)
         value["stats"] = _stats(value["papers"])
+        value["http_metrics"] = metrics.snapshot(complete=value["status"] != "running")
+        total = value["http_metrics"]["total"]
+        collected = value["http_metrics"]["status"] == "collected"
+        value["stats"].update(
+            http_requests=total["attempts"] if collected else None,
+            http_errors=total["http_errors"] if collected else None,
+            http_metrics_status=value["http_metrics"]["status"],
+        )
         _save(path, value)
 
     def progress(event, summary):
@@ -247,12 +256,13 @@ def run_batch(
 
     persist()  # The attempt intent is durable before any HTTP or corpus write.
     try:
-        summary = pipeline.run_selected(
-            selection, corpus, run_id=run_id, timeout=timeout,
-            max_attempts=max_attempts, user_agent=user_agent,
-            versions=definition["versions"], on_progress=progress,
-            **({"s2_config": s2_config} if s2_config is not None else {}),
-        )
+        with http_metrics.collect(metrics):
+            summary = pipeline.run_selected(
+                selection, corpus, run_id=run_id, timeout=timeout,
+                max_attempts=max_attempts, user_agent=user_agent,
+                versions=definition["versions"], on_progress=progress,
+                **({"s2_config": s2_config} if s2_config is not None else {}),
+            )
     except BatchLogError:
         raise  # Preserve the last durable snapshot; never continue/retry.
     except BaseException as exc:

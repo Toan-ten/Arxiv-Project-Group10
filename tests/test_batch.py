@@ -63,8 +63,8 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(result["stats"]["processed_papers"], 3)
         self.assertEqual(result["stats"]["discovery_actions"], {"queried": 3})
         self.assertEqual(result["stats"]["source_actions"], {"downloaded": 3, "pending": 6})
-        self.assertIsNone(result["stats"]["http_requests"])
-        self.assertEqual(result["stats"]["http_metrics_status"], "not_collected")
+        self.assertEqual(result["stats"]["http_requests"], 6)
+        self.assertEqual(result["stats"]["http_metrics_status"], "collected")
         self.assertEqual(self.opener.open.call_count, 6)
         self.assertEqual(self.starts, [0, 3, 6, 9, 12, 15])
         self.assertGreaterEqual(result["wall_seconds"], 0)
@@ -240,8 +240,8 @@ class BatchTests(unittest.TestCase):
         self.opener.open.assert_not_called()
         self.assertEqual(second["stats"]["discovery_actions"], {"cached": 3})
         self.assertEqual(second["stats"]["source_actions"], {"skipped": 3})
-        self.assertIsNone(second["stats"]["http_requests"])
-        self.assertIsNone(second["stats"]["http_errors"])
+        self.assertEqual(second["stats"]["http_requests"], 0)
+        self.assertEqual(second["stats"]["http_errors"], 0)
         self.assertEqual(self.attempts()[1], second)
 
     def test_storage_checksum_overrules_previous_success_log(self):

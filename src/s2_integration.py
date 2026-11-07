@@ -18,9 +18,15 @@ def configuration(value):
     defaults = dict(timeout=30.0, max_attempts=1, min_interval=1.0,
                     reference_limit=100, max_pages=1000,
                     max_response_bytes=s2.MAX_RESPONSE_BYTES)
-    if not isinstance(value, dict) or set(value) - set(defaults):
+    policy_keys = {"max_retry_wait", "backoff_base", "backoff_cap"}
+    if not isinstance(value, dict) or set(value) - (set(defaults) | policy_keys):
         raise ValueError("Invalid S2 configuration keys")
     result = dict(defaults, **value)
+    for name in policy_keys & set(value):
+        s2._positive(value[name], "s2." + name)
+        result[name] = float(value[name])
+    s2._retry_policy(result.get("max_retry_wait", 60.0),
+                     result.get("backoff_base", 1.0), result.get("backoff_cap", 60.0))
     for name in ("timeout", "min_interval"):
         s2._positive(result[name], "s2." + name)
         result[name] = float(result[name])
@@ -62,7 +68,12 @@ def metadata_result(result, identifier):
     _require(isinstance(result.get("status"), str) and result["status"] in {
         "found", "not_found", "rate_limited", "http_error", "timeout", "invalid_response",
     }, "metadata_status")
-    _require(type(result.get("attempts")) is int and result["attempts"] >= 1, "attempts")
+    # A reused limiter can refuse admission before a new transport call.
+    zero_cooldown = (result.get("attempts") == 0
+                     and result.get("error") == "cooldown_wait_budget_exceeded"
+                     and result.get("status") in {"rate_limited", "http_error"})
+    _require(type(result.get("attempts")) is int
+             and (result["attempts"] >= 1 or zero_cooldown), "attempts")
     http = result.get("http_status")
     _require(http is None or type(http) is int and 100 <= http <= 599, "http_status")
     status = result["status"]

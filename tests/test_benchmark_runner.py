@@ -129,7 +129,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertEqual(history["operations"]["source_skipped"], 1)
         self.assertEqual(coverage["valid_tex_versions"], 1)
         self.assertEqual(coverage["verified_source_bytes"], len(source))
-        self.assertIsNone(history["http_requests"])
+        self.assertEqual(history["http_requests"], 2)
         self.assertIsNone(history["downloaded_bytes"])
 
     def test_versions_selection_keeps_all_versions_but_not_all_version_complete(self):

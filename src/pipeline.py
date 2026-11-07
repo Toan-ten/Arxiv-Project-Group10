@@ -264,6 +264,7 @@ def _run_s2(store, paper, config, limiter):
         info = paper["s2_metadata"]
         info.update(action="queried", status="in_progress")
         options = {k: config[k] for k in ("timeout", "max_attempts", "max_response_bytes")}
+        options.update({k: config[k] for k in ("max_retry_wait", "backoff_base", "backoff_cap") if k in config})
         result = semantic_scholar.fetch_metadata(
             [identifier], limiter=limiter, require_arxiv_identity=True, **options,
         )[0]
@@ -292,6 +293,7 @@ def _run_s2(store, paper, config, limiter):
         _checkpoint(paper, store.save_references(mssv, identifier, intent))
     info.update(action=action if action == "resumed" else "queried", status="in_progress")
     options = {k: config[k] for k in ("timeout", "max_attempts", "max_response_bytes", "max_pages")}
+    options.update({k: config[k] for k in ("max_retry_wait", "backoff_base", "backoff_cap") if k in config})
     result = semantic_scholar.fetch_references(
         identifier, limit=config["reference_limit"], limiter=limiter,
         resume_from=previous if action == "resumed" else None, **options,

@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from src import http_metrics
 from src.arxiv_discovery import ID_PATTERN, parse_arxiv_response
 
 
@@ -91,19 +92,25 @@ def _request_arxiv(
     with _request_lock:
         for attempt in range(1, max_attempts + 1):
             while (delay := _next_request_at - time.monotonic()) > 0:
-                time.sleep(delay)
+                started_wait = time.monotonic()
+                try:
+                    time.sleep(delay)
+                finally:
+                    http_metrics.waited("arxiv", max(0.0, time.monotonic() - started_wait))
             http_status = None
             retry_after = 0.0
             retry = False
             try:
-                with _opener.open(request, timeout=timeout) as response:
-                    http_status = response.status
-                    retry_after = _retry_after(response.headers.get("Retry-After"))
-                    if http_status != 200:
-                        raise HTTPError(url, http_status, "Unexpected status", response.headers, None)
-                    result = read_response(response)
-                result.update(http_status=http_status, attempts=attempt)
-                return result
+                with http_metrics.request("arxiv", attempt) as observe:
+                    with _opener.open(request, timeout=timeout) as response:
+                        http_status = response.status
+                        observe(http_status)
+                        retry_after = _retry_after(response.headers.get("Retry-After"))
+                        if http_status != 200:
+                            raise HTTPError(url, http_status, "Unexpected status", response.headers, None)
+                        result = read_response(response)
+                    result.update(http_status=http_status, attempts=attempt)
+                    return result
             except HTTPError as exc:
                 http_status = exc.code
                 try:

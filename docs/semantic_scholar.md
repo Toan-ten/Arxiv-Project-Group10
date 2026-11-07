@@ -421,3 +421,44 @@ Kiểm thử safety bổ sung nằm trong hai file tests S2 hiện có, dùng fa
 Hai ca metadata cũ về ID thiếu được điều chỉnh theo mặc định strict; mục đích
 kiểm tra metadata thiếu và explicit positional mode vẫn có regression riêng.
 Chưa thực hiện live smoke, chưa cấp phép chạy 20.000 ID.
+
+## Bounded retry và pacing
+
+Batch gọi Pipeline một lần; Pipeline tạo một RateLimiter S2 và truyền cùng
+instance qua mọi paper, Metadata và References. arXiv dùng limiter riêng.
+Request đầu tiên đi ngay nếu không có cooldown. Limiter chỉ phối hợp các lời
+gọi dùng cùng instance trong một process; không phối hợp máy/phiên khác.
+
+Các tham số keyword-only mới của fetch_metadata()/fetch_references():
+
+- max_retry_wait=60.0: tổng thời gian sleep của limiter trong một HTTP operation
+  (một chunk metadata hoặc một trang references), gồm pacing và backoff.
+- backoff_base=1.0, backoff_cap=60.0: giữ cơ sở mặc định tương thích trước đây.
+  Lần retry thứ n chờ tối thiểu min(base * 2**(n-1) + jitter[0,1], cap),
+  đồng thời tôn trọng pacing và Retry-After lớn hơn.
+- max_attempts tiếp tục gồm lần đầu; max_attempts=1 không tự retry.
+
+Retry-After hỗ trợ số nguyên giây hoặc HTTP-date. Header sai/hết hạn dùng backoff.
+Nếu thời gian chờ cần thiết lớn hơn ngân sách còn lại, không sleep đến hết ngân
+sách rồi gửi sớm: trả kết quả lỗi cuối cùng với retry_wait_budget_exceeded.
+HTTP 429 vẫn là rate_limited/429; 403 không retry và dừng các chunk metadata còn lại.
+Kết quả references lỗi/partial vẫn giữ items, continuation và coverage chưa complete.
+
+Limiter đã có cooldown có thể từ chối trước request đầu tiên:
+error=cooldown_wait_budget_exceeded, attempts=0. http_status là status đã quan sát
+gây cooldown (nếu có), không phải response mới. Metrics không đếm thêm request.
+Integration chỉ chấp nhận attempts=0 cho lỗi admission cụ thể này; success vẫn cần
+attempt thực và identity hợp lệ.
+
+Ngân sách áp dụng riêng từng operation, không phải deadline toàn Batch hoặc thời
+gian HTTP I/O. Max pages và số paper vẫn cần giới hạn. Sleep thực đo bằng monotonic;
+OS suspension/scheduling có thể làm elapsed vượt ngân sách, khi đó không gửi retry.
+
+Cấu hình pilot đề xuất sau review:
+min_interval=2, max_attempts=3, max_retry_wait=60, backoff_base=5, backoff_cap=30.
+Retry-After dài hơn ngân sách sẽ dừng, không bị cap xuống để né giới hạn.
+
+Chưa lưu cooldown qua restart. Không tự retry sau policy stop bằng một process
+mới. Nếu cần bổ sung sau này, có thể dùng một sidecar provider/not_before_utc trong
+log root, ghi atomic và kiểm tra thời hạn/clock; không lưu key, không coi nó là
+khóa phối hợp nhiều máy. Hiện vẫn phải xem quota/cooldown trước một lần chạy mới.

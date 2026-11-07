@@ -251,3 +251,25 @@ arXiv-only; đổi cấu hình cần batch_id mới. Xem [S2 integration](s2_int
 Wall time/resource sampling bao gồm S2; Discovery timing vẫn chỉ thuộc arXiv.
 History nhận diện stage s2_metadata/s2_references, nhưng không suy HTTP counts
 từ attempts hoặc số items. References chưa complete vẫn có count unknown.
+
+## HTTP metrics bổ sung, tương thích báo cáo cũ
+
+Aggregation đọc http_metrics của từng attempt đã được kiểm tra ID/sequence.
+history.http_requests/http_errors là tổng các attempt khác nhau, chỉ có giá trị
+khi toàn bộ lịch sử có metrics đầy đủ/hợp lệ. Cached/skipped không tạo số request.
+
+Nếu lịch sử có attempt cũ chưa instrument: tổng vẫn null, http_metrics_status
+là partial; http_metrics.known/providers chỉ mô tả phần đã đo. missing_attempt_ids,
+invalid_attempt_ids và partial_attempt_ids nêu phần thiếu. Toàn bộ legacy logs
+giữ not_collected. Metrics hỏng được đánh dấu invalid, không in payload lỗi.
+
+status_counts giữ cả 429/403/5xx trung gian dù retry cuối thành công.
+retry_attempts chỉ tăng khi retry thực sự gọi transport, không tăng khi chỉ định
+retry nhưng hết ngân sách. wait_seconds không cộng khoảng nghỉ giữa các sessions.
+Hard kill có thể mất counters chưa flush; không gọi lower bound là tổng chính xác.
+
+Các trường RAM/disk/timing của Metrics v2 và điều kiện publication_complete không
+thay đổi. Audit Storage/checksum vẫn độc lập với HTTP metrics. Đổi cấu hình để dùng
+batch ID mới với cùng corpus sẽ tái sử dụng dữ liệu, nhưng metrics/thời gian của
+batch mới chỉ đo phần chạy mới; không tự gộp các cấu hình khác nhau thành một
+benchmark hoàn chỉnh. Không cộng lại dung lượng snapshot corpus qua nhiều attempts.

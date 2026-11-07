@@ -537,7 +537,7 @@ class S2IntegrationTests(unittest.TestCase):
         self.assertEqual(report["configuration"]["s2"], adapter.configuration(self.config()))
         self.assertEqual(report["batch_status"], "finished")
         self.assertFalse(report["publication_complete"]["all_complete"])
-        self.assertEqual(report["aggregation"]["history"]["http_metrics_status"], "not_collected")
+        self.assertEqual(report["aggregation"]["history"]["http_metrics_status"], "collected")
 
     def test_complete_caches_are_byte_identical_after_resume(self):
         self.arxiv_success()

@@ -17,9 +17,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import ssl
+import sys
 
 from src.arxiv_discovery import ID_PATTERN
 from src.local_config import get_semantic_scholar_api_key
+from src import http_metrics
 
 
 BATCH_URL = "https://api.semanticscholar.org/graph/v1/paper/batch"
@@ -38,6 +40,24 @@ def _positive(value, name):
         raise ValueError(name + " must be finite and positive")
 
 
+class _WaitBudgetExceeded(Exception):
+    pass
+
+
+class _WaitBudget:
+    def __init__(self, seconds):
+        _positive(seconds, "max_retry_wait")
+        self.remaining = float(seconds)
+
+
+def _retry_policy(max_retry_wait, backoff_base, backoff_cap):
+    for value, name in ((max_retry_wait, "max_retry_wait"),
+                        (backoff_base, "backoff_base"), (backoff_cap, "backoff_cap")):
+        _positive(value, name)
+    if backoff_base > backoff_cap:
+        raise ValueError("backoff_base must not exceed backoff_cap")
+
+
 class RateLimiter:
     """One lock/connection and a shared cooldown for all S2 consumers in a process.
 
@@ -50,22 +70,39 @@ class RateLimiter:
         self._min_interval = float(min_interval)
         self._lock = Lock()
         self._next_request_at = 0.0
+        self._cooldown_until = 0.0
+        self._cooldown_status = None
 
     @property
     def min_interval(self):
         return self._min_interval
 
     @contextmanager
-    def request_slot(self):
+    def request_slot(self, *, budget=None):
         with self._lock:
             while (delay := self._next_request_at - time.monotonic()) > 0:
-                time.sleep(delay)
+                if budget is not None and delay > budget.remaining:
+                    raise _WaitBudgetExceeded()
+                started = time.monotonic()
+                try:
+                    time.sleep(delay)
+                finally:
+                    elapsed = max(0.0, time.monotonic() - started)
+                    http_metrics.waited("semantic_scholar", elapsed)
+                    if budget is not None:
+                        budget.remaining -= elapsed
+            if budget is not None and budget.remaining < 0:
+                raise _WaitBudgetExceeded()
 
-            def postpone(seconds):
+            def postpone(seconds, *, http_status=None):
                 if (type(seconds) not in (int, float)
                         or not math.isfinite(seconds) or seconds < 0):
                     raise ValueError("Cooldown must be finite and nonnegative")
-                self._next_request_at = max(self._next_request_at, time.monotonic() + seconds)
+                deadline = time.monotonic() + seconds
+                self._next_request_at = max(self._next_request_at, deadline)
+                if seconds > 0 and deadline >= self._cooldown_until:
+                    self._cooldown_until = deadline
+                    self._cooldown_status = http_status
 
             try:
                 yield postpone
@@ -103,6 +140,10 @@ def _retry_after(value):
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             seconds = parsed.timestamp() - time.time()
+        # An overflowing positive integer is a very long valid delay, not
+        # an absent header. Keep it beyond any practical wait budget.
+        if not math.isfinite(seconds) and value.isascii() and value.isdigit():
+            return sys.float_info.max
         return max(0.0, seconds) if math.isfinite(seconds) else 0.0
     except (ValueError, TypeError, OverflowError):
         return 0.0
@@ -214,32 +255,48 @@ def _contains_secret(value, key):
     return False
 
 
-def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter, key, max_response_bytes):
+def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter, key,
+                  max_response_bytes, max_retry_wait=60.0, backoff_base=1.0, backoff_cap=60.0):
     headers = {"Accept": "application/json", "Accept-Encoding": "identity", "User-Agent": USER_AGENT}
     if body is not None:
         headers["Content-Type"] = "application/json"
     if key is not None:
         headers["x-api-key"] = key
+    budget = _WaitBudget(max_retry_wait)
+    previous = None
     for attempt in range(1, max_attempts + 1):
         http_status, delay, retry, payload, error = None, 0.0, False, None, None
-        with limiter.request_slot() as postpone:
+        try:
+            slot = limiter.request_slot(budget=budget)
+            postpone = slot.__enter__()
+        except _WaitBudgetExceeded:
+            if previous is not None:
+                previous["error"] = "retry_wait_budget_exceeded"
+                return previous
+            observed = limiter._cooldown_status if limiter._cooldown_until > time.monotonic() else None
+            return dict(status="rate_limited" if observed == 429 else "http_error",
+                        http_status=observed, attempts=0, payload=None,
+                        error="cooldown_wait_budget_exceeded")
+        try:
             try:
                 request = Request(url, data=body, headers=headers, method=method)
-                with _opener.open(request, timeout=timeout) as response:
-                    http_status = response.status
-                    if type(http_status) is not int or not 100 <= http_status <= 599:
-                        http_status = None
-                        raise _InvalidResponse("invalid_http_status")
-                    if http_status != 200:
-                        # This diagnostic exception owns a buffer even with fp=None.
-                        # Close it before response.__exit__ can replace the error.
-                        with HTTPError(url, http_status, "S2 HTTP failure", response.headers, None) as failure:
-                            raise failure
-                    delay = _retry_after(response.headers.get("Retry-After"))
-                    value = _read_json(response, max_response_bytes)
-                    if key is not None and _contains_secret(value, key):
-                        raise _InvalidResponse("response_contains_secret")
-                    payload = validate(value)
+                with http_metrics.request("semantic_scholar", attempt) as observe:
+                    with _opener.open(request, timeout=timeout) as response:
+                        http_status = response.status
+                        observe(http_status)
+                        if type(http_status) is not int or not 100 <= http_status <= 599:
+                            http_status = None
+                            raise _InvalidResponse("invalid_http_status")
+                        if http_status != 200:
+                            # This diagnostic exception owns a buffer even with fp=None.
+                            # Close it before response.__exit__ can replace the error.
+                            with HTTPError(url, http_status, "S2 HTTP failure", response.headers, None) as failure:
+                                raise failure
+                        delay = _retry_after(response.headers.get("Retry-After"))
+                        value = _read_json(response, max_response_bytes)
+                        if key is not None and _contains_secret(value, key):
+                            raise _InvalidResponse("response_contains_secret")
+                        payload = validate(value)
                 status = "found"  # Validated payload; caller assigns its stage/item status.
             except HTTPError as exc:
                 http_status = exc.code
@@ -273,20 +330,25 @@ def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter
             if status != "found":
                 payload = None
             if retry and attempt < max_attempts:
-                delay = max(delay, min(2.0 ** min(attempt - 1, 6), 60.0) + random.uniform(0, 1))
-            postpone(delay)
+                delay = max(delay, min(backoff_base * 2.0 ** min(attempt - 1, 30) + random.uniform(0, 1), backoff_cap))
+            postpone(delay, http_status=http_status)
+        finally:
+            slot.__exit__(None, None, None)
+        previous = dict(status=status, http_status=http_status, attempts=attempt, payload=payload, error=error)
         if not retry or attempt == max_attempts:
             return dict(status=status, http_status=http_status, attempts=attempt, payload=payload, error=error)
 
 
 def _request_batch(identifiers, *, timeout, max_attempts, limiter, key, max_response_bytes,
-                   require_arxiv_identity=True):
+                    require_arxiv_identity=True, max_retry_wait=60.0,
+                    backoff_base=1.0, backoff_cap=60.0):
     body = json.dumps({"ids": ["ARXIV:" + identifier for identifier in identifiers]}).encode("utf-8")
     url = BATCH_URL + "?" + urlencode({"fields": ",".join(METADATA_FIELDS)})
     result = _request_json(
         url, method="POST", body=body, validate=lambda value: _validate_batch(value, identifiers, require_arxiv_identity),
         timeout=timeout, max_attempts=max_attempts, limiter=limiter, key=key,
-        max_response_bytes=max_response_bytes,
+        max_response_bytes=max_response_bytes, max_retry_wait=max_retry_wait,
+        backoff_base=backoff_base, backoff_cap=backoff_cap,
     )
     result["papers"] = result.pop("payload")
     return result
@@ -294,7 +356,8 @@ def _request_batch(identifiers, *, timeout, max_attempts, limiter, key, max_resp
 
 def fetch_metadata(arxiv_ids, *, batch_size=100, timeout=30.0, max_attempts=3,
                    limiter=None, max_response_bytes=MAX_RESPONSE_BYTES,
-                   require_arxiv_identity=True):
+                   require_arxiv_identity=True, max_retry_wait=60.0,
+                   backoff_base=1.0, backoff_cap=60.0):
     """Return one result per input position, preserving IDs/order and duplicates.
 
     Rate-limit exhaustion stops the call. Remaining, unsent inputs are marked
@@ -303,6 +366,7 @@ def fetch_metadata(arxiv_ids, *, batch_size=100, timeout=30.0, max_attempts=3,
     Identity is checked by default; False explicitly opts into unverified positional mapping.
     """
     _positive(timeout, "timeout")
+    _retry_policy(max_retry_wait, backoff_base, backoff_cap)
     if type(require_arxiv_identity) is not bool:
         raise ValueError("require_arxiv_identity must be a boolean")
     if type(batch_size) is not int or not 1 <= batch_size <= 500:
@@ -331,6 +395,7 @@ def fetch_metadata(arxiv_ids, *, batch_size=100, timeout=30.0, max_attempts=3,
             chunk, timeout=timeout, max_attempts=max_attempts, limiter=limiter,
             key=key, max_response_bytes=max_response_bytes,
             require_arxiv_identity=require_arxiv_identity,
+            max_retry_wait=max_retry_wait, backoff_base=backoff_base, backoff_cap=backoff_cap,
         )
         for index, identifier in enumerate(chunk):
             paper = response["papers"][index] if response["papers"] is not None else None
@@ -341,10 +406,11 @@ def fetch_metadata(arxiv_ids, *, batch_size=100, timeout=30.0, max_attempts=3,
                 arxiv_id=identifier, status=status, http_status=response["http_status"],
                 attempts=response["attempts"], paper=paper, error=response["error"],
             ))
-        if response["status"] == "rate_limited":
+        if response["status"] == "rate_limited" or response["http_status"] == 403:
             results.extend(dict(
-                arxiv_id=identifier, status="rate_limited", http_status=None,
-                attempts=0, paper=None, error="not_attempted_after_rate_limit",
+                arxiv_id=identifier, status=response["status"], http_status=None,
+                attempts=0, paper=None, error=("not_attempted_after_rate_limit"
+                    if response["status"] == "rate_limited" else "not_attempted_after_http_403"),
             ) for identifier in identifiers[start + len(chunk):])
             break
     return results
@@ -440,7 +506,8 @@ def _reference_page(value, offset, limit):
 
 def _fetch_references(arxiv_id, *, fields=None, limit=100, max_pages=1000,
                      timeout=30.0, max_attempts=3, limiter=None,
-                     max_response_bytes=MAX_RESPONSE_BYTES):
+                     max_response_bytes=MAX_RESPONSE_BYTES, max_retry_wait=60.0,
+                     backoff_base=1.0, backoff_cap=60.0):
     """Fetch a fresh v2 references snapshot in memory, starting at offset zero.
 
     No corpus/checkpoint writes, no Pipeline integration and no deduplication.
@@ -448,6 +515,7 @@ def _fetch_references(arxiv_id, *, fields=None, limit=100, max_pages=1000,
     A complete snapshot proves API pagination coverage, not LaTeX coverage.
     """
     _positive(timeout, "timeout")
+    _retry_policy(max_retry_wait, backoff_base, backoff_cap)
     match = ID_PATTERN.fullmatch(arxiv_id) if isinstance(arxiv_id, str) else None
     if match is None or match.group("version") is not None:
         raise ValueError("Expected a base arXiv ID without prefixes or version suffixes")
@@ -493,7 +561,8 @@ def _fetch_references(arxiv_id, *, fields=None, limit=100, max_pages=1000,
             url, method="GET", body=None,
             validate=lambda value: _reference_page(value, offset, limit),
             timeout=timeout, max_attempts=max_attempts, limiter=limiter, key=key,
-            max_response_bytes=max_response_bytes,
+            max_response_bytes=max_response_bytes, max_retry_wait=max_retry_wait,
+            backoff_base=backoff_base, backoff_cap=backoff_cap,
         )
         snapshot["provenance"]["retrieved_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         if response["payload"] is None:
@@ -640,7 +709,8 @@ def _reconcile_resume(previous, current):
 
 def fetch_references(arxiv_id, *, fields=None, limit=100, max_pages=1000,
                      timeout=30.0, max_attempts=3, limiter=None,
-                     max_response_bytes=MAX_RESPONSE_BYTES, resume_from=None):
+                     max_response_bytes=MAX_RESPONSE_BYTES, resume_from=None,
+                     max_retry_wait=60.0, backoff_base=1.0, backoff_cap=60.0):
     """Return a v2 snapshot; optional resume restarts and revalidates its prefix.
 
     This never skips straight to a saved offset or concatenates two snapshots.
@@ -656,5 +726,6 @@ def fetch_references(arxiv_id, *, fields=None, limit=100, max_pages=1000,
     current = _fetch_references(
         arxiv_id, fields=fields, limit=limit, max_pages=max_pages, timeout=timeout,
         max_attempts=max_attempts, limiter=limiter, max_response_bytes=max_response_bytes,
+        max_retry_wait=max_retry_wait, backoff_base=backoff_base, backoff_cap=backoff_cap,
     )
     return current if previous is None else _reconcile_resume(previous, current)
