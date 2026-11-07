@@ -2,8 +2,8 @@
 
 Đồ án môn Introduction to Data Science, HCMUS — Milestone 1: Data Crawling.
 Hiện có module quản lý ID, Entry Discovery, HTTP Client, Source Downloader
-và bộ đo benchmark nền. Các module crawler được kiểm thử offline, chưa thử
-tải source thật. Storage + Checkpoint/Resume giai đoạn 1 đã có và được kiểm thử offline.
+và bộ đo benchmark nền. Crawler được kiểm thử offline và đã có live smoke local
+ở phạm vi nhỏ; chưa có benchmark M1 đầy đủ trên Colab CPU-only. Storage + Checkpoint/Resume giai đoạn 1 đã có và được kiểm thử offline.
 Pipeline v1 đã nối các module cho danh sách ID chỉ định và được kiểm thử offline.
 Semantic Scholar đã nối Pipeline theo chế độ opt-in, mặc định tắt;
 chưa có benchmark M1 thực nghiệm.
@@ -172,3 +172,13 @@ python -B -m unittest discover -s tests -v
 
 `-B` ngăn tạo cache `.pyc`. Tests chạy offline, dùng XML/archive giả lập,
 mock HTTP/clock; các file tạm của tests nằm ngoài repository.
+
+
+## Pilot Google Colab CPU-only
+
+Dùng [notebook pilot](notebooks/m1_colab_cpu_pilot.ipynb) và
+[hướng dẫn bàn giao cho A](docs/colab.md). Notebook tải đúng commit đã review,
+cài `requirements-colab.txt`, kiểm tra Drive, chạy 3 ID arXiv-first với toàn bộ
+versions/history và thử Resume. Các ô gọi mạng mặc định tắt; chỉ một writer.
+Corpus/logs/reports ở Drive ngoài Git repository. Chưa thực thi notebook trên
+Colab; pilot arXiv-only không thay benchmark M1 cuối gồm cả arXiv và S2.
