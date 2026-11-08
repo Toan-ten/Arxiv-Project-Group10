@@ -53,17 +53,19 @@ def _safe_path(name, is_directory, seen):
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or (not path.parts and not is_directory):
         raise SourceError("unsafe_archive", f"Unsafe path: {name!r}")
+    is_kept = (not is_directory) and (path.suffix.lower() in KEPT_SUFFIXES)
     for index, part in enumerate(path.parts):
         if (len(part) > 255 or part.endswith((".", " "))
                 or re.fullmatch(r"CON(?:IN\$|OUT\$)?|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]",
                                 part.split(".")[0].rstrip(" "), re.IGNORECASE)):
             raise SourceError("unsafe_archive", f"Unsafe path: {name!r}")
-        prefix = PurePosixPath(*path.parts[:index + 1]).as_posix()
-        directory = index < len(path.parts) - 1 or is_directory
-        previous = seen.get(prefix.casefold())
-        if previous is not None and (previous != (prefix, directory) or not directory):
-            raise SourceError("unsafe_archive", f"Conflicting path: {name!r}")
-        seen[prefix.casefold()] = (prefix, directory)
+        if is_kept:
+            prefix = PurePosixPath(*path.parts[:index + 1]).as_posix()
+            directory = index < len(path.parts) - 1 or is_directory
+            previous = seen.get(prefix.casefold())
+            if previous is not None and (previous != (prefix, directory) or not directory):
+                raise SourceError("unsafe_archive", f"Conflicting path: {name!r}")
+            seen[prefix.casefold()] = (prefix, directory)
     return path
 
 

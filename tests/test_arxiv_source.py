@@ -243,6 +243,12 @@ class SourceExtractionTests(unittest.TestCase):
                 with self.subTest(builder=builder.__name__, paths=(first, second)):
                     self.assert_rejected(builder([(first, TEX), (second, TEX)]), "unsafe_archive")
 
+    def test_duplicate_non_kept_image_paths_do_not_reject_tex(self):
+        entries = [("main.tex", TEX), ("figs/div.jpg", b"JPG1"), ("figs/div.jpg", b"JPG2")]
+        result = self.extract(tar_bytes(entries))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["files"], ["main.tex"])
+
     def test_existing_file_or_directory_is_never_overwritten(self):
         self.destination.mkdir()
         existing = self.destination / "keep.txt"
