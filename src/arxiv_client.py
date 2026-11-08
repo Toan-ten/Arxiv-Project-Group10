@@ -24,6 +24,7 @@ USER_AGENT = (
     "(+https://github.com/Toan-ten/Arxiv-Project-Group10)"
 )
 MIN_INTERVAL = 3.0
+RETRY_429_FALLBACK_SECONDS = 60.0
 XML_CONTENT_TYPES = {"application/atom+xml", "application/xml", "text/xml"}
 
 
@@ -57,7 +58,7 @@ class _Retry429:
     def snapshot(self):
         return dict(mode="retry_once", wait_budget_seconds=self.budget,
                     waited_seconds=self.waited, remaining_seconds=self.remaining,
-                    budget_exhausted=self.exhausted, fallback_seconds=60.0)
+                    budget_exhausted=self.exhausted, fallback_seconds=RETRY_429_FALLBACK_SECONDS)
 
 
 @contextmanager
@@ -167,12 +168,17 @@ def _retry_after(value: str | None) -> float:
         return 0.0
 
 
-def _retry_wait_deadline(server, received):
+def _retry_wait_deadline(server, received, *, fallback_seconds=None):
+    if fallback_seconds is None:
+        fallback_seconds = RETRY_429_FALLBACK_SECONDS
+    if (type(fallback_seconds) not in (int, float)
+            or not math.isfinite(fallback_seconds) or fallback_seconds < MIN_INTERVAL):
+        raise ValueError("Invalid recorded arXiv 429 fallback")
     stamp = _parse_utc(received).timestamp()
     # Keep server evidence unchanged; the effective wait also honors pacing
     # after a runtime restart, including valid Retry-After: 0 or a past date.
     return _utc(max(_parse_utc(server).timestamp(), stamp + MIN_INTERVAL)
-                if server is not None else stamp + 60.0)
+                if server is not None else stamp + fallback_seconds)
 
 
 def _plan_429(event, attempt, policy):

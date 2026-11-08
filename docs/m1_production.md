@@ -170,9 +170,10 @@ dùng chung chính sách/limiter. Nếu 429 tiếp diễn hoặc gặp 403 thì 
 kết quả lỗi cuối và dừng, không sang version/paper/cohort sau.
 
 Trước sleep, HTTP event và kế hoạch chờ phải được ghi atomic vào attempt log:
+
 - Retry-After hợp lệ được ưu tiên. Header số giây tính từ lúc nhận headers;
   HTTP-date là mốc server UTC. Pacing tối thiểu 3 giây vẫn áp dụng, kể cả header 0.
-- Header thiếu/sai: backoff nội bộ **120 giây** từ lúc nhận headers.
+- Header thiếu/sai: backoff nội bộ **60 giây** từ lúc nhận headers.
   `cooldown_deadline_utc` vẫn **null**; không giả đó là deadline do server cấp.
 - Các trường riêng: `retry_wait_source` (`retry_after|internal_backoff`),
   `retry_wait_deadline_utc`, `retry_wait_seconds` và `retry_429_decision`
@@ -199,3 +200,12 @@ chưa xong và skip source/history tốt. Đó là Run mới với ngân sách m
 vòng retry tự động vô hạn. Log cũ thiếu trường mới vẫn đọc được. Bản vá không
 khôi phục được header đã mất của các lần 429 cũ và không bảo đảm hết deadline
 thì server sẽ chấp nhận request.
+
+
+Guard xác minh fallback theo `arxiv_retry_429.fallback_seconds` đã lưu trong
+**từng attempt**, không dùng mặc định hiện tại để tính lại log lịch sử. Vì vậy
+cùng log root đọc được cả attempt cũ 120 giây và attempt mới 60 giây, giữ nguyên
+deadline/log/checkpoint đã có. Retry-After server hợp lệ vẫn được ưu tiên, kể cả
+khi khác fallback của attempt. Log không có các trường retry thử nghiệm vẫn đọc
+được như trước; log có backoff nội bộ nhưng thiếu/sai cấu hình fallback hoặc
+không khớp deadline bị từ chối để review, không tự sửa hoặc đoán thời gian chờ.

@@ -110,7 +110,17 @@ def check_arxiv_cooldown(log_root):
                 if retry_fields.intersection(event):
                     _require(retry_fields.issubset(event) and http == 429 and received is not None)
                     server = arxiv_client._retry_deadline(raw, received)
-                    expected = arxiv_client._retry_wait_deadline(server, received)
+                    fallback = None
+                    if server is None:
+                        # Replay the recorded policy, never today's writer default.
+                        policy = value.get("arxiv_retry_429")
+                        _require(isinstance(policy, dict))
+                        fallback = policy["fallback_seconds"]
+                        _require(type(fallback) in (int, float)
+                                 and math.isfinite(fallback)
+                                 and fallback >= arxiv_client.MIN_INTERVAL)
+                    expected = arxiv_client._retry_wait_deadline(
+                        server, received, fallback_seconds=fallback)
                     _require(event["retry_wait_source"] ==
                              ("retry_after" if server is not None else "internal_backoff"))
                     _require(event["retry_wait_deadline_utc"] == expected)

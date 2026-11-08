@@ -337,7 +337,7 @@ class ExperimentalTransportRetryTests(unittest.TestCase):
         self.assertEqual(policy.waited, 12)
         self.assertEqual(client.MIN_INTERVAL, 3)
 
-    def test_missing_and_invalid_retry_after_use_separate_120_second_deadline(self):
+    def test_missing_and_invalid_retry_after_use_separate_60_second_deadline(self):
         for raw in (None, 'invalid', '-1', '1.5', '9' * 500):
             with self.subTest(raw=raw):
                 self.clock.now = 0
@@ -349,9 +349,10 @@ class ExperimentalTransportRetryTests(unittest.TestCase):
                 self.assertEqual(result['http_status'], 200)
                 self.assertIsNone(event['cooldown_deadline_utc'])
                 self.assertEqual(event['retry_wait_source'], 'internal_backoff')
-                self.assertEqual(event['retry_wait_deadline_utc'], client._utc(1700000120))
-                self.assertEqual(self.starts, [0, 120])
-                self.assertEqual(policy.waited, 120)
+                self.assertEqual(event['retry_wait_deadline_utc'], client._utc(1700000060))
+                self.assertEqual(self.starts, [0, 60])
+                self.assertEqual(policy.waited, 60)
+                self.assertEqual(policy.snapshot()['fallback_seconds'], 60)
 
     def test_http_date_preferred_and_minimum_pacing_for_valid_zero_header(self):
         for raw, wait in ((formatdate(1700000090, usegmt=True), 90), ('0', 3)):
@@ -370,10 +371,10 @@ class ExperimentalTransportRetryTests(unittest.TestCase):
         self.outcomes = [cf.http_error(429), cf.http_error(429)]
         result, events, policy = self.run_retry()
         self.assertEqual((result['status'], result['attempts']), ('rate_limited', 2))
-        self.assertEqual(self.starts, [0, 120])
+        self.assertEqual(self.starts, [0, 60])
         self.assertEqual(events[-1]['retry_429_decision'], 'retry_exhausted')
-        self.assertEqual(events[-1]['retry_wait_deadline_utc'], client._utc(1700000240))
-        self.assertEqual(policy.waited, 120)
+        self.assertEqual(events[-1]['retry_wait_deadline_utc'], client._utc(1700000120))
+        self.assertEqual(policy.waited, 60)
 
     def test_long_wait_exceeds_budget_without_sleep_or_second_request(self):
         self.outcomes = [cf.http_error(429, '301')]
@@ -390,7 +391,7 @@ class ExperimentalTransportRetryTests(unittest.TestCase):
         self.outcomes = [cf.http_error(429, '200'), cf.FakeResponse(),
                          cf.http_error(429)]
         events = []
-        with client.retry_429_policy(300) as policy, client.record_requests(events.append):
+        with client.retry_429_policy(250) as policy, client.record_requests(events.append):
             self.query(max_attempts=1)
             result = self.query(max_attempts=1)
         self.assertEqual(result['http_status'], 429)
@@ -423,7 +424,7 @@ class ExperimentalTransportRetryTests(unittest.TestCase):
     def test_sleep_overshoot_does_not_send_request_over_budget(self):
         self.outcomes = [cf.http_error(429)]
         self.sleep.side_effect = lambda delay: self.clock.sleep(delay + 1)
-        result, _, policy = self.run_retry(budget=120)
+        result, _, policy = self.run_retry(budget=60)
         self.assertEqual(result['http_status'], 429)
         self.assertTrue(policy.exhausted)
         self.assertEqual(self.opener.open.call_count, 1)
@@ -466,7 +467,7 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
         observed = []
         original = self.sleep
         def sleep(delay):
-            if delay >= 120:
+            if delay >= 60:
                 event = self.attempts()[0]['arxiv_http_requests'][-1]
                 self.assertEqual(event['http_status'], 429)
                 self.assertEqual(event['retry_wait_source'], 'internal_backoff')
@@ -482,7 +483,7 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
         current = self.attempts()[0]
         self.assertEqual(current['http_metrics']['total']['attempts'], 5)
         self.assertEqual(current['http_metrics']['total']['retry_attempts'], 1)
-        self.assertEqual(current['arxiv_retry_429']['waited_seconds'], 120)
+        self.assertEqual(current['arxiv_retry_429']['waited_seconds'], 60)
         self.assertEqual(CorpusStorage(self.run.corpus).read_manifest(*first)['versions']['v1']['attempts'], 2)
         protected = {name:self.snapshot(getattr(self.run,name)) for name in ('corpus','logs','reports')}
         self.assertEqual(self.run.run()[0]['mode'], 'audit')
@@ -544,7 +545,7 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
         first, second = self.enable()
         self.outcomes = [fx.xml_response(first[1]), fx.http_error(429)]
         def interrupt(delay):
-            if delay >= 120:
+            if delay >= 60:
                 event = self.attempts()[0]['arxiv_http_requests'][-1]
                 self.assertIsNone(event['cooldown_deadline_utc'])
                 self.assertEqual(event['retry_wait_source'], 'internal_backoff')
@@ -561,7 +562,7 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
                 self.operator(retry_429=True).run()
         self.assertEqual(before, self.snapshot())
         self.assertEqual(len(self.requests), 2)
-        self.now += 101
+        self.now += 41
         self.outcomes = [fx.Response(fx.TEX), fx.xml_response(second[1]), fx.Response(fx.TEX)]
         with patch.object(client, '_next_request_at', 0.0):
             result = self.operator(retry_429=True).run()[0]
@@ -633,10 +634,10 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
         with patch.object(client.time,'perf_counter',lambda:self.now):
             result = self.run.run()[0]
         report = json.loads(Path(result['benchmark_report_path']).read_text(encoding='utf-8'))
-        self.assertEqual(report['resource_metrics']['metrics_v2']['wall_seconds'],129)
-        self.assertEqual(report['benchmark_metrics']['end_to_end_wall_seconds'],129)
-        self.assertEqual(self.attempts()[0]['wall_seconds'],129)
-        self.assertEqual(result['arxiv_retry_429']['waited_seconds'],120)
+        self.assertEqual(report['resource_metrics']['metrics_v2']['wall_seconds'],69)
+        self.assertEqual(report['benchmark_metrics']['end_to_end_wall_seconds'],69)
+        self.assertEqual(self.attempts()[0]['wall_seconds'],69)
+        self.assertEqual(result['arxiv_retry_429']['waited_seconds'],60)
 
     def test_notebook_config_exposes_opt_in_and_budget_at_one_place(self):
         nb=json.loads((ROOT/'notebooks/m1_colab_arxiv_production.ipynb').read_text(encoding='utf-8'))
@@ -702,6 +703,192 @@ class ExperimentalProductionRetryTests(unittest.TestCase):
         self.assertEqual(before,self.snapshot())
         self.assertEqual(len(self.requests),1)
 
+
+class HistoricalFallbackTests(unittest.TestCase):
+    """Recorded policies are evidence, independent of the new writer default."""
+    setUp = fx.PipelineTests.setUp
+    sleep = fx.PipelineTests.sleep
+    open_response = fx.PipelineTests.open_response
+    run_batch = BatchAuditTests.run_batch
+    snapshot = BatchAuditTests.snapshot
+    log_path = BatchAuditTests.log_path
+
+    RECEIVED = '2026-11-08T13:56:12.956120Z'
+
+    def historical(self, fallback=120.0, *, received=None, raw=None):
+        received = received or self.RECEIVED
+        stamp = client._parse_utc(received).timestamp()
+        server = client._retry_deadline(raw, received)
+        deadline = client._utc(max(client._parse_utc(server).timestamp(), stamp + 3)
+                               if server is not None else stamp + fallback)
+        return {
+            'arxiv_retry_429': {'mode': 'retry_once', 'fallback_seconds': fallback},
+            'arxiv_http_requests': [{
+                'request_started_at_utc': received,
+                'response_received_at_utc': received,
+                'endpoint': 'https://export.arxiv.org/src/2508.07874v1',
+                'query_identifier': '2508.07874v1', 'attempt': 2, 'http_status': 429,
+                'retry_after': raw, 'cooldown_deadline_utc': server,
+                'retry_wait_source': 'retry_after' if server is not None else 'internal_backoff',
+                'retry_wait_deadline_utc': deadline,
+                'retry_wait_seconds': max(3.0, client._parse_utc(deadline).timestamp() - stamp),
+                'retry_429_decision': 'retry_exhausted',
+            }],
+        }
+
+    def write_attempt(self, value, batch_id='old'):
+        path = self.root.parent/'logs'/batch_id/'attempts'/'06e45d560cf148b78d856118f04f0989.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding='utf-8')
+        return path
+
+    def check_at(self, timestamp):
+        with patch.object(batch.time, 'time', return_value=timestamp):
+            return batch.check_arxiv_cooldown(self.root.parent/'logs')
+
+    def test_reported_120_second_log_blocks_until_135812_without_rewrite(self):
+        self.assertEqual(client.RETRY_429_FALLBACK_SECONDS, 60)
+        value = self.historical()
+        event = value['arxiv_http_requests'][0]
+        self.assertEqual(event['retry_wait_deadline_utc'], '2026-11-08T13:58:12.956120Z')
+        self.write_attempt(value)
+        before = self.snapshot()
+        stamp = client._parse_utc(self.RECEIVED).timestamp()
+        # Sixty seconds have already elapsed; historical 120 seconds have not.
+        with self.assertRaises(client.ArxivCooldownError) as caught:
+            self.check_at(stamp + 90)
+        self.assertEqual(caught.exception.retry_at_utc, event['retry_wait_deadline_utc'])
+        self.check_at(stamp + 121)
+        self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.requests, [])
+
+    def test_one_log_root_accepts_60_and_120_and_keeps_latest_deadline(self):
+        stamp = client._parse_utc(self.RECEIVED).timestamp()
+        self.write_attempt(self.historical(120), 'old120')
+        self.write_attempt(self.historical(60, received=client._utc(stamp + 3)), 'new60')
+        before = self.snapshot()
+        with self.assertRaises(client.ArxivCooldownError) as caught:
+            self.check_at(stamp + 90)
+        self.assertEqual(caught.exception.retry_at_utc, client._utc(stamp + 120))
+        self.check_at(stamp + 121)
+        self.assertEqual(before, self.snapshot())
+
+    def test_missing_or_invalid_recorded_fallback_is_rejected_without_repair(self):
+        cases = [None, True, False, 0, 1, -120, '120', {}, [], float('inf'), float('nan')]
+        stamp = client._parse_utc(self.RECEIVED).timestamp()
+        for bad in cases:
+            with self.subTest(bad=bad):
+                value = self.historical()
+                value['arxiv_retry_429']['fallback_seconds'] = bad
+                self.write_attempt(value)
+                before = self.snapshot()
+                with self.assertRaises(batch.BatchError):
+                    self.check_at(stamp + 1000)
+                self.assertEqual(before, self.snapshot())
+        for remove_policy in (False, True):
+            value = self.historical()
+            if remove_policy:
+                del value['arxiv_retry_429']
+            else:
+                del value['arxiv_retry_429']['fallback_seconds']
+            self.write_attempt(value)
+            before = self.snapshot()
+            with self.assertRaises(batch.BatchError):
+                self.check_at(stamp + 1000)
+            self.assertEqual(before, self.snapshot())
+        self.assertEqual(self.requests, [])
+
+    def test_deadline_source_or_policy_mismatch_remains_invalid(self):
+        stamp = client._parse_utc(self.RECEIVED).timestamp()
+        for changes in (
+                {'retry_wait_deadline_utc': client._utc(stamp+60)},
+                {'retry_wait_deadline_utc': client._utc(stamp+121)},
+                {'retry_wait_source': 'retry_after'},
+                {'cooldown_deadline_utc': client._utc(stamp+120)},
+                {'retry_wait_deadline_utc': None}):
+            with self.subTest(changes=changes):
+                value = self.historical()
+                value['arxiv_http_requests'][0].update(changes)
+                self.write_attempt(value)
+                before = self.snapshot()
+                with self.assertRaises(batch.BatchError):
+                    self.check_at(stamp+1000)
+                self.assertEqual(before,self.snapshot())
+        value = self.historical()
+        value['arxiv_retry_429']['fallback_seconds'] = 60  # Deadline still says 120.
+        self.write_attempt(value)
+        before = self.snapshot()
+        with self.assertRaises(batch.BatchError):
+            self.check_at(stamp+1000)
+        self.assertEqual(before,self.snapshot())
+
+    def test_server_retry_after_takes_priority_over_both_fallback_policies(self):
+        stamp = client._parse_utc(self.RECEIVED).timestamp()
+        for fallback in (60,120):
+            for raw in ('180',formatdate(stamp+180,usegmt=True),'0'):
+                with self.subTest(fallback=fallback,raw=raw):
+                    value = self.historical(fallback,raw=raw)
+                    event = value['arxiv_http_requests'][0]
+                    self.write_attempt(value)
+                    before = self.snapshot()
+                    deadline = client._parse_utc(event['retry_wait_deadline_utc']).timestamp()
+                    with self.assertRaises(client.ArxivCooldownError) as caught:
+                        self.check_at(deadline-0.5)
+                    self.assertEqual(caught.exception.retry_at_utc,event['retry_wait_deadline_utc'])
+                    self.check_at(deadline+0.5)
+                    self.assertEqual(before,self.snapshot())
+                    self.assertEqual(event['retry_wait_source'],'retry_after')
+                    self.assertIsNotNone(event['cooldown_deadline_utc'])
+
+    def test_legacy_events_without_experimental_retry_fields_still_readable(self):
+        value = self.historical()
+        del value['arxiv_retry_429']
+        event = value['arxiv_http_requests'][0]
+        for key in ('retry_wait_source','retry_wait_deadline_utc','retry_wait_seconds','retry_429_decision'):
+            del event[key]
+        self.write_attempt(value)
+        before = self.snapshot()
+        self.check_at(client._parse_utc(self.RECEIVED).timestamp()+1)
+        self.assertEqual(before,self.snapshot())
+
+    def test_resume_old_120_attempt_with_new_60_preserves_old_log_and_valid_source(self):
+        # Generate a complete historical attempt/checkpoint with the old policy,
+        # not merely a minimal guard fixture. HTTP and all clocks remain fake.
+        self.outcomes = [fx.xml_response(),fx.http_error(429)]
+        with patch.object(client,'RETRY_429_FALLBACK_SECONDS',120.0), client.retry_429_policy(0):
+            stopped = self.run_batch()
+        self.assertEqual(stopped['status'],'stopped')
+        old_path = self.log_path()
+        old_bytes = old_path.read_bytes()
+        self.assertEqual(stopped['arxiv_retry_429']['fallback_seconds'],120)
+        self.assertEqual(client.RETRY_429_FALLBACK_SECONDS,60)
+        before = self.snapshot()
+        self.now += 90
+        with patch.object(client,'_next_request_at',0.0):
+            with self.assertRaises(client.ArxivCooldownError):
+                self.run_batch(resume=True)
+        self.assertEqual(before,self.snapshot())
+        self.assertEqual(len(self.requests),2)
+        self.now += 31
+        self.outcomes = [fx.http_error(429),fx.Response(fx.TEX)]
+        with patch.object(client,'_next_request_at',0.0), client.retry_429_policy(300):
+            resumed = self.run_batch(resume=True)
+        self.assertEqual(resumed['status'],'finished')
+        self.assertEqual(resumed['arxiv_retry_429']['fallback_seconds'],60)
+        self.assertEqual(resumed['arxiv_retry_429']['waited_seconds'],60)
+        self.assertEqual(resumed['papers'][0]['result']['discovery']['action'],'cached')
+        self.assertEqual(len(self.requests),4)
+        self.assertEqual(self.requests[1],self.requests[2])
+        self.assertEqual(old_bytes,old_path.read_bytes())
+        store = CorpusStorage(self.root)
+        self.assertTrue(store.should_skip_version(*fx.PAIR,'v1'))
+        source = (store.paper_path(*fx.PAIR)/'v1/main.tex')
+        saved_source = source.read_bytes()
+        cached = self.run_batch(resume=True)
+        self.assertEqual(cached['arxiv_http_requests'],[])
+        self.assertEqual(len(self.requests),4)
+        self.assertEqual(saved_source,source.read_bytes())
+        self.assertEqual(old_bytes,old_path.read_bytes())
+
 if __name__ == '__main__':
     unittest.main()
-
