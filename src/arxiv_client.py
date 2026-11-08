@@ -57,7 +57,7 @@ class _Retry429:
     def snapshot(self):
         return dict(mode="retry_once", wait_budget_seconds=self.budget,
                     waited_seconds=self.waited, remaining_seconds=self.remaining,
-                    budget_exhausted=self.exhausted, fallback_seconds=120.0)
+                    budget_exhausted=self.exhausted, fallback_seconds=60.0)
 
 
 @contextmanager
@@ -172,7 +172,7 @@ def _retry_wait_deadline(server, received):
     # Keep server evidence unchanged; the effective wait also honors pacing
     # after a runtime restart, including valid Retry-After: 0 or a past date.
     return _utc(max(_parse_utc(server).timestamp(), stamp + MIN_INTERVAL)
-                if server is not None else stamp + 120.0)
+                if server is not None else stamp + 60.0)
 
 
 def _plan_429(event, attempt, policy):
