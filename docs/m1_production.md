@@ -18,8 +18,9 @@ hai ô code: **Setup** và **Run M1**. Không cần widgets hay Semantic Scholar
 5. Đọc tóm tắt và audit JSON sau mỗi cohort. Khi kết quả tốt, đổi số cohort và
    bấm Run tiếp; chỉ mở rộng số cohort mỗi lượt sau khi đã kiểm tra runtime/Drive.
 
-Không cần đổi thuật toán hay nhiều cờ True/False. Giữ nguyên root, commit,
-timeout và sampling khi Resume: `campaign.json` và Batch bảo vệ cấu hình này.
+Không cần đổi thuật toán hay nhiều cờ True/False. Giữ nguyên root, timeout và
+sampling khi Resume; thông thường giữ cùng commit. Ngoại lệ nâng cấp bản vá
+HTTP từ baseline `1fe51d7` được mô tả bên dưới. `campaign.json` và Batch bảo vệ cấu hình.
 Không thay campaign.json, batch.json hay manifest bằng tay để vượt kiểm tra.
 
 ## Chọn đúng 20.000 vị trí ID
@@ -68,6 +69,45 @@ filesystem. Atomic replace trên Drive không phải giao dịch nhiều JSON ha
 đảm chống mất dữ liệu khi Drive bị lỗi/quota. Có lỗi integrity thì dừng và bàn giao
 log cho Toàn, không đổi root để che lỗi.
 
+## HTTP audit và cooldown sau khi Colab restart
+
+Mỗi attempt mới có thêm `arxiv_http_requests` trong
+`logs/m1-arxiv-NNNN/attempts/<attempt-id>.json`. Mỗi phần tử ghi:
+
+- `request_started_at_utc`: thời điểm ngay trước transport attempt; không phải
+  bằng chứng server đã nhận request.
+- `response_received_at_utc`, `http_status`: khi nhận headers; null nếu chưa
+  nhận được HTTP response. Timeout khi đọc body có thể vẫn mang HTTP 200.
+- `endpoint`, `query_identifier`, `attempt`: endpoint/ID arXiv được cho phép và
+  số attempt; không lưu query tùy ý, API key, header khác hay response body.
+- `retry_after`: nguyên header Retry-After nếu có.
+- `cooldown_deadline_utc`: deadline từ số giây tính tại lúc nhận headers hoặc
+  HTTP-date. Thiếu/sai header hay ngày không biểu diễn được thì null; không tự
+  tạo thời gian chờ mới.
+
+Event được ghi atomic vào attempt log trước khi client trả về Pipeline hoặc gửi
+request tiếp theo. Lỗi ghi log dừng xử lý. Metrics HTTP cũ và Storage contract v2
+không đổi; pacing vẫn 3 giây và Production vẫn `max_attempts=1`.
+
+Trước một lượt crawl/Resume, Production và Batch đọc deadline trong các attempt
+của **mọi batch dùng chung log root**. Nếu còn cooldown, dừng ngay với
+`ArxivCooldownError` và in thời điểm UTC có thể tiếp tục; không tự sleep/retry,
+không tạo attempt Benchmark mới ở Production. Có thể chạy lại ô Run sau deadline,
+giữ cùng root/cohort/cấu hình. Không đổi batch ID để né cooldown. Cohort đã đủ dữ
+liệu vẫn được audit không gọi API. Bằng chứng mới bị hỏng thì dừng để review.
+
+Log cũ thiếu trường này vẫn đọc được, nhưng **không khôi phục được Retry-After
+của lần 429 trước bản vá**. Người vận hành phải xem xét lần dừng cũ trước khi Run;
+deadline hết hạn cũng không bảo đảm server sẽ chấp nhận request tiếp theo.
+
+Sau khi người phụ trách review/commit/push bản vá, A dùng runtime Colab mới,
+điền full SHA commit bản vá vào Setup, giữ nguyên CONFIG và Drive root. Bản vá
+chỉ cho phép campaign cũ từ đúng commit
+`1fe51d7c02d3baa520936c93c6e2a266541d53c3`, với mọi cấu hình khác giống hệt.
+Không sửa campaign.json hoặc checkpoint để cập nhật SHA. Campaign giữ commit
+ban đầu; audit mới ghi `campaign_code_commit` và `executing_code_commit`,
+Benchmark ghi commit thực tế đang chạy. Commit cũ khác hoặc cấu hình đổi sẽ bị từ chối.
+
 ## Dữ liệu và số đo để bàn giao C
 
 ```text
@@ -108,3 +148,54 @@ S2 phải được đo ở pha riêng sau này để benchmark M1 cuối bao g�
 dữ liệu. Không gọi API thật, mount Drive, cài package hoặc chạy 20.000 ID trong tests.
 Notebook mới cần A kiểm tra một cohort trên Colab trước khi tăng cửa sổ chạy.
 Không có distributed writer lock giữa nhiều VM; chỉ một runtime được phép ghi.
+
+## Thử nghiệm retry HTTP 429 một lần (mặc định tắt)
+
+Chỉ bật sau review, trong CONFIG duy nhất của ô Run M1:
+
+```python
+"retry_429": True,
+"retry_wait_budget": 300.0,
+```
+
+Giữ nguyên Drive root, cohort, timeout và sampling khi Resume. Đây là chính sách
+của **mỗi lần bấm Run**, ghi riêng trong attempt/audit; không đổi campaign.json,
+batch definition hay Storage contract. Campaign baseline `1fe51d7` vẫn được
+kiểm tra tương thích như bản vá cooldown trước. Không sửa SHA trong campaign bằng tay.
+
+Khi bật, transport arXiv đang có được phép thử lại **đúng Request đó tối đa một
+lần sau 429**. Không chạy lại cả paper/Batch, không bật retry cho timeout/5xx,
+không thay pacing 3 giây và không gọi S2. Discovery, source và revision history
+dùng chung chính sách/limiter. Nếu 429 tiếp diễn hoặc gặp 403 thì Pipeline ghi
+kết quả lỗi cuối và dừng, không sang version/paper/cohort sau.
+
+Trước sleep, HTTP event và kế hoạch chờ phải được ghi atomic vào attempt log:
+- Retry-After hợp lệ được ưu tiên. Header số giây tính từ lúc nhận headers;
+  HTTP-date là mốc server UTC. Pacing tối thiểu 3 giây vẫn áp dụng, kể cả header 0.
+- Header thiếu/sai: backoff nội bộ **120 giây** từ lúc nhận headers.
+  `cooldown_deadline_utc` vẫn **null**; không giả đó là deadline do server cấp.
+- Các trường riêng: `retry_wait_source` (`retry_after|internal_backoff`),
+  `retry_wait_deadline_utc`, `retry_wait_seconds` và `retry_429_decision`
+  (`retry_once|retry_exhausted|budget_exceeded`).
+- Ghi log thất bại thì dừng trước sleep/request tiếp. Lỗi evidence thì giữ nguyên,
+  dừng để review; không tự sửa checkpoint hoặc log.
+
+Ngân sách mặc định **300 giây chờ do retry 429**, dùng chung mọi requests/cohorts
+trong một Run M1; không reset theo paper. Đây không phải giới hạn wall time toàn
+crawl và không tính pacing thông thường giữa requests độc lập. Chờ retry đi qua
+limiter cũ, không có sleep thứ hai. Nếu lần chờ kế tiếp không vừa ngân sách thì
+không sleep/không gửi retry, giữ HTTP429 và deadline để Resume an toàn. Nếu sleep
+thực tế bị quá ngân sách (ví dụ runtime bị treo), không gửi retry sau khi tỉnh lại.
+Attempt/audit có `arxiv_retry_429` ghi ngân sách, thời gian đã chờ và trạng thái.
+
+Benchmark hiện có bao trọn thời gian sleep này trong callback đúng một lần;
+không cộng `waited_seconds` thêm vào wall time hoặc cộng report lũy kế vào nhau.
+HTTP metrics vẫn đếm từng transport attempt; cache/skip không thành request mới.
+
+**Restart:** không tự khởi động lại Run đã ngắt. Trước deadline được lưu (server
+hoặc backoff nội bộ), runtime mới vẫn bị chặn trước Benchmark/HTTP, kể cả đang bật
+retry. Hết deadline, A chủ động bấm Run cùng cohort/root; Storage Resume dữ liệu
+chưa xong và skip source/history tốt. Đó là Run mới với ngân sách mới, không phải
+vòng retry tự động vô hạn. Log cũ thiếu trường mới vẫn đọc được. Bản vá không
+khôi phục được header đã mất của các lần 429 cũ và không bảo đảm hết deadline
+thì server sẽ chấp nhận request.

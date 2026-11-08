@@ -20,6 +20,8 @@ from src.storage import CorpusStorage, _atomic_json
 
 
 COHORT_SIZE = 100
+# Reviewed, code-only upgrade: keep the original campaign file and all settings.
+_COMPATIBLE_CAMPAIGNS = {"1fe51d7c02d3baa520936c93c6e2a266541d53c3"}
 _WRITER = threading.Lock()  # Process-local only, not a distributed Drive lock.
 
 
@@ -68,7 +70,8 @@ class ProductionRun:
     """
 
     def __init__(self, repo, drive_root, code_commit, *, timeout=60.0,
-                 sample_interval=1.0, disk_interval=120.0):
+                 sample_interval=1.0, disk_interval=120.0,
+                 retry_429=False, retry_wait_budget=300.0):
         self.repo, self.root = Path(repo).resolve(), batch._safe(drive_root)
         _require(not (self.root.is_relative_to(self.repo) or self.repo.is_relative_to(self.root)),
                  "Production data must be outside the code checkout")
@@ -79,6 +82,12 @@ class ProductionRun:
         for value in (timeout, sample_interval, disk_interval):
             _require(type(value) in (int, float) and math.isfinite(value) and value > 0,
                      "Timeout and sampling intervals must be finite positive numbers")
+        _require(type(retry_429) is bool, "retry_429 must be bool")
+        _require(type(retry_wait_budget) in (int, float)
+                 and math.isfinite(retry_wait_budget) and retry_wait_budget >= 0,
+                 "retry_wait_budget must be finite and nonnegative")
+        # Run policy is logged separately; immutable baseline campaign remains compatible.
+        self.retry_429, self.retry_wait_budget = retry_429, float(retry_wait_budget)
         self.corpus, self.logs = self.root / "corpus", self.root / "logs"
         self.reports, self.scratch = self.root / "reports", self.root / "scratch"
         self.settings = dict(timeout=float(timeout), sample_interval=float(sample_interval),
@@ -88,14 +97,24 @@ class ProductionRun:
             assignments=[asdict(r) for r in _assignments().values()],
             corpus_root=str(self.corpus), versions=None, revision_history=True,
             s2_config=None, max_attempts=1, user_agent=arxiv_client.USER_AGENT, **self.settings)
+        self.campaign_code_commit = commit
         path = self.root / "campaign.json"
         if self.root.exists():
             if path.exists():
-                _require(batch._read(path) == self.definition,
+                saved = batch._read(path)
+                _require(self._compatible_campaign(saved),
                          "Campaign configuration changed; do not edit existing evidence")
+                self.campaign_code_commit = saved["code_commit"]
             else:
                 _require(not any(self.root.iterdir()),
                          "Nonempty directory without campaign.json; choose a new production root")
+
+    def _compatible_campaign(self, saved):
+        if saved == self.definition:
+            return True
+        return (isinstance(saved.get("code_commit"), str)
+                and saved["code_commit"] in _COMPATIBLE_CAMPAIGNS
+                and {**saved, "code_commit": self.definition["code_commit"]} == self.definition)
 
     def _batch_id(self, number):
         cohort_pairs(number)  # Validate before constructing any path.
@@ -182,14 +201,16 @@ class ProductionRun:
         _require(first <= last, "first_cohort must not exceed last_cohort")
         _require(_WRITER.acquire(blocking=False), "Another production call is active in this process")
         results = []
+        retry_scope = arxiv_client.retry_429_policy(self.retry_wait_budget if self.retry_429 else None)
+        policy = retry_scope.__enter__()
         try:
             # Check again if the operator edited/replaced code since construction.
             commit, dirty = _code_state(self.repo)
             _require(commit == self.definition["code_commit"] and not dirty, "Code checkout changed")
             campaign = self.root / "campaign.json"
             if campaign.exists():
-                _require(batch._read(campaign) == self.definition, "Campaign definition changed")
-            else:
+                _require(self._compatible_campaign(batch._read(campaign)), "Campaign definition changed")
+            if not campaign.exists():
                 _require(not self.root.exists() or not any(self.root.iterdir()), "Unowned production directory")
                 self.root.mkdir(parents=True, exist_ok=True)
                 _atomic_json(campaign, self.definition)
@@ -197,6 +218,7 @@ class ProductionRun:
                 result = self.audit(number)
                 mode = result["mode"]
                 if mode != "audit":
+                    batch.check_arxiv_cooldown(self.logs)
                     self.scratch.mkdir(exist_ok=True)
                     old_temp, old_tmpdir = tempfile.tempdir, os.environ.get("TMPDIR")
                     try:
@@ -216,6 +238,10 @@ class ProductionRun:
                     result.update(mode=mode, execution_status=report["execution_status"],
                                   batch_status=report["batch_status"], stop_reason=report["stop_reason"],
                                   benchmark_report_path=report["report_path"])
+                if policy is not None:
+                    result["arxiv_retry_429"] = policy.snapshot()
+                result.update(executing_code_commit=self.definition["code_commit"],
+                              campaign_code_commit=self.campaign_code_commit)
                 self._export(result)
                 self._print(result)
                 results.append(result)
@@ -226,8 +252,12 @@ class ProductionRun:
                     break
             return results
         except BaseException as exc:
+            if isinstance(exc, arxiv_client.ArxivCooldownError):
+                print("Cooldown chưa hết; có thể tiếp tục từ:", exc.retry_at_utc,
+                      "(UTC). Không gửi request; không tự chờ/retry.")
             print("DỪNG an toàn; xem logs/reports và checkpoint tại:", self.root,
                   "| loại lỗi:", type(exc).__name__)
             raise
         finally:
+            retry_scope.__exit__(None, None, None)
             _WRITER.release()

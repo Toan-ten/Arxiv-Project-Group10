@@ -4,6 +4,7 @@ Single process/writer. Importing this module performs no I/O or requests.
 """
 import copy
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -72,6 +73,60 @@ def _save(path, value):
         _atomic_json(_safe(path), value)
     except Exception as exc:
         raise BatchLogError("Mandatory run log write failed") from exc
+
+
+def check_arxiv_cooldown(log_root):
+    """Read provider-wide deadlines across batches, before any write/request.
+
+    Legacy attempts without the optional event list remain readable. Invalid
+    new evidence fails closed; no log/checkpoint is repaired or rewritten.
+    """
+    root = _safe(log_root)
+    latest = None
+    for path in sorted(root.glob("*/attempts/*.json")):
+        value = _read(path)
+        if "arxiv_http_requests" not in value:
+            continue
+        events = value["arxiv_http_requests"]
+        _require(isinstance(events, list))
+        for event in events:
+            try:
+                _require(isinstance(event, dict))
+                arxiv_client._parse_utc(event["request_started_at_utc"])
+                http, received, raw = (event["http_status"], event["response_received_at_utc"],
+                                       event["retry_after"])
+                _require(http is None or type(http) is int and 100 <= http <= 599)
+                _require(type(event["attempt"]) is int and event["attempt"] > 0)
+                _require(raw is None or isinstance(raw, str))
+                _require(event["endpoint"] is None or isinstance(event["endpoint"], str))
+                if received is None:
+                    _require(http is None and raw is None)
+                else:
+                    arxiv_client._parse_utc(received)
+                deadline = event["cooldown_deadline_utc"]
+                _require(deadline == arxiv_client._retry_deadline(raw, received))
+                retry_fields = {"retry_wait_source", "retry_wait_deadline_utc",
+                                "retry_wait_seconds", "retry_429_decision"}
+                if retry_fields.intersection(event):
+                    _require(retry_fields.issubset(event) and http == 429 and received is not None)
+                    server = arxiv_client._retry_deadline(raw, received)
+                    expected = arxiv_client._retry_wait_deadline(server, received)
+                    _require(event["retry_wait_source"] ==
+                             ("retry_after" if server is not None else "internal_backoff"))
+                    _require(event["retry_wait_deadline_utc"] == expected)
+                    seconds = event["retry_wait_seconds"]
+                    _require(type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0)
+                    _require(event["retry_429_decision"] in
+                             ("retry_once", "retry_exhausted", "budget_exceeded"))
+                    deadline = expected
+                if deadline is not None:
+                    date = arxiv_client._parse_utc(deadline)
+                    if latest is None or date > latest:
+                        latest = date
+            except (KeyError, TypeError, ValueError, OverflowError):
+                raise BatchError("Invalid arXiv HTTP audit evidence; preserve and review") from None
+    if latest is not None and latest.timestamp() > time.time():
+        raise arxiv_client.ArxivCooldownError(latest.isoformat().replace("+00:00", "Z"))
 
 
 def _stats(rows):
@@ -177,6 +232,7 @@ def run_batch(
     corpus = store.root
     if logs == corpus or logs.is_relative_to(corpus) or corpus.is_relative_to(logs):
         raise BatchError("Log root and corpus root must be separate directories")
+    check_arxiv_cooldown(logs)
     directory = _safe(logs / batch_id)
     manifest_path = directory / "batch.json"
     attempts = _safe(directory / "attempts")
@@ -233,6 +289,7 @@ def run_batch(
         previous_incomplete_attempts=[
             h["attempt_id"] for h in history if h["status"] == "running"
         ],
+        arxiv_http_requests=[],
         papers=[dict(
             index=index, mssv=pair[0], arxiv_id=pair[1], state="pending",
             started_at=None, ended_at=None, wall_seconds=None, result=None,
@@ -243,6 +300,9 @@ def run_batch(
 
     def persist():
         value["wall_seconds"] = max(0.0, time.perf_counter() - started)
+        policy = arxiv_client._RETRY_429.get()
+        if policy is not None:
+            value["arxiv_retry_429"] = policy.snapshot()
         value["stats"] = _stats(value["papers"])
         value["http_metrics"] = metrics.snapshot(complete=value["status"] != "running")
         total = value["http_metrics"]["total"]
@@ -268,9 +328,13 @@ def run_batch(
                        wall_seconds=max(0.0, time.perf_counter() - paper_starts[index]))
         persist()
 
+    def record_http(event):
+        value["arxiv_http_requests"].append(copy.deepcopy(event))
+        persist()  # Durable before returning to Pipeline or sending another HTTP.
+
     persist()  # The attempt intent is durable before any HTTP or corpus write.
     try:
-        with http_metrics.collect(metrics):
+        with http_metrics.collect(metrics), arxiv_client.record_requests(record_http):
             summary = pipeline.run_selected(
                 selection, corpus, run_id=run_id, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,

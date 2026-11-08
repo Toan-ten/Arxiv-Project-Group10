@@ -4,12 +4,14 @@ import re
 import socket
 import ssl
 import time
-from datetime import timezone
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException
 from threading import Lock
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from src import http_metrics
@@ -34,6 +36,118 @@ class _NoRedirect(HTTPRedirectHandler):
 _opener = build_opener(_NoRedirect())
 _request_lock = Lock()
 _next_request_at = 0.0
+_REQUEST_LOG = ContextVar("arxiv_request_log", default=None)
+_RETRY_429 = ContextVar("arxiv_experimental_retry_429", default=None)
+
+
+class _Retry429:
+    """One explicit Production Run's budget; ordinary pacing is not charged."""
+
+    def __init__(self, budget):
+        if type(budget) not in (int, float) or not math.isfinite(budget) or budget < 0:
+            raise ValueError("429 wait budget must be a finite nonnegative number")
+        self.budget = float(budget)
+        self.waited = 0.0
+        self.exhausted = False
+
+    @property
+    def remaining(self):
+        return max(0.0, self.budget - self.waited)
+
+    def snapshot(self):
+        return dict(mode="retry_once", wait_budget_seconds=self.budget,
+                    waited_seconds=self.waited, remaining_seconds=self.remaining,
+                    budget_exhausted=self.exhausted, fallback_seconds=120.0)
+
+
+@contextmanager
+def retry_429_policy(wait_budget_seconds=None):
+    """Opt-in bounded 429 retry shared across cohorts in one Production Run.
+
+    Requires max_attempts=1 and a durable request sink. Restart admission still
+    checks stored deadlines; an interrupted Run never restarts itself.
+    """
+    policy = None if wait_budget_seconds is None else _Retry429(wait_budget_seconds)
+    token = _RETRY_429.set(policy)
+    try:
+        yield policy
+    finally:
+        _RETRY_429.reset(token)
+
+
+class ArxivCooldownError(RuntimeError):
+    """A persisted server deadline forbids a new attempt; no request was sent."""
+
+    def __init__(self, retry_at_utc):
+        self.retry_at_utc = retry_at_utc
+        super().__init__("arXiv cooldown active; may continue at " + retry_at_utc + " (UTC)")
+
+
+@contextmanager
+def record_requests(callback):
+    """Optional Batch audit sink; write failures propagate before another HTTP."""
+    token = _REQUEST_LOG.set(callback)
+    try:
+        yield
+    finally:
+        _REQUEST_LOG.reset(token)
+
+
+def _utc(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_utc(value):
+    if not isinstance(value, str):
+        raise ValueError("Invalid HTTP log timestamp")
+    date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if date.tzinfo is None or date.utcoffset() != timedelta(0):
+        raise ValueError("HTTP log timestamp must be UTC")
+    return date
+
+
+def _retry_deadline(value, received_at_utc):
+    """Server deadline only; absent/invalid headers never invent a cooldown."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    try:
+        if re.fullmatch(r"[0-9]+", value):
+            date = _parse_utc(received_at_utc) + timedelta(seconds=int(value))
+        else:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=timezone.utc)
+        return date.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _request_event(url, attempt):
+    # Whitelist arXiv endpoints/IDs, never serialize arbitrary query strings,
+    # request headers, response bodies, User-Agent or exception messages.
+    parts = urlsplit(url)
+    endpoint, identifier = None, None
+    if parts.scheme == "https" and parts.netloc == "export.arxiv.org":
+        if parts.path == "/api/query":
+            endpoint = API_URL
+            ids = parse_qs(parts.query).get("id_list", [])
+            if len(ids) == 1 and ID_PATTERN.fullmatch(ids[0]):
+                identifier = ids[0]
+        elif parts.path.startswith("/src/") and ID_PATTERN.fullmatch(unquote(parts.path[5:])):
+            endpoint = "https://export.arxiv.org" + parts.path
+            identifier = unquote(parts.path[5:])
+    return dict(request_started_at_utc=_utc(time.time()), response_received_at_utc=None,
+                endpoint=endpoint, query_identifier=identifier, attempt=attempt,
+                http_status=None, retry_after=None, cooldown_deadline_utc=None)
+
+
+def _response_event(event, status, headers):
+    if event is not None and event["response_received_at_utc"] is None:
+        received = _utc(time.time())
+        raw = headers.get("Retry-After") if headers else None
+        event.update(response_received_at_utc=received, http_status=status,
+                     retry_after=raw, cooldown_deadline_utc=_retry_deadline(raw, received))
 
 
 def _retry_after(value: str | None) -> float:
@@ -51,6 +165,33 @@ def _retry_after(value: str | None) -> float:
         return max(0.0, delay) if math.isfinite(delay) else 0.0
     except (ValueError, TypeError, OverflowError):
         return 0.0
+
+
+def _retry_wait_deadline(server, received):
+    stamp = _parse_utc(received).timestamp()
+    # Keep server evidence unchanged; the effective wait also honors pacing
+    # after a runtime restart, including valid Retry-After: 0 or a past date.
+    return _utc(max(_parse_utc(server).timestamp(), stamp + MIN_INTERVAL)
+                if server is not None else stamp + 120.0)
+
+
+def _plan_429(event, attempt, policy):
+    """Plan/persist evidence before the existing limiter performs any sleep."""
+    global _next_request_at
+    server = event["cooldown_deadline_utc"]
+    deadline = _retry_wait_deadline(server, event["response_received_at_utc"])
+    delay = max(0.0, _parse_utc(deadline).timestamp() - time.time())
+    _next_request_at = max(_next_request_at, time.monotonic() + delay)
+    planned = max(0.0, _next_request_at - time.monotonic())
+    decision = "retry_once"
+    if attempt == 2:
+        decision = "retry_exhausted"
+    elif planned > policy.remaining:
+        decision = "budget_exceeded"
+        policy.exhausted = True
+    event.update(retry_wait_source="retry_after" if server is not None else "internal_backoff",
+                 retry_wait_deadline_utc=deadline, retry_wait_seconds=planned,
+                 retry_429_decision=decision)
 
 
 def _network_status(error: Exception) -> str:
@@ -84,27 +225,44 @@ def _request_arxiv(
             or not user_agent.isascii() or "\r" in user_agent or "\n" in user_agent):
         raise ValueError("user_agent must be a non-empty ASCII header without newlines")
 
+    policy = _RETRY_429.get()
+    if policy is not None and (max_attempts != 1 or _REQUEST_LOG.get() is None):
+        raise ValueError("Experimental 429 retry requires max_attempts=1 and durable HTTP logging")
+
     request = Request(url, headers={
         "User-Agent": user_agent,
         "Accept": accept,
         "Connection": "close",
     })
     with _request_lock:
-        for attempt in range(1, max_attempts + 1):
+        last_failure = None
+        for attempt in range(1, (2 if policy is not None else max_attempts) + 1):
             while (delay := _next_request_at - time.monotonic()) > 0:
+                if policy is not None and attempt == 2 and delay > policy.remaining + 1e-6:
+                    policy.exhausted = True
+                    return last_failure
                 started_wait = time.monotonic()
                 try:
                     time.sleep(delay)
                 finally:
-                    http_metrics.waited("arxiv", max(0.0, time.monotonic() - started_wait))
+                    elapsed = max(0.0, time.monotonic() - started_wait)
+                    http_metrics.waited("arxiv", elapsed)
+                    if policy is not None and attempt == 2:
+                        policy.waited += elapsed
+                if policy is not None and attempt == 2 and policy.waited > policy.budget + 1e-6:
+                    policy.exhausted = True
+                    return last_failure
             http_status = None
             retry_after = 0.0
             retry = False
+            sink = _REQUEST_LOG.get()
+            event = _request_event(url, attempt) if sink is not None else None
             try:
                 with http_metrics.request("arxiv", attempt) as observe:
                     with _opener.open(request, timeout=timeout) as response:
                         http_status = response.status
                         observe(http_status)
+                        _response_event(event, http_status, response.headers)
                         retry_after = _retry_after(response.headers.get("Retry-After"))
                         if http_status != 200:
                             raise HTTPError(url, http_status, "Unexpected status", response.headers, None)
@@ -114,6 +272,7 @@ def _request_arxiv(
             except HTTPError as exc:
                 http_status = exc.code
                 try:
+                    _response_event(event, http_status, exc.headers)
                     retry_after = _retry_after(exc.headers.get("Retry-After")) if exc.headers else 0.0
                     status = ("rate_limited" if exc.code == 429 else
                               "server_error" if 500 <= exc.code < 600 else "http_error")
@@ -129,7 +288,17 @@ def _request_arxiv(
                 _next_request_at = max(
                     _next_request_at, time.monotonic() + max(MIN_INTERVAL, retry_after)
                 )
+                if policy is not None and http_status == 429:
+                    _plan_429(event, attempt, policy)
+                if sink is not None:
+                    sink(event)
 
+            if policy is not None:
+                last_failure = {"status": status, "http_status": http_status,
+                                "attempts": attempt, "error": error}
+                if http_status != 429 or event["retry_429_decision"] != "retry_once":
+                    return last_failure
+                continue  # Same Request object; waiting stays in the shared limiter.
             if not retry or attempt == max_attempts:
                 return {
                     "status": status, "http_status": http_status,
