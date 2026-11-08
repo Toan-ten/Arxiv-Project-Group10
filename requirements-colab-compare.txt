@@ -1,0 +1,2 @@
+-r requirements-colab.txt
+ipywidgets>=8.1,<9
