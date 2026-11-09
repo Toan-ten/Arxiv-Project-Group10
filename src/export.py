@@ -8,7 +8,12 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from src.storage import CorpusStorage
 
 
-def export_papers_table(store: CorpusStorage, pairs: Iterable[Tuple[str, str]]) -> List[Dict]:
+def export_papers_table(
+    store: CorpusStorage,
+    pairs: Iterable[Tuple[str, str]],
+    *,
+    verified_only: bool = False,
+) -> List[Dict]:
     """Export the official M1 `papers` table matching crawling.md schema.
 
     Schema:
@@ -18,29 +23,47 @@ def export_papers_table(store: CorpusStorage, pairs: Iterable[Tuple[str, str]]) 
       - submission_date (str, ISO YYYY-MM-DD)
       - revised_dates (list[str])
       - venue (str, nullable)
+
+    When verified_only=True, restricts output strictly to M1 complete papers.
     """
     rows = []
     for mssv, arxiv_id in pairs:
         try:
             meta = store.read_metadata(mssv, arxiv_id)
-            if meta.get("status") in {"partial", "complete"}:
-                rows.append({
-                    "arxiv_id": str(arxiv_id),
-                    "title": meta.get("title"),
-                    "authors": meta.get("authors") or [],
-                    "submission_date": meta.get("submission_date"),
-                    "revised_dates": meta.get("revised_dates") or [],
-                    "venue": meta.get("venue"),
-                })
+            status = meta.get("status")
+            if verified_only:
+                if status != "complete":
+                    continue
+            elif status not in {"partial", "complete"}:
+                continue
+
+            authors = meta.get("authors")
+            revised_dates = meta.get("revised_dates")
+
+            rows.append({
+                "arxiv_id": str(arxiv_id),
+                "title": meta.get("title"),
+                "authors": list(authors) if authors is not None else [],
+                "submission_date": meta.get("submission_date"),
+                "revised_dates": list(revised_dates) if revised_dates is not None else [],
+                "venue": meta.get("venue"),
+            })
         except Exception:
             continue
     return rows
 
 
-def export_references_table(store: CorpusStorage, pairs: Iterable[Tuple[str, str]]) -> List[Dict]:
+def export_references_table(
+    store: CorpusStorage,
+    pairs: Iterable[Tuple[str, str]],
+    *,
+    verified_only: bool = True,
+) -> List[Dict]:
     """Export the official M1 `references` table matching crawling.md schema.
 
     Filters intermediate items to only include verified arXiv citations.
+    When verified_only=True, only exports references from papers with verified complete coverage
+    (references.status == 'complete' and coverage.complete is True).
     Preserves null for ref_submission_date when unobserved in source data (never fabricates dates).
 
     Schema:
@@ -56,6 +79,11 @@ def export_references_table(store: CorpusStorage, pairs: Iterable[Tuple[str, str
     for mssv, arxiv_id in pairs:
         try:
             ref_data = store.read_references(mssv, arxiv_id)
+            if verified_only:
+                cov = ref_data.get("coverage") or {}
+                if ref_data.get("status") != "complete" or cov.get("complete") is not True:
+                    continue
+
             for item in ref_data.get("items", []):
                 ref_arxiv = item.get("arxiv_id")
                 if not ref_arxiv:
@@ -71,7 +99,7 @@ def export_references_table(store: CorpusStorage, pairs: Iterable[Tuple[str, str
                     "arxiv_id": str(arxiv_id),
                     "ref_arxiv_id": str(ref_arxiv),
                     "ref_title": item.get("title"),
-                    "ref_authors": item.get("authors") or [],
+                    "ref_authors": list(item.get("authors")) if item.get("authors") is not None else [],
                     "ref_submission_date": str(ref_sub_date) if ref_sub_date else None,
                     "ref_s2_id": item.get("s2_paper_id"),
                 })

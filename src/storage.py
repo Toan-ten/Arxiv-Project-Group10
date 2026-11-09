@@ -759,3 +759,13 @@ class CorpusStorage:
                 )
         manifest = self._commit(manifest)
         return {**plan, "manifest": manifest}
+
+    def audit_paper(self, mssv, arxiv_id):
+        """Perform comprehensive storage contract and data integrity audit on a paper."""
+        from src.storage_integrity import audit_paper_integrity
+        return audit_paper_integrity(self, mssv, arxiv_id)
+
+    def audit_cohort(self, pairs, *, cohort_number=None):
+        """Perform comprehensive storage contract and data integrity audit on a cohort or paper list."""
+        from src.storage_integrity import audit_cohort_integrity
+        return audit_cohort_integrity(self, pairs, cohort_number=cohort_number)

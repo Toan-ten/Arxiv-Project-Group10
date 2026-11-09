@@ -179,8 +179,25 @@ class FastProductionRunner:
                         continue
                     versions = m.get("versions") or {}
                     if disc == "found" and versions and m.get("version_status") == "resolved":
-                        if all(v.get("status") in TERMINAL for v in versions.values()):
-                            done += 1
+                        if all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
+                            all_verified = True
+                            for v_name, v_info in versions.items():
+                                if not isinstance(v_info, dict):
+                                    all_verified = False
+                                    break
+                                if v_info.get("status") == "success" and (v_info.get("files") or v_info.get("file_checksums")):
+                                    ver_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / v_name
+                                    if not ver_dir.is_dir():
+                                        all_verified = False
+                                        break
+                                    for fname in (v_info.get("files") or []):
+                                        if not (ver_dir / fname).is_file():
+                                            all_verified = False
+                                            break
+                                    if not all_verified:
+                                        break
+                            if all_verified:
+                                done += 1
                 except Exception:
                     pass
         return done
