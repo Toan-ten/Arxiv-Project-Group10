@@ -422,6 +422,29 @@ class ArxivClientTests(unittest.TestCase):
         self.assertEqual(self.starts, [0.0, 25.0])
         self.assertAlmostEqual(policy.waited, 25.0, places=3)
 
+    def test_query_arxiv_with_official_arxiv_client(self):
+        import datetime
+        from src.arxiv_client import query_arxiv_official
+        import unittest.mock
+        mock_result = unittest.mock.Mock()
+        mock_result.entry_id = "http://arxiv.org/abs/2502.09992v2"
+        mock_result.title = "Sample Paper Title"
+        mock_author = unittest.mock.Mock()
+        mock_author.name = "Author One"
+        mock_result.authors = [mock_author]
+        mock_result.published = datetime.datetime(2025, 2, 10, 10, 0, 0, tzinfo=datetime.timezone.utc)
+        mock_result.updated = datetime.datetime(2025, 2, 12, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        mock_client = unittest.mock.Mock()
+        mock_client.results.return_value = iter([mock_result])
+
+        res = query_arxiv_official("24120232", "2502.09992", client=mock_client)
+        self.assertEqual(res["status"], "found")
+        self.assertEqual(res["arxiv_id"], "2502.09992")
+        self.assertEqual(res["version_ids"], ["2502.09992v1", "2502.09992v2"])
+        self.assertEqual(res["latest_version_id"], "2502.09992v2")
+        self.assertEqual(res["title"], "Sample Paper Title")
+        self.assertEqual(res["authors"], ["Author One"])
+
 
 if __name__ == "__main__":
     unittest.main()

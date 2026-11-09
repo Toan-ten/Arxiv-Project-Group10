@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from src import http_metrics
-from src.arxiv_discovery import ID_PATTERN, parse_arxiv_response
+from src.arxiv_discovery import ID_PATTERN, parse_arxiv_response, _entry_id
 
 
 API_URL = "https://export.arxiv.org/api/query"
@@ -518,3 +518,93 @@ def query_arxiv(
         accept="application/atom+xml", read_response=read_xml,
     )
     return {"mssv": mssv, "arxiv_id": arxiv_id, **result}
+
+
+def query_arxiv_official(
+    mssv: str,
+    arxiv_id: str,
+    *,
+    client=None,
+    timeout: float = 30.0,
+    user_agent: str = USER_AGENT,
+) -> dict:
+    """Resolve paper discovery using the official arxiv.py >= 4.0.0 Client."""
+    if not isinstance(mssv, str) or not re.fullmatch(r"[0-9]+", mssv):
+        raise ValueError("mssv must be a non-empty string of digits")
+    match = ID_PATTERN.fullmatch(arxiv_id) if isinstance(arxiv_id, str) else None
+    if match is None or match.group("version") is not None:
+        raise ValueError("arxiv_id must be a base ID without a version suffix")
+
+    if client is None:
+        try:
+            import arxiv
+            client = arxiv.Client(page_size=1, delay_seconds=MIN_INTERVAL, num_retries=3)
+        except ImportError:
+            # Fall back to raw Atom HTTP client if arxiv.py is not installed
+            return query_arxiv(mssv, arxiv_id, timeout=timeout, user_agent=user_agent)
+
+    try:
+        try:
+            import arxiv
+            search = arxiv.Search(id_list=[arxiv_id])
+        except ImportError:
+            class _DummySearch:
+                def __init__(self, id_list):
+                    self.id_list = id_list
+            search = _DummySearch(id_list=[arxiv_id])
+        results_iter = client.results(search)
+        first_result = next(results_iter, None)
+    except Exception as exc:
+        return {
+            "mssv": mssv, "arxiv_id": arxiv_id,
+            "status": "api_error", "error": str(exc),
+            "version_status": "needs_verification", "version_ids": [],
+            "latest_version_id": None, "title": None, "authors": [],
+            "published": None, "updated": None, "missing_fields": ["title", "authors"],
+        }
+
+    if first_result is None:
+        return {
+            "mssv": mssv, "arxiv_id": arxiv_id,
+            "status": "not_found", "version_status": "not_applicable",
+            "version_ids": [], "latest_version_id": None, "title": None,
+            "authors": [], "published": None, "updated": None, "missing_fields": [],
+        }
+
+    raw_id = getattr(first_result, "entry_id", "")
+    try:
+        base_id, latest_ver = _entry_id(raw_id)
+    except Exception:
+        cleaned = raw_id.split("/abs/")[-1] if "/abs/" in raw_id else raw_id
+        m = ID_PATTERN.fullmatch(cleaned)
+        if m:
+            base_id = m.group("base")
+            ver_str = m.group("version")
+            latest_ver = int(ver_str) if ver_str is not None else 1
+        else:
+            base_id = arxiv_id
+            latest_ver = 1
+
+    if base_id != arxiv_id:
+        return {
+            "mssv": mssv, "arxiv_id": arxiv_id, "status": "invalid_response",
+            "error": f"Requested {arxiv_id}, received {base_id}",
+        }
+
+    title = " ".join(str(getattr(first_result, "title", "")).split()) if first_result.title else None
+    authors = [" ".join(str(a.name).split()) for a in getattr(first_result, "authors", []) if getattr(a, "name", None)]
+    pub = getattr(first_result, "published", None)
+    upd = getattr(first_result, "updated", None)
+    published_iso = pub.date().isoformat() if hasattr(pub, "date") else None
+    updated_iso = upd.date().isoformat() if hasattr(upd, "date") else None
+
+    version_ids = [f"{base_id}v{n}" for n in range(1, latest_ver + 1)] if latest_ver else []
+    return {
+        "mssv": mssv, "arxiv_id": arxiv_id, "status": "found",
+        "version_status": "resolved" if latest_ver else "needs_verification",
+        "version_ids": version_ids,
+        "latest_version_id": f"{base_id}v{latest_ver}" if latest_ver else None,
+        "title": title, "authors": authors,
+        "published": published_iso, "updated": updated_iso,
+        "missing_fields": [f for f, v in [("title", title), ("authors", authors), ("published", published_iso)] if not v],
+    }

@@ -2,3 +2,6 @@
 # Core crawling, storage, and S2 clients use Python 3.10+ standard library.
 # psutil is used for process-tree RAM sampling in benchmark_metrics.py.
 psutil>=5.9.0
+arxiv>=4.0.0
+pyarrow>=14.0.0
+
