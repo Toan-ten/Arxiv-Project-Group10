@@ -1065,10 +1065,11 @@ shutil.rmtree(target2)
         shutil.rmtree(runner.corpus_dir)
         try:
             runner.corpus_dir.symlink_to(runner.corpus_dir)
-            self.assertEqual(runner.count_completed_papers(1), 0)
-            runner.corpus_dir.unlink()
         except OSError:
-            pass
+            self.skipTest("Filesystem does not support symlinks")
+
+        self.assertEqual(runner.count_completed_papers(1), 0)
+        runner.corpus_dir.unlink()
 
         # 2. corpus_dir does not exist
         if runner.corpus_dir.exists() or runner.corpus_dir.is_symlink():
