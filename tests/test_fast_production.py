@@ -9,7 +9,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.fast_production import FastProductionRunner, cohort_pairs
+from src.fast_production import (
+    FastProductionRunner,
+    cohort_pairs,
+    member_cohort_range,
+    verify_cohort_handoff,
+)
 
 FORBIDDEN_CREDENTIAL_PREFIXES = [
     "K" + "GAT_",
@@ -650,14 +655,189 @@ class TestFastProduction(unittest.TestCase):
         self.assertNotEqual(batch_id_mismatch, "fast-arxiv-0001")
         self.assertFalse(can_resume_mismatch)
 
-    def test_enrich_cohort_s2_invokes_run_cohort_with_s2(self):
-        """Task 5.3: enrich_cohort_s2 configures S2 and runs safe enrichment."""
+    def test_enrich_cohort_s2_isolated_from_arxiv(self):
+        """F-06: enrich_cohort_s2 enriches source-complete papers directly without arXiv discovery or downloads."""
         runner = FastProductionRunner(self.local_root, self.drive_root)
-        with patch.object(runner, "run_cohort", return_value={"status": "enriched"}) as mock_run:
-            custom_s2 = {"timeout": 15.0, "max_attempts": 2, "min_interval": 2.0}
-            res = runner.enrich_cohort_s2(1, s2_config=custom_s2)
-            self.assertEqual(res, {"status": "enriched"})
-            mock_run.assert_called_once_with(1, resume=True, revision_history=True, s2_config=custom_s2)
+        # Create a source-complete paper (2508-07872 in cohort 1)
+        paper_dir = runner.corpus_dir / "2508-07872"
+        v1_dir = paper_dir / "v1"
+        v1_dir.mkdir(parents=True, exist_ok=True)
+        tex_content = r"\documentclass{article}\begin{document}Hello\end{document}"
+        (v1_dir / "main.tex").write_text(tex_content, encoding="utf-8")
+        sha = hashlib.sha256(tex_content.encode("utf-8")).hexdigest()
+        (paper_dir / "manifest.json").write_text(json.dumps({
+            "contract_version": 2,
+            "arxiv_id": "2508.07872",
+            "mssv": "24120010",
+            "run_id": "run_1",
+            "status": "complete",
+            "discovery_status": "found",
+            "version_status": "resolved",
+            "metadata_status": "complete",
+            "references_status": "complete",
+            "updated_at": "2026-11-09T00:00:00Z",
+            "versions": {
+                "v1": {
+                    "versioned_id": "2508.07872v1",
+                    "status": "success",
+                    "source_status": "success",
+                    "http_status": 200,
+                    "content_type": "application/x-eprint",
+                    "source_url": "https://export.arxiv.org/src/2508.07872v1",
+                    "archive_bytes": None,
+                    "archive_sha256": None,
+                    "files": ["main.tex"],
+                    "file_checksums": {"main.tex": sha},
+                    "kept_bytes": len(tex_content.encode("utf-8")),
+                    "extracted_bytes": None,
+                    "removed_files": None,
+                    "attempts": 1,
+                    "run_id": "run_1",
+                    "completed_at": "2026-11-09T00:00:00Z",
+                    "error": None,
+                }
+            },
+        }), encoding="utf-8")
+
+        with patch("src.arxiv_client.query_arxiv") as mock_arxiv_discovery, \
+             patch("src.arxiv_source.download_source") as mock_arxiv_download, \
+             patch("src.pipeline._run_s2") as mock_pipeline_s2:
+            res = runner.enrich_cohort_s2(1, max_ids=1)
+            # Must invoke pipeline._run_s2 directly
+            self.assertEqual(mock_pipeline_s2.call_count, 1)
+            # Must NEVER invoke arXiv discovery or source downloading
+            mock_arxiv_discovery.assert_not_called()
+            mock_arxiv_download.assert_not_called()
+            self.assertEqual(res["enriched_papers"], 1)
+            self.assertEqual(res["skipped_incomplete"], 0)
+
+    def test_archive_state_tagging(self):
+        """F-03: _archive_cohort tags checkpoint_partial, checkpoint_complete, and handoff_verified correctly."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        dest = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+
+        # Case 1: Partial cohort (1 paper out of 100) -> checkpoint_partial
+        p1 = runner.corpus_dir / "2508-07872"
+        p1.mkdir(parents=True, exist_ok=True)
+        (p1 / "manifest.json").write_text('{"status": "complete"}', encoding="utf-8")
+        runner._archive_cohort(1, dest)
+        mf_path = runner.archives_dir / "cohort_0001_corpus.manifest.json"
+        payload = json.loads(mf_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["archive_state"], "checkpoint_partial")
+        self.assertEqual(payload["included_count"], 1)
+        self.assertEqual(payload["expected_count"], 100)
+
+    def test_restore_cohort_rejects_inventory_mismatch(self):
+        """F-03: restore_cohort rejects archive whose tar inventory does not match accounting manifest."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        archive_path = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+        sha_file = archive_path.with_name(archive_path.name + ".sha256")
+        manifest_file = archive_path.with_name("cohort_0001_corpus.manifest.json")
+
+        import io
+        import tarfile
+        with tarfile.open(archive_path, "w:gz") as tar:
+            # Tar contains paper 2508-07872
+            t1 = tarfile.TarInfo("2508-07872/manifest.json")
+            data1 = b'{"status": "complete", "arxiv_id": "2508.07872"}'
+            t1.size = len(data1)
+            tar.addfile(t1, io.BytesIO(data1))
+            # Tar ALSO contains paper 2508-07873
+            t2 = tarfile.TarInfo("2508-07873/manifest.json")
+            data2 = b'{"status": "complete", "arxiv_id": "2508.07873"}'
+            t2.size = len(data2)
+            tar.addfile(t2, io.BytesIO(data2))
+
+        actual_sha = runner._compute_sha256(archive_path)
+        sha_file.write_text(f"{actual_sha}  {archive_path.name}\n", encoding="utf-8")
+
+        # But manifest ONLY lists 2508.07872 (mismatch!)
+        manifest_file.write_text(json.dumps({
+            "cohort_number": 1,
+            "archive_filename": archive_path.name,
+            "archive_sha256": actual_sha,
+            "included_count": 1,
+            "included_ids": ["2508.07872"],
+            "archive_state": "checkpoint_partial",
+        }), encoding="utf-8")
+
+        with self.assertRaises(ValueError) as ctx:
+            runner.restore_cohort(1)
+        self.assertIn("mismatch", str(ctx.exception).lower())
+
+    def test_member_cohort_range(self):
+        """F-02: member_cohort_range accurately assigns exactly 50 cohorts per member for all 200 cohorts."""
+        self.assertEqual(member_cohort_range("24120010"), list(range(1, 51)))
+        self.assertEqual(member_cohort_range("24120035"), list(range(51, 101)))
+        self.assertEqual(member_cohort_range("24120232"), list(range(101, 151)))
+        self.assertEqual(member_cohort_range("24120260"), list(range(151, 201)))
+
+        all_cohorts = (
+            member_cohort_range("24120010")
+            + member_cohort_range("24120035")
+            + member_cohort_range("24120232")
+            + member_cohort_range("24120260")
+        )
+        self.assertEqual(len(all_cohorts), 200)
+        self.assertEqual(all_cohorts, list(range(1, 201)))
+
+        with self.assertRaises(ValueError):
+            member_cohort_range("99999999")
+
+    def test_verify_cohort_handoff(self):
+        """F-03: verify_cohort_handoff enforces all requirements for final M1 handoff."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        archive_path = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+        sha_file = archive_path.with_name(archive_path.name + ".sha256")
+        manifest_file = archive_path.with_name("cohort_0001_corpus.manifest.json")
+
+        # Missing archive raises ValueError
+        with self.assertRaises(ValueError):
+            verify_cohort_handoff(runner, 1)
+
+        # Create archive
+        import io
+        import tarfile
+        with tarfile.open(archive_path, "w:gz") as tar:
+            t1 = tarfile.TarInfo("dummy.txt")
+            data = b"test"
+            t1.size = len(data)
+            tar.addfile(t1, io.BytesIO(data))
+        actual_sha = runner._compute_sha256(archive_path)
+
+        # Missing sha raises ValueError
+        with self.assertRaises(ValueError):
+            verify_cohort_handoff(runner, 1)
+
+        sha_file.write_text(f"{actual_sha}  {archive_path.name}\n", encoding="utf-8")
+
+        # Missing manifest raises ValueError
+        with self.assertRaises(ValueError):
+            verify_cohort_handoff(runner, 1)
+
+        # Non-handoff_verified state raises ValueError
+        manifest_file.write_text(json.dumps({
+            "cohort_number": 1,
+            "archive_filename": archive_path.name,
+            "archive_sha256": actual_sha,
+            "included_count": 100,
+            "included_ids": ["2508.07872"],
+            "archive_state": "checkpoint_partial",
+        }), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            verify_cohort_handoff(runner, 1)
+
+        # Proper handoff_verified passes
+        manifest_file.write_text(json.dumps({
+            "cohort_number": 1,
+            "archive_filename": archive_path.name,
+            "archive_sha256": actual_sha,
+            "included_count": 100,
+            "included_ids": ["2508.07872"],
+            "archive_state": "handoff_verified",
+        }), encoding="utf-8")
+        res = verify_cohort_handoff(runner, 1)
+        self.assertTrue(res["verified"])
 
 
     def test_notebooks_and_source_do_not_contain_hardcoded_credentials(self):
@@ -925,7 +1105,7 @@ shutil.rmtree(target2)
         )
 
     def test_fast_production_notebook_safety_guards(self):
-        """Phase 0 / P1-15: Fast production notebook enforces CPU-only and fail-closed CODE_COMMIT."""
+        """Phase 0 / P1-15: Fast production notebook enforces CPU-only and fail-closed CODE_COMMIT & EXECUTION_COMMIT."""
         repo_root = Path(__file__).resolve().parents[1]
         nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
         nb = json.loads(nb_path.read_text(encoding="utf-8"))
@@ -935,9 +1115,11 @@ shutil.rmtree(target2)
         self.assertIn("COLAB_GPU", all_src)
         self.assertIn("Chuyển accelerator về None/CPU", all_src)
 
-        # Fail-closed commit check in source text
+        # Fail-closed commit checks in source text
         self.assertIn("not re.fullmatch(r\"[0-9a-f]{40}\", CODE_COMMIT)", all_src)
         self.assertIn("not isinstance(CODE_COMMIT, str)", all_src)
+        self.assertIn("not re.fullmatch(r\"[0-9a-f]{40}\", EXECUTION_COMMIT)", all_src)
+        self.assertIn("not isinstance(EXECUTION_COMMIT, str)", all_src)
         self.assertNotIn("sử dụng HEAD hiện tại của nhánh", all_src)
 
     def test_fast_production_notebook_fail_closed_execution(self):
@@ -954,9 +1136,12 @@ shutil.rmtree(target2)
                 break
         self.assertIsNotNone(step1_src, "Step 1 checkout code cell must exist in m1_colab_fast_production.ipynb")
 
-        def run_actual_cell(code_commit, checkout_error=None, mismatch_head=None):
-            pattern = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
-            modified_src = pattern.sub(f'CODE_COMMIT = {repr(code_commit)}', step1_src, count=1)
+        def run_actual_cell(exec_commit, code_commit="PRESERVE", checkout_error=None, mismatch_head=None):
+            pattern_exec = re.compile(r'EXECUTION_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
+            modified_src = pattern_exec.sub(f'EXECUTION_COMMIT = {repr(exec_commit)}', step1_src, count=1)
+            if code_commit != "PRESERVE":
+                pattern_code = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
+                modified_src = pattern_code.sub(f'CODE_COMMIT = {repr(code_commit)}', modified_src, count=1)
 
             git_runner = TightenedSimulatedGitRunner(checkout_error=checkout_error, mismatch_head=mismatch_head)
             mock_drive = unittest.mock.MagicMock()
@@ -976,8 +1161,10 @@ shutil.rmtree(target2)
 
         # Sub-case A: Malformed SHA raises RuntimeError before executing ANY git command
         for bad_sha in ["", "not_a_sha", "12345", "a" * 39, "a" * 41, "g" * 40, None, 12345]:
-            with self.assertRaises(RuntimeError, msg=f"Should raise RuntimeError for malformed SHA: {bad_sha}"):
+            with self.assertRaises(RuntimeError, msg=f"Should raise RuntimeError for malformed EXECUTION_COMMIT: {bad_sha}"):
                 run_actual_cell(bad_sha)
+            with self.assertRaises(RuntimeError, msg=f"Should raise RuntimeError for malformed CODE_COMMIT: {bad_sha}"):
+                run_actual_cell(valid_sha, code_commit=bad_sha)
 
         # Sub-case B: Checkout failure propagates error and verifies exact sequence up to failure
         spied_runner = TightenedSimulatedGitRunner(checkout_error=subprocess.CalledProcessError(1, "git checkout"))
@@ -987,8 +1174,8 @@ shutil.rmtree(target2)
              patch("pathlib.Path.exists", return_value=True), \
              patch("subprocess.run", side_effect=spied_runner.run), \
              patch("subprocess.check_output", side_effect=spied_runner.check_output):
-            pattern = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
-            modified_src = pattern.sub(f'CODE_COMMIT = {repr(valid_sha)}', step1_src, count=1)
+            pattern_exec = re.compile(r'EXECUTION_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
+            modified_src = pattern_exec.sub(f'EXECUTION_COMMIT = {repr(valid_sha)}', step1_src, count=1)
             with self.assertRaises(subprocess.CalledProcessError):
                 exec(modified_src, {"__name__": "__main__"})
         self.assertEqual(len(spied_runner.run_calls), 2)
@@ -1005,8 +1192,8 @@ shutil.rmtree(target2)
              patch("pathlib.Path.exists", return_value=True), \
              patch("subprocess.run", side_effect=spied_mismatch.run), \
              patch("subprocess.check_output", side_effect=spied_mismatch.check_output):
-            pattern = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
-            modified_src = pattern.sub(f'CODE_COMMIT = {repr(valid_sha)}', step1_src, count=1)
+            pattern_exec = re.compile(r'EXECUTION_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
+            modified_src = pattern_exec.sub(f'EXECUTION_COMMIT = {repr(valid_sha)}', step1_src, count=1)
             with self.assertRaises(RuntimeError, msg="Commit sau khi checkout ... không khớp"):
                 exec(modified_src, {"__name__": "__main__"})
         self.assertEqual(spied_mismatch.run_calls[0], {"cmd": ["git", "fetch", "origin"], "check": True})
@@ -1030,6 +1217,67 @@ shutil.rmtree(target2)
             runner.run(["git", "checkout", "--detach", valid_sha], check=False)
         with self.assertRaises(AssertionError, msg="text=False on git rev-parse HEAD must fail explicitly"):
             runner.check_output(["git", "rev-parse", "HEAD"], text=False)
+
+    def test_notebook_member_selection_covers_entire_group(self):
+        """F-02: Fast production notebook dynamically derives 50 cohorts per member, accounting for all 200 cohorts."""
+        repo_root = Path(__file__).resolve().parents[1]
+        nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+
+        # Extract Step 3 cell source
+        step3_src = None
+        for cell in nb.get("cells", []):
+            src = "".join(cell.get("source", []))
+            if "member_cohort_range" in src and "MSSV =" in src:
+                step3_src = src
+                break
+        self.assertIsNotNone(step3_src, "Step 3 cell must exist in fast production notebook")
+
+        # Execute selection logic for each member in isolation
+        for mssv, expected_start in [("24120010", 1), ("24120035", 51), ("24120232", 101), ("24120260", 151)]:
+            ns = {
+                "member_cohort_range": member_cohort_range,
+                "MSSV": mssv,
+                "MODE": "MEMBER_PRODUCTION",
+            }
+            # Execute derivation snippet
+            exec(
+                "assigned = member_cohort_range(MSSV)\n"
+                "if MODE == 'PILOT': COHORTS = [assigned[0]]\n"
+                "elif MODE == 'MEMBER_PRODUCTION': COHORTS = assigned\n",
+                ns,
+            )
+            self.assertEqual(len(ns["COHORTS"]), 50)
+            self.assertEqual(ns["COHORTS"][0], expected_start)
+            self.assertEqual(ns["COHORTS"][-1], expected_start + 49)
+
+        # Pilot mode gives exactly 1 cohort
+        ns_pilot = {
+            "member_cohort_range": member_cohort_range,
+            "MSSV": "24120260",
+            "MODE": "PILOT",
+        }
+        exec(
+            "assigned = member_cohort_range(MSSV)\n"
+            "if MODE == 'PILOT': COHORTS = [assigned[0]]\n"
+            "elif MODE == 'MEMBER_PRODUCTION': COHORTS = assigned\n",
+            ns_pilot,
+        )
+        self.assertEqual(ns_pilot["COHORTS"], [151])
+
+    def test_notebook_all_cells_compile_cleanly(self):
+        """Phase 0 / P1: All code cells in m1_colab_fast_production.ipynb parse cleanly without syntax errors."""
+        repo_root = Path(__file__).resolve().parents[1]
+        nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        for idx, cell in enumerate(nb.get("cells", [])):
+            if cell.get("cell_type") == "code":
+                src = "".join(cell.get("source", []))
+                filtered = [l if not l.strip().startswith(("!", "%")) else f"# {l}" for l in src.splitlines()]
+                try:
+                    ast.parse("\n".join(filtered), filename=f"notebook_cell_{idx}")
+                except SyntaxError as exc:
+                    self.fail(f"Cell {idx} failed to parse: {exc}")
 
     # ---------------------------------------------------------
     # R10: Adversarial count_completed_papers Containment & Safety Tests

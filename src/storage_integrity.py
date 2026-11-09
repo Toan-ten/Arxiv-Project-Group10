@@ -361,9 +361,6 @@ def _inspect_path(path: Path) -> Tuple[bool, bool, bool]:
     return is_link, is_d, is_f
 
 
-_ORIGINAL_PATH_READ_BYTES = Path.read_bytes
-
-
 def _read_bytes_safely(path: Path) -> bytes:
     """Read file content via descriptor with O_NOFOLLOW and validate it is a regular unlinked file.
 
@@ -383,8 +380,6 @@ def _read_bytes_safely(path: Path) -> bytes:
         info = os.fstat(fd)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             raise OSError(f"{path} is not a regular unlinked file (mode={oct(info.st_mode)}, nlink={info.st_nlink})")
-        if Path.read_bytes is not _ORIGINAL_PATH_READ_BYTES:
-            return path.read_bytes()
         with open(fd, "rb", closefd=False) as f:
             return f.read()
     finally:

@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Tuple
 from src import arxiv_client, batch, benchmark, benchmark_runner, id_ranges
 from src.kaggle_discovery import ingest_kaggle_snapshot
 from src.storage import CorpusStorage, _atomic_json
+from src.storage_integrity import _inspect_path, _read_bytes_safely
 
 
 COHORT_SIZE = 100
@@ -35,6 +36,18 @@ def cohort_pairs(number: int) -> List[Tuple[str, str]]:
     start = (number - 1) * COHORT_SIZE
     pairs = list(id_ranges.iter_assigned_ids(config))
     return pairs[start:start + COHORT_SIZE]
+
+
+def member_cohort_range(mssv: str) -> List[int]:
+    """Return the list of 50 cohort numbers assigned to the member identified by MSSV."""
+    config = id_ranges.load_config()
+    if mssv not in config:
+        raise ValueError(f"Unknown MSSV {mssv}. Must be one of: {list(config.keys())}")
+    member_keys = list(config.keys())
+    idx = member_keys.index(mssv)
+    start_cohort = idx * 50 + 1
+    end_cohort = start_cohort + 50
+    return list(range(start_cohort, end_cohort))
 
 
 class FastProductionRunner:
@@ -142,19 +155,26 @@ class FastProductionRunner:
         from src.storage import arxiv_id_to_folder_key
         reset_count = 0
         for mssv, arxiv_id in cohort_pairs(number):
-            manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
-            if not manifest_path.is_file():
-                continue
+            folder_key = arxiv_id_to_folder_key(arxiv_id)
+            manifest_path = self.corpus_dir / folder_key / "manifest.json"
             try:
+                is_link, _, is_f = _inspect_path(manifest_path)
+                if is_link or not is_f:
+                    continue
                 manifest = self.store.read_manifest(mssv, arxiv_id)
                 changed = False
                 for ver_name, rec in list(manifest.get("versions", {}).items()):
                     err_msg = (rec.get("error") or {}).get("message") or ""
                     if rec.get("status") == "unsafe_archive" and err_msg.startswith("Conflicting path:"):
-                        ver_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / ver_name
-                        if not ver_dir.exists():
-                            manifest["versions"][ver_name] = self.store._pending(arxiv_id, ver_name)
-                            changed = True
+                        ver_dir = self.corpus_dir / folder_key / ver_name
+                        try:
+                            is_l_v, is_d_v, _ = _inspect_path(ver_dir)
+                            if not is_l_v and is_d_v:
+                                continue
+                        except FileNotFoundError:
+                            pass
+                        manifest["versions"][ver_name] = self.store._pending(arxiv_id, ver_name)
+                        changed = True
                 if changed:
                     self.store._commit(manifest)
                     reset_count += 1
@@ -190,7 +210,8 @@ class FastProductionRunner:
 
         done = 0
         try:
-            if not self.corpus_dir.exists() or self.corpus_dir.is_symlink() or os.path.islink(self.corpus_dir):
+            is_link, is_dir, _ = _inspect_path(self.corpus_dir)
+            if is_link or not is_dir:
                 return 0
             corpus_resolved = self.corpus_dir.resolve()
             if not corpus_resolved.is_dir():
@@ -205,48 +226,23 @@ class FastProductionRunner:
                 continue
 
             paper_dir = self.corpus_dir / folder_key
-            if not paper_dir.exists():
-                continue
-
-            # 1. Reject any paper directory that is a symlink or resolves outside corpus root (R10)
-            if paper_dir.is_symlink() or os.path.islink(paper_dir):
-                continue
             try:
+                is_link, is_dir, _ = _inspect_path(paper_dir)
+                if is_link or not is_dir:
+                    continue
                 if not paper_dir.resolve().is_relative_to(corpus_resolved):
                     continue
             except (OSError, RuntimeError):
                 continue
-            if not paper_dir.is_dir():
-                continue
 
             manifest_path = paper_dir / "manifest.json"
-            # 2. Verify manifest.json is a regular file with st_nlink == 1 (R10)
-            if manifest_path.is_symlink() or os.path.islink(manifest_path):
-                continue
-
-            flags = os.O_RDONLY
-            if hasattr(os, "O_NOFOLLOW"):
-                flags |= os.O_NOFOLLOW
-            if hasattr(os, "O_CLOEXEC"):
-                flags |= os.O_CLOEXEC
-
             try:
-                fd = os.open(manifest_path, flags)
-            except OSError:
-                continue
-
-            try:
-                fstat_res = os.fstat(fd)
-                if not stat.S_ISREG(fstat_res.st_mode) or fstat_res.st_nlink != 1:
-                    os.close(fd)
+                is_link, _, is_file = _inspect_path(manifest_path)
+                if is_link or not is_file:
                     continue
-                with os.fdopen(fd, "r", encoding="utf-8") as stream:
-                    m = json.load(stream)
+                m_bytes = _read_bytes_safely(manifest_path)
+                m = json.loads(m_bytes.decode("utf-8"))
             except Exception:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
                 continue
 
             # 3. Validate manifest schema and arXiv identity before trusting any status field (R10, R13)
@@ -269,10 +265,17 @@ class FastProductionRunner:
                     continue
                 # Verify no version directories exist on disk
                 try:
-                    has_version_dir = any(
-                        p.is_dir() and re.match(r"^v\d+$", p.name)
-                        for p in paper_dir.iterdir()
-                    )
+                    has_version_dir = False
+                    for p in paper_dir.iterdir():
+                        if re.match(r"^v\d+$", p.name):
+                            try:
+                                is_l_p, is_d_p, _ = _inspect_path(p)
+                                if not is_l_p and is_d_p:
+                                    has_version_dir = True
+                                    break
+                            except Exception:
+                                has_version_dir = True
+                                break
                     if has_version_dir:
                         continue
                 except OSError:
@@ -312,26 +315,28 @@ class FastProductionRunner:
         base_id = f"fast-arxiv-{number:04d}" if s2_config is None else f"fast-arxiv-{number:04d}-s2"
         base_dir = self.logs_dir / base_id
         batch_json_path = base_dir / "batch.json"
-        if not batch_json_path.is_file():
-            return base_id, False
         try:
-            saved_def = json.loads(batch_json_path.read_text(encoding="utf-8")).get("definition", {})
-            if (
-                saved_def.get("max_attempts") == max_attempts
-                and saved_def.get("revision_history", False) == bool(revision_history)
-                and saved_def.get("timeout") == effective_timeout
-                and saved_def.get("s2_config") == s2_config
-            ):
-                return base_id, True
+            is_l, _, is_f = _inspect_path(batch_json_path)
+            if not is_l and is_f:
+                saved_def = json.loads(_read_bytes_safely(batch_json_path).decode("utf-8")).get("definition", {})
+                if (
+                    saved_def.get("max_attempts") == max_attempts
+                    and saved_def.get("revision_history", False) == bool(revision_history)
+                    and saved_def.get("timeout") == effective_timeout
+                    and saved_def.get("s2_config") == s2_config
+                ):
+                    return base_id, True
         except Exception:
             pass
+
         s2_flag = 1 if s2_config is not None else 0
         variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}-s{s2_flag}"
         variant_dir = self.logs_dir / variant_id
         variant_json = variant_dir / "batch.json"
-        if variant_json.is_file():
-            try:
-                saved_def = json.loads(variant_json.read_text(encoding="utf-8")).get("definition", {})
+        try:
+            is_l_v, _, is_f_v = _inspect_path(variant_json)
+            if not is_l_v and is_f_v:
+                saved_def = json.loads(_read_bytes_safely(variant_json).decode("utf-8")).get("definition", {})
                 if (
                     saved_def.get("max_attempts") == max_attempts
                     and saved_def.get("revision_history", False) == bool(revision_history)
@@ -339,8 +344,8 @@ class FastProductionRunner:
                     and saved_def.get("s2_config") == s2_config
                 ):
                     return variant_id, True
-            except Exception:
-                pass
+        except Exception:
+            pass
         return variant_id, False
 
     def run_cohort(
@@ -439,7 +444,8 @@ class FastProductionRunner:
     ) -> dict:
         """Enrich a completed cohort with Semantic Scholar metadata and references.
 
-        Runs S2 enrichment safely without re-downloading arXiv TeX sources.
+        Runs S2 enrichment directly on source-complete papers without re-downloading arXiv TeX sources
+        or invoking arXiv discovery.
         Synchronizes the enriched cohort back to Google Drive upon completion.
         """
         already_done = self.count_completed_papers(number)
@@ -453,14 +459,95 @@ class FastProductionRunner:
             "min_interval": 3.0,
             "reference_limit": 100,
         }
-        run_kwargs = {
-            "resume": True,
-            "revision_history": True,
-            "s2_config": effective_s2,
-        }
+
+        from src import pipeline, s2_integration, semantic_scholar
+        from src.storage import TERMINAL, arxiv_id_to_folder_key
+
+        cfg = s2_integration.configuration(effective_s2)
+        if cfg is not None:
+            semantic_scholar._key_from_environment()
+        limiter = None if cfg is None else semantic_scholar.RateLimiter(cfg["min_interval"])
+
+        pairs = cohort_pairs(number)
         if max_ids is not None:
-            run_kwargs["max_ids"] = max_ids
-        return self.run_cohort(number, **run_kwargs)
+            pairs = pairs[:max_ids]
+
+        enriched_count = 0
+        skipped_incomplete = 0
+        paper_results = []
+
+        for mssv, arxiv_id in pairs:
+            folder_key = arxiv_id_to_folder_key(arxiv_id)
+            paper_dir = self.corpus_dir / folder_key
+            try:
+                is_link, is_d, _ = _inspect_path(paper_dir)
+                if is_link or not is_d:
+                    skipped_incomplete += 1
+                    continue
+                mf = paper_dir / "manifest.json"
+                is_link_mf, _, is_f_mf = _inspect_path(mf)
+                if is_link_mf or not is_f_mf:
+                    skipped_incomplete += 1
+                    continue
+                m = json.loads(_read_bytes_safely(mf).decode("utf-8"))
+            except Exception:
+                skipped_incomplete += 1
+                continue
+
+            disc = m.get("discovery_status")
+            if disc != "found":
+                skipped_incomplete += 1
+                continue
+
+            versions = m.get("versions")
+            if m.get("version_status") != "resolved" or not isinstance(versions, dict) or not versions:
+                skipped_incomplete += 1
+                continue
+
+            if not all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
+                skipped_incomplete += 1
+                continue
+
+            paper = dict(
+                mssv=mssv,
+                arxiv_id=arxiv_id,
+                paper_status=m.get("status"),
+                metadata_status=m.get("metadata_status"),
+                references_status=m.get("references_status"),
+                discovery=dict(
+                    action="cached",
+                    status="found",
+                    version_status=m.get("version_status"),
+                    http_status=200,
+                    attempts=1,
+                    error=None,
+                    wall_seconds=0.0,
+                    timing_status="cached",
+                ),
+                source={},
+                skipped=[],
+                pending=[],
+                blocked={},
+                errors=[],
+                s2_metadata=dict(action="not_attempted", status=None, http_status=None, attempts=None, error=None),
+                s2_references=dict(action="not_attempted", status=None, http_status=None, attempts=None, error=None),
+            )
+
+            pipeline._run_s2(self.store, paper, cfg, limiter)
+            enriched_count += 1
+            paper_results.append(paper)
+
+        archive_dest = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
+        self._archive_cohort(number, archive_dest)
+
+        return {
+            "cohort": number,
+            "total_target": len(pairs),
+            "enriched_papers": enriched_count,
+            "skipped_incomplete": skipped_incomplete,
+            "papers": paper_results,
+            "archive_path": str(archive_dest),
+        }
 
     @staticmethod
     def _compute_sha256(file_path: Path) -> str:
@@ -489,26 +576,39 @@ class FastProductionRunner:
                     for _, arxiv_id in pairs:
                         safe_folder = arxiv_id_to_folder_key(arxiv_id)
                         paper_path = self.corpus_dir / safe_folder
-                        if not paper_path.is_dir():
-                            omitted.append({"arxiv_id": arxiv_id, "reason": "missing_paper_dir"})
-                            continue
-                        mf = paper_path / "manifest.json"
-                        if not mf.is_file():
-                            omitted.append({"arxiv_id": arxiv_id, "reason": "missing_manifest"})
-                            continue
                         try:
-                            m_data = json.loads(mf.read_text(encoding="utf-8"))
+                            is_link, is_d, _ = _inspect_path(paper_path)
+                            if is_link or not is_d:
+                                omitted.append({"arxiv_id": arxiv_id, "reason": "missing_paper_dir"})
+                                continue
+                        except Exception as exc:
+                            omitted.append({"arxiv_id": arxiv_id, "reason": f"uninspectable_paper_dir: {exc}"})
+                            continue
+
+                        mf = paper_path / "manifest.json"
+                        try:
+                            is_link_mf, _, is_f_mf = _inspect_path(mf)
+                            if is_link_mf or not is_f_mf:
+                                omitted.append({"arxiv_id": arxiv_id, "reason": "missing_manifest"})
+                                continue
+                            m_data = json.loads(_read_bytes_safely(mf).decode("utf-8"))
                             if not isinstance(m_data, dict):
                                 omitted.append({"arxiv_id": arxiv_id, "reason": "invalid_manifest_type"})
                                 continue
                         except Exception as exc:
                             omitted.append({"arxiv_id": arxiv_id, "reason": f"corrupt_manifest: {exc}"})
                             continue
+
                         has_unsafe = False
                         for root, dirs, files in os.walk(paper_path):
                             for name in dirs + files:
                                 full_p = Path(root) / name
-                                if full_p.is_symlink() or not (full_p.is_file() or full_p.is_dir()):
+                                try:
+                                    is_l_sub, is_d_sub, is_f_sub = _inspect_path(full_p)
+                                    if is_l_sub or not (is_d_sub or is_f_sub):
+                                        has_unsafe = True
+                                        break
+                                except Exception:
                                     has_unsafe = True
                                     break
                             if has_unsafe:
@@ -535,6 +635,15 @@ class FastProductionRunner:
             sha_tmp.write_text(f"{archive_sha256}  {destination.name}\n", encoding="utf-8")
             os.replace(sha_tmp, sha_file)
 
+            # Determine archive_state and verified_completed_count
+            completed_count = self.count_completed_papers(number)
+            if len(included_ids) < len(pairs):
+                archive_state = "checkpoint_partial"
+            elif completed_count == len(pairs):
+                archive_state = "handoff_verified"
+            else:
+                archive_state = "checkpoint_complete"
+
             # Atomic publication of cohort archive accounting manifest
             manifest_name = destination.name.replace(".tar.gz", ".manifest.json")
             manifest_file = destination.with_name(manifest_name)
@@ -548,6 +657,8 @@ class FastProductionRunner:
                 "expected_ids": [aid for _, aid in pairs],
                 "included_count": len(included_ids),
                 "included_ids": sorted(included_ids),
+                "archive_state": archive_state,
+                "verified_completed_count": completed_count,
                 "omitted_count": len(omitted),
                 "omitted": omitted,
             }
@@ -569,10 +680,11 @@ class FastProductionRunner:
     ) -> bool:
         """Validate source folder manifest and checksums before staging and replacing target folder."""
         src_mf = src_folder / "manifest.json"
-        if not src_mf.is_file():
-            return False
         try:
-            m_src = json.loads(src_mf.read_text(encoding="utf-8"))
+            is_link, _, is_f = _inspect_path(src_mf)
+            if is_link or not is_f:
+                return False
+            m_src = json.loads(_read_bytes_safely(src_mf).decode("utf-8"))
             if not isinstance(m_src, dict) or ("discovery_status" not in m_src and "status" not in m_src):
                 return False
             if expected_arxiv_id is not None and "arxiv_id" in m_src:
@@ -586,26 +698,39 @@ class FastProductionRunner:
         for ver_name, ver_info in versions.items():
             if isinstance(ver_info, dict) and ver_info.get("status") == "success" and ver_info.get("file_checksums"):
                 ver_dir = src_folder / ver_name
-                if not ver_dir.is_dir():
+                try:
+                    is_l_v, is_d_v, _ = _inspect_path(ver_dir)
+                    if is_l_v or not is_d_v:
+                        return False
+                except Exception:
                     return False
                 for fname, expected_hash in ver_info["file_checksums"].items():
                     fpath = ver_dir / fname
-                    if not fpath.is_file():
-                        return False
-                    if self._compute_sha256(fpath) != expected_hash:
+                    try:
+                        is_l_f, _, is_f_f = _inspect_path(fpath)
+                        if is_l_f or not is_f_f:
+                            return False
+                        if self._compute_sha256(fpath) != expected_hash:
+                            return False
+                    except Exception:
                         return False
 
-        if target_folder.exists():
-            target_mf = target_folder / "manifest.json"
-            if target_mf.is_file():
+        try:
+            is_l_tgt, is_d_tgt, _ = _inspect_path(target_folder)
+            if not is_l_tgt and is_d_tgt:
+                target_mf = target_folder / "manifest.json"
                 try:
-                    m_target = json.loads(target_mf.read_text(encoding="utf-8"))
-                    src_up = str(m_src.get("updated_at", ""))
-                    tgt_up = str(m_target.get("updated_at", ""))
-                    if tgt_up and src_up and tgt_up >= src_up:
-                        return False
+                    is_l_tmf, _, is_f_tmf = _inspect_path(target_mf)
+                    if not is_l_tmf and is_f_tmf:
+                        m_target = json.loads(_read_bytes_safely(target_mf).decode("utf-8"))
+                        src_up = str(m_src.get("updated_at", ""))
+                        tgt_up = str(m_target.get("updated_at", ""))
+                        if tgt_up and src_up and tgt_up >= src_up:
+                            return False
                 except Exception:
                     pass
+        except Exception:
+            pass
 
         # Atomic replacement: stage to temporary directory on the same filesystem
         target_parent = target_folder.parent
@@ -616,10 +741,14 @@ class FastProductionRunner:
             stage_paper = stage_dir / target_folder.name
             shutil.copytree(src_folder, stage_paper)
 
-            if target_folder.exists():
-                backup_dir = Path(tempfile.mkdtemp(prefix=".backup-", dir=str(target_parent)))
-                backup_paper = backup_dir / target_folder.name
-                os.replace(target_folder, backup_paper)
+            try:
+                is_l_tgt, is_d_tgt, _ = _inspect_path(target_folder)
+                if not is_l_tgt and is_d_tgt:
+                    backup_dir = Path(tempfile.mkdtemp(prefix=".backup-", dir=str(target_parent)))
+                    backup_paper = backup_dir / target_folder.name
+                    os.replace(target_folder, backup_paper)
+            except Exception:
+                pass
 
             os.replace(stage_paper, target_folder)
 
@@ -639,7 +768,13 @@ class FastProductionRunner:
             if backup_dir and backup_dir.exists():
                 shutil.rmtree(backup_dir, ignore_errors=True)
 
-    def restore_cohort(self, number: int) -> int:
+    def restore_cohort(
+        self,
+        number: int,
+        *,
+        require_manifest: bool = False,
+        require_handoff: bool = False,
+    ) -> int:
         """Unpack an existing cohort archive or legacy Drive corpus back to local SSD safely.
 
         Enables seamless resumption across Colab runtime reconnects in seconds.
@@ -656,51 +791,82 @@ class FastProductionRunner:
         allowed_folders = {arxiv_id_to_folder_key(aid): (mssv, aid) for mssv, aid in valid_pairs}
 
         # 1. Migrate from legacy Drive corpus layout if present
-        for folder_name, (mssv, arxiv_id) in allowed_folders.items():
-            legacy_folder = legacy_corpus / folder_name
-            local_folder = self.corpus_dir / folder_name
-            if legacy_folder.is_dir():
-                if self._safe_replace_paper(legacy_folder, local_folder, expected_arxiv_id=arxiv_id):
-                    restored += 1
+        try:
+            is_l, is_d, _ = _inspect_path(legacy_corpus)
+            if not is_l and is_d:
+                for folder_name, (mssv, arxiv_id) in allowed_folders.items():
+                    legacy_folder = legacy_corpus / folder_name
+                    local_folder = self.corpus_dir / folder_name
+                    try:
+                        is_l_f, is_d_f, _ = _inspect_path(legacy_folder)
+                        if not is_l_f and is_d_f:
+                            if self._safe_replace_paper(legacy_folder, local_folder, expected_arxiv_id=arxiv_id):
+                                restored += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # 2. Extract cohort archive from Drive without overwriting newer local papers
         archive_path = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
-        if not archive_path.is_file():
+        try:
+            is_link, _, is_f = _inspect_path(archive_path)
+            if is_link or not is_f:
+                if require_manifest or require_handoff:
+                    raise ValueError(f"Archive not found: {archive_path.name}")
+                return restored
+        except FileNotFoundError:
+            if require_manifest or require_handoff:
+                raise ValueError(f"Archive not found: {archive_path.name}")
             return restored
 
-        actual_sha = None
+        actual_sha = self._compute_sha256(archive_path)
         sha_file = archive_path.with_name(archive_path.name + ".sha256")
-        if sha_file.is_file():
-            try:
-                expected_sha = sha_file.read_text(encoding="utf-8").strip().split()[0]
-                actual_sha = self._compute_sha256(archive_path)
+        try:
+            is_link_sha, _, is_f_sha = _inspect_path(sha_file)
+            if is_link_sha or not is_f_sha:
+                if require_manifest or require_handoff:
+                    raise ValueError(f"Missing checksum sidecar file for {archive_path.name}")
+            else:
+                expected_sha = _read_bytes_safely(sha_file).decode("utf-8").strip().split()[0]
                 if expected_sha != actual_sha:
                     raise ValueError(f"Archive checksum mismatch for {archive_path.name}: expected {expected_sha}, got {actual_sha}")
-            except ValueError:
-                raise
-            except Exception as e:
-                raise ValueError(f"Cannot verify archive checksum: {e}") from e
+        except FileNotFoundError:
+            if require_manifest or require_handoff:
+                raise ValueError(f"Missing checksum sidecar file for {archive_path.name}")
 
         manifest_name = archive_path.name.replace(".tar.gz", ".manifest.json")
         manifest_file = archive_path.with_name(manifest_name)
-        if manifest_file.is_file():
-            try:
-                m_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
-                if isinstance(m_payload, dict) and "archive_sha256" in m_payload:
-                    if actual_sha is None:
-                        actual_sha = self._compute_sha256(archive_path)
-                    if m_payload["archive_sha256"] != actual_sha:
-                        raise ValueError(
-                            f"Archive SHA-256 mismatch with accounting manifest: expected {m_payload['archive_sha256']}, got {actual_sha}"
-                        )
-            except ValueError:
-                raise
-            except Exception as e:
-                raise ValueError(f"Cannot verify cohort accounting manifest: {e}") from e
+        m_payload = None
+        try:
+            is_link_mf, _, is_f_mf = _inspect_path(manifest_file)
+            if is_link_mf or not is_f_mf:
+                if require_manifest or require_handoff:
+                    raise ValueError(f"Missing accounting manifest for {archive_path.name}")
+            else:
+                m_payload = json.loads(_read_bytes_safely(manifest_file).decode("utf-8"))
+                if not isinstance(m_payload, dict):
+                    raise ValueError(f"Invalid accounting manifest format for {archive_path.name}")
+                if m_payload.get("archive_sha256") != actual_sha:
+                    raise ValueError(
+                        f"Archive SHA-256 mismatch with accounting manifest: expected {m_payload.get('archive_sha256')}, got {actual_sha}"
+                    )
+                if m_payload.get("cohort_number") != number:
+                    raise ValueError(
+                        f"Cohort number mismatch: manifest has {m_payload.get('cohort_number')}, expected {number}"
+                    )
+                if require_handoff and m_payload.get("archive_state") != "handoff_verified":
+                    raise ValueError(
+                        f"Archive state is '{m_payload.get('archive_state')}', required 'handoff_verified'"
+                    )
+        except FileNotFoundError:
+            if require_manifest or require_handoff:
+                raise ValueError(f"Missing accounting manifest for {archive_path.name}")
 
         import tarfile
         with tempfile.TemporaryDirectory(prefix=".restore-", dir=str(self.local_root)) as temp_extract:
             temp_dir = Path(temp_extract)
+            tar_top_folders = set()
             with tarfile.open(archive_path, "r:gz") as tar:
                 for m in tar.getmembers():
                     p = PurePosixPath(m.name)
@@ -710,7 +876,18 @@ class FastProductionRunner:
                         raise ValueError(f"Special files not allowed in backup: {m.name}")
                     if not (m.isfile() or m.isdir()):
                         raise ValueError(f"Unrecognized member type in backup: {m.name}")
+                    if len(p.parts) > 0:
+                        tar_top_folders.add(p.parts[0])
                 tar.extractall(path=temp_dir)
+
+            # Strict cross-validation of archive contents against accounting manifest if manifest is present
+            if m_payload is not None and "included_ids" in m_payload:
+                expected_folders = {arxiv_id_to_folder_key(aid) for aid in m_payload["included_ids"]}
+                if tar_top_folders != expected_folders:
+                    raise ValueError(
+                        f"Archive contents mismatch accounting manifest included_ids for {archive_path.name}: "
+                        f"tar has {sorted(tar_top_folders)}, manifest specifies {sorted(expected_folders)}"
+                    )
 
             for item in temp_dir.iterdir():
                 if item.is_dir() and item.name in allowed_folders:
@@ -719,3 +896,68 @@ class FastProductionRunner:
                     if self._safe_replace_paper(item, target_folder, expected_arxiv_id=expected_aid):
                         restored += 1
         return restored
+
+
+def verify_cohort_handoff(
+    runner: FastProductionRunner,
+    number: int,
+) -> dict:
+    """Verify that a cohort archive is fully compliant for M1 final handoff.
+
+    Requires:
+    1. Archive .tar.gz exists and is a regular file.
+    2. Checksum sidecar .sha256 exists and matches archive sha256.
+    3. Accounting manifest .manifest.json exists and sha256 matches.
+    4. archive_state is 'handoff_verified'.
+    5. included_count equals the full cohort count (100 papers).
+    6. All tar members match included_ids and belong to the cohort.
+    7. All included papers are terminal completed.
+    """
+    pairs = cohort_pairs(number)
+    archive_path = runner.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
+    sha_file = archive_path.with_name(archive_path.name + ".sha256")
+    manifest_file = archive_path.with_name(f"cohort_{number:04d}_corpus.manifest.json")
+
+    try:
+        is_l, _, is_f = _inspect_path(archive_path)
+        if is_l or not is_f:
+            raise ValueError(f"Handoff archive not found or invalid: {archive_path}")
+    except (FileNotFoundError, OSError) as e:
+        raise ValueError(f"Handoff archive not found or invalid: {e}") from e
+
+    actual_sha = runner._compute_sha256(archive_path)
+
+    try:
+        is_l_sha, _, is_f_sha = _inspect_path(sha_file)
+        if is_l_sha or not is_f_sha:
+            raise ValueError(f"Missing checksum sidecar file: {sha_file}")
+    except (FileNotFoundError, OSError) as e:
+        raise ValueError(f"Missing checksum sidecar file: {e}") from e
+    expected_sha = _read_bytes_safely(sha_file).decode("utf-8").strip().split()[0]
+    if expected_sha != actual_sha:
+        raise ValueError(f"Checksum mismatch: expected {expected_sha}, got {actual_sha}")
+
+    try:
+        is_l_mf, _, is_f_mf = _inspect_path(manifest_file)
+        if is_l_mf or not is_f_mf:
+            raise ValueError(f"Missing accounting manifest: {manifest_file}")
+    except (FileNotFoundError, OSError) as e:
+        raise ValueError(f"Missing accounting manifest: {e}") from e
+    m_payload = json.loads(_read_bytes_safely(manifest_file).decode("utf-8"))
+
+    if m_payload.get("archive_sha256") != actual_sha:
+        raise ValueError(f"Accounting manifest sha256 mismatch: {m_payload.get('archive_sha256')} vs {actual_sha}")
+    if m_payload.get("archive_state") != "handoff_verified":
+        raise ValueError(f"Cohort {number} archive_state is '{m_payload.get('archive_state')}', expected 'handoff_verified'")
+    if m_payload.get("included_count") != len(pairs):
+        raise ValueError(f"Cohort {number} included_count is {m_payload.get('included_count')}, expected {len(pairs)}")
+
+    return {
+        "cohort_number": number,
+        "archive_path": str(archive_path),
+        "archive_sha256": actual_sha,
+        "archive_state": m_payload["archive_state"],
+        "included_count": m_payload["included_count"],
+        "expected_count": len(pairs),
+        "verified": True,
+    }

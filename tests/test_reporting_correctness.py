@@ -887,18 +887,18 @@ class TestReportingReconciliationFailClosed(BaseReportingTest):
 
         pairs = [(self.mssv, self.aid1)]
 
-        original_read_bytes = Path.read_bytes
+        original_open = os.open
 
-        def unreadable_manifest(self_path):
-            if self_path.name == "manifest.json":
+        def unreadable_manifest(path, flags, *args, **kwargs):
+            if Path(path).name == "manifest.json":
                 raise PermissionError("EACCES Permission denied reading manifest.json")
-            return original_read_bytes(self_path)
+            return original_open(path, flags, *args, **kwargs)
 
         try:
-            Path.read_bytes = unreadable_manifest
+            os.open = unreadable_manifest
             stats = compute_m1_statistics(self.store, pairs)
         finally:
-            Path.read_bytes = original_read_bytes
+            os.open = original_open
 
         self.assertFalse(stats["is_reconciled"])
         self.assertTrue(
