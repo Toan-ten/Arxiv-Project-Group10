@@ -1,4 +1,5 @@
 """Tests for high-throughput fast production runner."""
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -164,7 +165,6 @@ class TestFastProduction(unittest.TestCase):
         batch_id, _ = runner_retry._resolve_batch_id(1, max_attempts=6, revision_history=False)
         self.assertTrue(evidence_file.exists())
         self.assertNotEqual(batch_id, "fast-arxiv-0001")
-
 
     def test_notebooks_do_not_contain_hardcoded_credentials(self):
         repo_root = Path(__file__).resolve().parents[1]
