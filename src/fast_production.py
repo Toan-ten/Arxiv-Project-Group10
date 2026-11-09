@@ -12,8 +12,9 @@ from __future__ import annotations
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import shutil
+import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -181,26 +182,45 @@ class FastProductionRunner:
                     pass
         return done
 
+    def _resolve_batch_id(self, number: int, max_attempts: int, revision_history: bool) -> Tuple[str, bool]:
+        """Resolve a non-destructive batch_id and determine if it can safely resume."""
+        base_id = f"fast-arxiv-{number:04d}"
+        base_dir = self.logs_dir / base_id
+        batch_json_path = base_dir / "batch.json"
+        if not batch_json_path.exists():
+            return base_id, False
+        try:
+            saved_def = json.loads(batch_json_path.read_text(encoding="utf-8")).get("definition", {})
+            if (
+                saved_def.get("max_attempts") == max_attempts
+                and saved_def.get("revision_history", False) == bool(revision_history)
+            ):
+                return base_id, True
+        except Exception:
+            pass
+        variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}"
+        variant_dir = self.logs_dir / variant_id
+        variant_json = variant_dir / "batch.json"
+        if variant_json.exists():
+            try:
+                saved_def = json.loads(variant_json.read_text(encoding="utf-8")).get("definition", {})
+                if (
+                    saved_def.get("max_attempts") == max_attempts
+                    and saved_def.get("revision_history", False) == bool(revision_history)
+                ):
+                    return variant_id, True
+            except Exception:
+                pass
+        return variant_id, False
+
     def run_cohort(self, number: int, *, resume: bool = False, revision_history: bool = False) -> dict:
         """Execute one cohort (100 papers) with SSD acceleration, exponential backoff retries and Drive sync."""
         self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
-        batch_id = f"fast-arxiv-{number:04d}"
+        max_attempts = 6 if (self.retry_429 and self.retry_wait_budget > 0) else 1
+        batch_id, effective_resume = self._resolve_batch_id(number, max_attempts, revision_history)
         experiment_id = f"exp-fast-{number:04d}-{int(time.time())}"
-        max_attempts = 6 if self.retry_429 else 1
-        batch_log_dir = self.logs_dir / batch_id
-        batch_json_path = batch_log_dir / "batch.json"
-        if batch_json_path.exists():
-            try:
-                saved_def = json.loads(batch_json_path.read_text(encoding="utf-8")).get("definition", {})
-                if (
-                    saved_def.get("max_attempts") != max_attempts
-                    or saved_def.get("revision_history", False) != bool(revision_history)
-                ):
-                    shutil.rmtree(batch_log_dir)
-            except Exception:
-                pass
-        effective_resume = batch_json_path.exists()
+
         already_done = self.count_completed_papers(number)
         if already_done > 0:
             print(f"Lô {number}: Đã có {already_done}/{len(pairs)} bài báo hoàn thành từ phiên trước, tiếp tục thu thập các bài còn lại.")
@@ -210,11 +230,14 @@ class FastProductionRunner:
         archive_dest = self.archives_dir / archive_name
         report = {}
         interrupted = False
-        import tempfile
         old_temp, old_tmpdir = tempfile.tempdir, os.environ.get("TMPDIR")
         try:
             tempfile.tempdir = os.environ["TMPDIR"] = str(self.scratch_dir)
-            with arxiv_client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0):
+            with arxiv_client.golden_ratio_backoff_policy(
+                base_seconds=8.0,
+                cap_seconds=60.0,
+                wait_budget_seconds=self.retry_wait_budget if self.retry_429 else 0.0,
+            ):
                 report = benchmark_runner.run_benchmark(
                     pairs=pairs,
                     corpus_root=self.corpus_dir,
@@ -245,9 +268,17 @@ class FastProductionRunner:
         elapsed = time.time() - started
         completed_final = self.count_completed_papers(number)
         newly_done = max(1, completed_final - already_done)
+        batch_stopped = bool(
+            interrupted
+            or report.get("stopped")
+            or report.get("batch_status") in {"stopped", "failed"}
+            or report.get("execution_status") == "raised"
+        )
         report["fast_runner"] = {
             "cohort": number,
             "interrupted": interrupted,
+            "stopped": batch_stopped,
+            "stop_reason": report.get("stop_reason"),
             "completed_papers": completed_final,
             "elapsed_seconds": elapsed,
             "avg_seconds_per_paper": elapsed / newly_done,
@@ -256,33 +287,102 @@ class FastProductionRunner:
         return report
 
     def _archive_cohort(self, number: int, destination: Path) -> None:
-        """Create a compressed archive for the cohort and store in Google Drive."""
+        """Create a compressed archive for the cohort and store in Google Drive atomically."""
         pairs = cohort_pairs(number)
         import tarfile
         from src.storage import arxiv_id_to_folder_key
-        with tarfile.open(destination, "w:gz") as tar:
-            for _, arxiv_id in pairs:
-                safe_folder = arxiv_id_to_folder_key(arxiv_id)
-                paper_path = self.corpus_dir / safe_folder
-                if paper_path.exists():
-                    tar.add(paper_path, arcname=safe_folder)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path_str = tempfile.mkstemp(
+            prefix=f".{destination.name}.", suffix=".tmp", dir=str(destination.parent)
+        )
+        tmp_path = Path(tmp_path_str)
+        try:
+            with os.fdopen(fd, "wb") as f_out:
+                with tarfile.open(fileobj=f_out, mode="w:gz") as tar:
+                    for _, arxiv_id in pairs:
+                        safe_folder = arxiv_id_to_folder_key(arxiv_id)
+                        paper_path = self.corpus_dir / safe_folder
+                        if paper_path.exists():
+                            tar.add(paper_path, arcname=safe_folder)
+                f_out.flush()
+                os.fsync(f_out.fileno())
+            os.replace(tmp_path, destination)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def restore_cohort(self, number: int) -> int:
-        """Unpack an existing cohort archive from Google Drive back to local SSD.
+        """Unpack an existing cohort archive or legacy Drive corpus back to local SSD safely.
 
         Enables seamless resumption across Colab runtime reconnects in seconds.
-        Returns the count of restored paper folders.
+        Migrates verified papers from legacy drive_root / "corpus" and extracts
+        tar archive members without overwriting newer local files.
+        Returns the count of restored/migrated paper folders.
         """
+        restored = 0
+        legacy_corpus = self.drive_root / "corpus"
+        from src.storage import arxiv_id_to_folder_key
+
+        # 1. Migrate from legacy Drive corpus layout if present
+        for _, arxiv_id in cohort_pairs(number):
+            folder_name = arxiv_id_to_folder_key(arxiv_id)
+            legacy_folder = legacy_corpus / folder_name
+            local_folder = self.corpus_dir / folder_name
+            if legacy_folder.is_dir():
+                should_copy = not local_folder.exists()
+                if not should_copy and (legacy_folder / "manifest.json").exists() and (local_folder / "manifest.json").exists():
+                    try:
+                        m_leg = json.loads((legacy_folder / "manifest.json").read_text(encoding="utf-8"))
+                        m_loc = json.loads((local_folder / "manifest.json").read_text(encoding="utf-8"))
+                        if m_leg.get("updated_at", "") > m_loc.get("updated_at", ""):
+                            should_copy = True
+                    except Exception:
+                        pass
+                if should_copy:
+                    if local_folder.exists():
+                        shutil.rmtree(local_folder)
+                    shutil.copytree(legacy_folder, local_folder)
+                    restored += 1
+
+        # 2. Extract cohort archive from Drive without overwriting newer local papers
         archive_path = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
         if not archive_path.exists():
-            return 0
+            return restored
 
         import tarfile
-        restored = 0
-        with tarfile.open(archive_path, "r:gz") as tar:
-            members = tar.getmembers()
-            for member in members:
-                if member.isdir() and "/" not in member.name:
-                    restored += 1
-            tar.extractall(path=self.corpus_dir)
+        with tempfile.TemporaryDirectory(prefix=".restore-", dir=self.local_root) as temp_extract:
+            temp_dir = Path(temp_extract)
+            with tarfile.open(archive_path, "r:gz") as tar:
+                for m in tar.getmembers():
+                    p = PurePosixPath(m.name)
+                    if p.is_absolute() or ".." in p.parts:
+                        raise ValueError(f"Unsafe archive member: {m.name}")
+                    if not (m.isfile() or m.isdir()):
+                        raise ValueError(f"Special files not allowed in backup: {m.name}")
+                tar.extractall(path=temp_dir)
+            for item in temp_dir.iterdir():
+                if item.is_dir():
+                    target_folder = self.corpus_dir / item.name
+                    if not target_folder.exists():
+                        shutil.copytree(item, target_folder)
+                        restored += 1
+                    else:
+                        local_mf = target_folder / "manifest.json"
+                        arch_mf = item / "manifest.json"
+                        should_replace = False
+                        if arch_mf.exists() and local_mf.exists():
+                            try:
+                                m_arch = json.loads(arch_mf.read_text(encoding="utf-8"))
+                                m_loc = json.loads(local_mf.read_text(encoding="utf-8"))
+                                if m_arch.get("updated_at", "") > m_loc.get("updated_at", ""):
+                                    should_replace = True
+                            except Exception:
+                                pass
+                        if should_replace:
+                            shutil.rmtree(target_folder)
+                            shutil.copytree(item, target_folder)
+                            restored += 1
         return restored
