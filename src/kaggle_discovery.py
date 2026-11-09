@@ -138,11 +138,18 @@ def ingest_kaggle_snapshot(
 
     open_fn = gzip.open if snapshot_file.suffix == ".gz" else open
     mode = "rt" if snapshot_file.suffix == ".gz" else "r"
+    prefixes = tuple({aid[:5] for aid in remaining_ids if len(aid) >= 5})
+    single_prefix = prefixes[0] if len(prefixes) == 1 else None
 
     with open_fn(snapshot_file, mode, encoding="utf-8", errors="ignore") as f:
         for line in f:
             if not remaining_ids:
                 break
+            if single_prefix is not None:
+                if single_prefix not in line:
+                    continue
+            elif prefixes and not any(p in line for p in prefixes):
+                continue
             line = line.strip()
             if not line:
                 continue

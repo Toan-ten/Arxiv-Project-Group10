@@ -91,13 +91,27 @@ class FastProductionRunner:
             nonlocal discovery_res
             discovery_res = ingest_kaggle_snapshot(snapshot_path, self.store, target_pairs)
 
-        bench_report = benchmark.benchmark_pipeline(
-            _run_ingest,
-            corpus_output_dir=self.corpus_dir,
-            report_path=resources_path,
-            verbose=False,
-            disk_roots=[self.corpus_dir, self.scratch_dir],
-        )
+        try:
+            bench_report = benchmark.benchmark_pipeline(
+                _run_ingest,
+                corpus_output_dir=self.corpus_dir,
+                report_path=resources_path,
+                verbose=False,
+                disk_roots=[self.corpus_dir, self.scratch_dir],
+            )
+        except KeyboardInterrupt:
+            print("\nĐã tạm dừng bước đối chiếu siêu dữ liệu Kaggle theo yêu cầu người dùng.")
+            return {
+                "target_papers": len(target_pairs),
+                "found_papers": 0,
+                "found_versions": 0,
+                "missing_papers": [],
+                "elapsed_seconds": 0.0,
+                "peak_ram_mb": 0.0,
+                "average_ram_mb": 0.0,
+                "report_path": str(report_path),
+                "interrupted": True,
+            }
         elapsed = float(bench_report.get("elapsed_seconds") or 0.0)
         full_report = {
             "experiment_id": exp_id,
