@@ -135,9 +135,34 @@ class FastProductionRunner:
             "report_path": str(report_path),
         }
 
-    def count_completed_papers(self, number: int) -> int:
-        """Count how many papers in the cohort have already completed source crawling."""
+    def _reset_recoverable_archive_conflicts(self, number: int) -> int:
+        """Reset versions previously marked unsafe_archive due to duplicate non-TeX/non-Bib files."""
         from src.storage import arxiv_id_to_folder_key
+        reset_count = 0
+        for mssv, arxiv_id in cohort_pairs(number):
+            manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                manifest = self.store.read_manifest(mssv, arxiv_id)
+                changed = False
+                for ver_name, rec in list(manifest.get("versions", {}).items()):
+                    err_msg = (rec.get("error") or {}).get("message") or ""
+                    if rec.get("status") == "unsafe_archive" and err_msg.startswith("Conflicting path:"):
+                        ver_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / ver_name
+                        if not ver_dir.exists():
+                            manifest["versions"][ver_name] = self.store._pending(arxiv_id, ver_name)
+                            changed = True
+                if changed:
+                    self.store._commit(manifest)
+                    reset_count += 1
+            except Exception:
+                pass
+        return reset_count
+
+    def count_completed_papers(self, number: int) -> int:
+        """Count how many papers in the cohort have finished processing (no retryable versions left)."""
+        from src.storage import RETRYABLE, arxiv_id_to_folder_key
         done = 0
         for _, arxiv_id in cohort_pairs(number):
             manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
@@ -146,7 +171,10 @@ class FastProductionRunner:
                     m = json.loads(manifest_path.read_text(encoding="utf-8"))
                     versions = m.get("versions") or {}
                     if m.get("discovery_status") == "not_found" or (
-                        versions and all(v.get("status") in {"success", "no_tex_source"} for v in versions.values())
+                        versions and all(
+                            v.get("status") not in RETRYABLE and v.get("status") != "in_progress"
+                            for v in versions.values()
+                        )
                     ):
                         done += 1
                 except Exception:
@@ -155,6 +183,7 @@ class FastProductionRunner:
 
     def run_cohort(self, number: int, *, resume: bool = False, revision_history: bool = False) -> dict:
         """Execute one cohort (100 papers) with SSD acceleration, exponential backoff retries and Drive sync."""
+        self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
         batch_id = f"fast-arxiv-{number:04d}"
         experiment_id = f"exp-fast-{number:04d}-{int(time.time())}"
