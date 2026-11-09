@@ -29,7 +29,7 @@
 2. **Cơ chế nạp bí mật an toàn:**
    - Kaggle Token: Nạp từ Colab Secrets `userdata.get("KAGGLE_API_TOKEN")` hoặc biến môi trường `os.environ.get("KAGGLE_API_TOKEN")`.
    - Semantic Scholar API Key: Nạp từ Colab Secrets qua `local_config.get_semantic_scholar_api_key()`.
-3. **Phát hiện cảnh báo:** Đối với token `KGAT_54a052586413f33a6c0d8efc437279d8` và `s2k-jhHIRVs0Out27l0vDeHoWzHcEStGyM2RqwJ9DGO4` từng được dán trong tin nhắn trao đổi của người dùng, nhóm khuyến nghị người dùng nên chủ động revoke/tái tạo token mới trên Kaggle và Semantic Scholar để bảo đảm an toàn thông tin cá nhân.
+3. **Phát hiện cảnh báo:** Đối với các token xác thực (`[REDACTED]` và `[REDACTED]`) từng xuất hiện trong nội dung trao đổi, toàn bộ giá trị đã được coi là bị lộ (compromised). Khuyến nghị người dùng bắt buộc phải thu hồi (revoke/rotate) ngay lập tức trên trang quản lý tài khoản Kaggle và Semantic Scholar. Toàn bộ tài liệu báo cáo và commit tuyệt đối không lưu lại giá trị thực tế của các token này dưới bất kỳ hình thức nào.
 
 ---
 
