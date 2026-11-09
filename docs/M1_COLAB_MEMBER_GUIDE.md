@@ -1,6 +1,6 @@
 # Milestone 1 Google Colab Operational Runbook for Group 10 Members
 
-**Document Version:** 2.0.0  
+**Document Version:** 2.1.0 (Remediated)  
 **Effective Date:** 2026-11-10  
 **Target Repository:** `Toan-ten/Arxiv-Project-Group10`  
 **Target Branch:** `feat/m1-t02-colab-resume`  
@@ -14,150 +14,105 @@
 
 Each member is allocated exactly 50 cohorts (5,000 assigned arXiv IDs). You are strictly responsible for crawling, storing, and archiving your assigned cohort partition.
 
-| Member Name / Role | MSSV | Assigned Cohorts (1-indexed) | Assigned arXiv ID Range | Total Assigned | Drive Backup Path |
+| Member Name | MSSV | Assigned Cohorts (1-indexed) | Assigned arXiv ID Range | Total Assigned | Drive Backup Path |
 |:---|:---:|:---:|:---:|:---:|:---|
-| **Member 1 (Lead)** | `24120010` | `1 .. 50` | `2508.07872` → `2508.12871` | 5,000 | `.../ArxivDataGroup10/24120010/` |
-| **Member 2** | `24120035` | `51 .. 100` | `2507.16659` → `2507.21658` | 5,000 | `.../ArxivDataGroup10/24120035/` |
-| **Member 3** | `24120232` | `101 .. 150` | `2502.08235` → `2502.13234` | 5,000 | `.../ArxivDataGroup10/24120232/` |
-| **Member 4** | `24120260` | `151 .. 200` | `2501.02642` → `2501.07641` | 5,000 | `.../ArxivDataGroup10/24120260/` |
+| **Trần Văn Tấn Khôi (Lead)** | `24120010` | `1 .. 50` | `2508.07872` → `2508.12871` | 5,000 | `.../ArxivDataGroup10/24120010/` |
+| **Lê Thành Đạt** | `24120035` | `51 .. 100` | `2507.16659` → `2507.21658` | 5,000 | `.../ArxivDataGroup10/24120035/` |
+| **Nguyễn Văn Toàn** | `24120232` | `101 .. 150` | `2502.08235` → `2502.13234` | 5,000 | `.../ArxivDataGroup10/24120232/` |
+| **Trương Tuấn Anh** | `24120260` | `151 .. 200` | `2501.02642` → `2501.07641` | 5,000 | `.../ArxivDataGroup10/24120260/` |
 
 > [!IMPORTANT]
 > **Strict Partition Isolation**: Do NOT change your MSSV or run cohorts outside your assigned range. Running another member's cohorts risks corrupting their checkpoints or triggering arXiv rate-limits.
 
 ---
 
-## 2. Pre-Flight Preparation & Colab Setup
+## 2. Notebook Execution Contract (Cell-by-Cell Specification)
 
-### 2.1 Google Colab Runtime Selection
-1. Open Google Colab: https://colab.research.google.com
-2. Go to **Runtime** → **Change runtime type**.
-3. Select **CPU** (Standard Python 3 runtime).
-4. **DO NOT SELECT GPU OR TPU**. The crawler is I/O-bound (network and tarball extraction). Using GPU wastes compute credits and activates GPU-guard warnings.
+The official notebook [`notebooks/m1_colab_fast_production.ipynb`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/notebooks/m1_colab_fast_production.ipynb) consists of 8 cells executed in strict sequence:
 
-### 2.2 Google Drive Space Check
-- Ensure your Google Drive has at least **10 GB of free space** for your 50 cohort archives.
-- The notebook will automatically create the directory:
-  `/content/drive/MyDrive/ArxivDataGroup10/<your_mssv>/archives/`
+| Cell # | Type | Title / Step | Purpose | Required Inputs | Outputs & Side Effects | Mandatory | Safe to Rerun |
+|:---:|:---:|:---|:---|:---|:---|:---:|:---:|
+| **1** | Markdown | Colab Badge | Open notebook directly in Google Colab | None | None | No | Yes |
+| **2** | Markdown | Operating Principles | Rules on CPU-only, single worker, Storage Contract v2 | None | None | No | Yes |
+| **3** | Code | **Bước 1: Thiết lập môi trường & kiểm tra mã nguồn** | Connect Google Drive, clone repo, checkout `EXECUTION_COMMIT`, install packages | `CODE_COMMIT`, `EXECUTION_COMMIT` | Mounts `/content/drive`, clones into `/content/Arxiv-Project-Group10`, installs `requirements.txt` | **Yes** | Yes |
+| **4** | Code | **Bước 2: Nạp cấu hình Kaggle API (Tùy chọn)** | Accelerate metadata discovery with Kaggle OAI snapshot | `KAGGLE_API_TOKEN` (via Colab Secrets) | `~/.kaggle/access_token`, `arxiv-metadata-oai-snapshot.json` | Optional | Yes |
+| **5** | Code | **Bước 3: Thu thập mã nguồn TeX & lịch sử phiên bản** | Core crawler & archive engine; restores Drive backups, crawls assigned cohorts | `MSSV`, `MODE`, `CONFIRM_PRODUCTION` | Local corpus (`workspace_{MSSV}`), Drive archives (`ArxivDataGroup10/{MSSV}/archives/`) | **Yes** | Yes |
+| **6** | Code | **Bước 4: Làm giàu trích dẫn Semantic Scholar (S2)** | Enrich citation graph and paper metadata | `SEMANTIC_SCHOLAR_API_KEY` (via Colab Secrets or unauthenticated) | Updated `metadata.json`, saved `references.json` per paper | **Yes** | Yes |
+| **7** | Code | **Bước 5: Kiểm toán độc lập & tạo báo cáo M1** | Run 12-point two-pass fail-closed reconciliation | `COHORT_LIST`, `runner.store` | `m1_audit_summary_mssv_{MSSV}_{MODE}.md` on Google Drive | **Yes** | Yes |
+| **8** | Code | **Bước 6: Xuất bảng dữ liệu Parquet & CSV** | Export tabular format for Milestone 2/3 downstream | `all_pairs`, `runner.store` | `papers.parquet`, `references.parquet` under `final_output/` | Optional | Yes |
 
 ---
 
-## 3. Cell-by-Cell Execution Instructions
+## 3. Workflows
 
-Open `notebooks/m1_colab_fast_production.ipynb` in Colab and execute each cell sequentially.
+### Workflow A — Pilot Execution (Mandatory Pre-Flight)
+Every member must run Workflow A first to verify their Google Drive connectivity, secrets, and environment on a single cohort (100 papers) before requesting production approval.
 
-### Cell 1: Mount Google Drive
-Connects your Google Drive storage so checkpoints and archives survive Colab disconnections.
-- Click **Run**.
-- When prompted, grant Google Colab access to Google Drive.
+1. Open `notebooks/m1_colab_fast_production.ipynb` in Google Colab.
+2. Select **Runtime** → **Change runtime type** → **CPU** (No GPU/TPU).
+3. In Colab **Secrets** (key icon in left sidebar):
+   - Add `SEMANTIC_SCHOLAR_API_KEY` (if available) and grant notebook access.
+   - Add `KAGGLE_API_TOKEN` (optional, for metadata snapshot).
+4. Run **Cell 3 (Bước 1)** to mount Google Drive and checkout the verified codebase.
+5. Run **Cell 4 (Bước 2)** to prepare snapshot (or skip if not using Kaggle).
+6. In **Cell 5 (Bước 3)**, configure:
+   ```python
+   MSSV = "24120010"  # Thay bằng MSSV của bạn
+   MODE = "PILOT"     # MẶC ĐỊNH AN TOÀN
+   CONFIRM_PRODUCTION = False
+   ```
+7. Run **Cell 5 (Bước 3)**: It will process only your 1st cohort (e.g., Cohort 1 for `24120010`, Cohort 51 for `24120035`).
+8. Run **Cell 6 (Bước 4)**: Enriches the pilot cohort with Semantic Scholar citations.
+9. Run **Cell 7 (Bước 5)**: Audits the pilot cohort and generates the markdown summary report.
+10. Inspect the report on Google Drive (`.../reports/m1_audit_summary_mssv_{MSSV}_pilot.md`). Confirm `has_integrity_failure: false`.
 
-### Cell 2: Clone Repository & Checkout Branch
-Clones the canonical repository and checks out the production branch:
-```bash
-!git clone https://github.com/Toan-ten/Arxiv-Project-Group10.git /content/Arxiv-Project-Group10
-%cd /content/Arxiv-Project-Group10
-!git checkout feat/m1-t02-colab-resume
-```
+---
 
-### Cell 3: Install Pinned Dependencies
-Installs required packages matching the project lockfile:
-```bash
-!pip install -r requirements.txt
-```
+### Workflow B — Member Production (Authorized Full 50-Cohort Crawl)
 
-### Cell 4: Member Configuration
-Customize this cell for **your MSSV** before executing!
+> [!CAUTION]
+> **PRODUCTION GATING**: Workflow B must NOT be started until Milestone 1 Release Acceptance is officially signed off.
 
-Example for Member `24120010`:
-```python
-MSSV = "24120010"
-COHORT_START = 1
-COHORT_END = 50
-DRIVE_ROOT = f"/content/drive/MyDrive/ArxivDataGroup10/{MSSV}"
-```
-
-Example for Member `24120035`:
-```python
-MSSV = "24120035"
-COHORT_START = 51
-COHORT_END = 100
-DRIVE_ROOT = f"/content/drive/MyDrive/ArxivDataGroup10/{MSSV}"
-```
-
-Example for Member `24120232`:
-```python
-MSSV = "24120232"
-COHORT_START = 101
-COHORT_END = 150
-DRIVE_ROOT = f"/content/drive/MyDrive/ArxivDataGroup10/{MSSV}"
-```
-
-Example for Member `24120260`:
-```python
-MSSV = "24120260"
-COHORT_START = 151
-COHORT_END = 200
-DRIVE_ROOT = f"/content/drive/MyDrive/ArxivDataGroup10/{MSSV}"
-```
-
-### Cell 5: Sanity Checks & Directory Creation
-Verifies that:
-- You are running on CPU (not GPU).
-- Your MSSV and cohort ranges match `id_ranges.py`.
-- Drive paths and local scratch directories exist.
-
-### Cell 6: Run Fast Production Crawler
-Starts the crawling process:
-- Automatically checks Google Drive for existing cohort archives (`restore_cohort()`).
-- Crawls assigned papers with polite arXiv delays (3.0s between requests).
-- Extracts LaTeX source files and bibtex bibliographies (excluding heavy images).
-- Enriches metadata and citations with Semantic Scholar.
-- Packs completed cohorts into `cohort_{id:04d}_corpus.tar.gz` directly on Google Drive.
-
-> [!TIP]
-> **Batching Recommendation**: You do not have to crawl all 50 cohorts in one go. You can set `COHORT_START = 1` and `COHORT_END = 10` for your first session, then `11 .. 25`, etc. Checkpoints are automatically preserved.
-
-### Cell 7: Full Integrity Audit & Reconciliation Report
-Runs the two-pass fail-closed reporting verification across your entire corpus.
-- Generates `m1_report_{MSSV}.md` and `m1_report_{MSSV}.json`.
-- Confirms zero integrity failures and calculates your M1 completion metrics.
-
-### Cell 8: Download Deliverables / Verification Summary
-Displays archive counts, total file sizes on Google Drive, and exports summary metrics.
+When authorized:
+1. Re-open notebook on CPU runtime.
+2. Run **Cell 3 (Bước 1)** and **Cell 4 (Bước 2)**.
+3. In **Cell 5 (Bước 3)**, set your configuration:
+   ```python
+   MSSV = "24120010"  # Thay đúng MSSV của bạn
+   MODE = "MEMBER_PRODUCTION"
+   CONFIRM_PRODUCTION = True  # BẮT BUỘC: Xác nhận chạy toàn bộ 50 lô (5.000 bài)
+   ```
+4. Run **Cell 5 (Bước 3)**:
+   - The cell displays the safety banner showing your MSSV, cohort range (e.g. 1..50), and 5,000 ID count.
+   - It iterates through all 50 cohorts with automatic checkpoint restoration (`restore_cohort()`).
+   - Every completed cohort is automatically packaged into `cohort_{id:04d}_corpus.tar.gz` and uploaded to Google Drive.
+5. Run **Cell 6 (Bước 4)**: Enriches citations across all 50 cohorts.
+6. Run **Cell 7 (Bước 5)**: Runs the full 12-point reconciliation across all 5,000 papers and generates the final M1 audit report.
+7. Run **Cell 8 (Bước 6)**: Exports `papers.parquet` and `references.parquet` for Milestone 2.
 
 ---
 
 ## 4. Disconnection & Resume Guide
 
-Colab sessions may timeout or disconnect due to inactivity or network interruptions. **Your data is safe.**
+Colab sessions may timeout (idle disconnect or 12-hour limit). **Your progress is safe.**
 
 To resume:
-1. Reopen Google Colab and select CPU runtime.
-2. Run **Cell 1** (Mount Drive).
-3. Run **Cell 2** (Clone repo).
-4. Run **Cell 3** (Install dependencies).
-5. Run **Cell 4** with your MSSV.
-6. Run **Cell 6** (Run Crawler).
-7. The runner detects your existing archives in Google Drive, restores your progress, and continues crawling only the remaining incomplete papers.
+1. Reconnect to a new Colab CPU session.
+2. Run **Cell 3 (Bước 1)** to mount Google Drive.
+3. In **Cell 5 (Bước 3)**, ensure your `MSSV` and `CONFIRM_PRODUCTION = True` are set.
+4. Run **Cell 5 (Bước 3)**:
+   - The runner detects existing `cohort_{id:04d}_corpus.tar.gz` archives in Google Drive.
+   - It calls `restore_cohort()` to unpack completed cohorts to local SSD in seconds.
+   - It skips already-completed papers with status `complete` and resumes exactly where it stopped.
 
 ---
 
 ## 5. Member Deliverables & Handoff Checklist
 
-Before reporting your M1 task complete, ensure the following are verified in Google Drive:
+Before reporting your M1 partition complete, verify the following in your Google Drive:
 
-- [ ] **50 Cohort Archives**: Exactly 50 files named `cohort_{id:04d}_corpus.tar.gz` in your Drive directory (`/MyDrive/ArxivDataGroup10/<MSSV>/archives/`).
+- [ ] **50 Cohort Archives**: Exactly 50 files named `cohort_{id:04d}_corpus.tar.gz` in `/MyDrive/ArxivDataGroup10/<MSSV>/archives/`.
 - [ ] **Zero Integrity Failures**: Cell 7 reporting output shows `has_integrity_failure: false` and `discrepancies: []`.
-- [ ] **Checksum File**: File `checksums.sha256` generated and present alongside archives.
-- [ ] **Audit Report**: `m1_report_{MSSV}.md` saved in Google Drive and committed to your member handoff branch.
-
----
-
-## 6. Escalation & Troubleshooting Protocol
-
-| Issue / Error Symptom | Cause | Remedy |
-|:---|:---|:---|
-| `HTTP 429 Too Many Requests` | arXiv or Semantic Scholar rate-limiting | The runner automatically applies exponential backoff. Do not stop the cell; let it wait. |
-| `Colab Session Disconnected` | 12-hour timeout or idle browser tab | Re-mount Drive and run Cells 1–6. Checkpoint resume will pick up seamlessly. |
-| `Drive Quota Exceeded` | Insufficient free space in Google Drive | Empty your Google Drive trash or free up at least 10 GB. |
-| `IntegrityError on Resume` | Partial paper file corrupted during abrupt disconnect | Delete the single corrupt paper directory in local workspace; re-run Cell 6 to re-download that paper cleanly. |
-| `GPU Guard Warning` | Accidental selection of GPU runtime | Change runtime type to CPU in Colab menu and restart runtime. |
+- [ ] **Checksum Sidecars**: Each archive has a corresponding `.sha256` and `.manifest.json` sidecar.
+- [ ] **Audit Report**: `m1_audit_summary_mssv_{MSSV}_member_production.md` present in Drive `/reports/`.
+- [ ] **Parquet Tables**: `papers.parquet` and `references.parquet` generated in `/final_output/`.
