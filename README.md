@@ -174,18 +174,28 @@ python -B -m unittest discover -s tests -v
 mock HTTP/clock; các file tạm của tests nằm ngoài repository.
 
 
-## Pilot Google Colab CPU-only và Quy trình Sản xuất
+## Quy trình vận hành và Sổ tay Google Colab CPU-only
 
-Dự án cung cấp hai quy trình vận hành trên Google Colab CPU-only:
+Dự án tổ chức các sổ tay trên Google Colab CPU-only theo cấu trúc phân định rõ ràng giữa quy trình sản xuất chính thức và các quy trình thực nghiệm:
 
-1. **Quy trình nghiệm thu chuẩn hóa (`notebooks/m1_colab_arxiv_production.ipynb`):**
-   - Tuân thủ hợp đồng 2 ô code (**Setup** và **Run M1**).
-   - Kiểm tra commit sạch, audit nghiêm ngặt sau từng cohort 100 bài báo.
-   - Hỗ trợ resume và dừng ngay khi phát hiện `403` hoặc `429`.
-   - Xem hướng dẫn chi tiết tại [Tài liệu vận hành Production](docs/m1_production.md).
+### 1. Quy trình sản xuất chính thức (Official Production Entry Point)
+- **Sổ tay:** [`notebooks/m1_colab_fast_production.ipynb`](notebooks/m1_colab_fast_production.ipynb)
+- **Vai trò:** Quy trình thu thập dữ liệu chính thức duy nhất của Nhóm 10 cho toàn bộ 200 lô (20.000 định danh arXiv).
+- **Đặc tính kỹ thuật:**
+  - Thực thi hoàn toàn trên Google Colab **CPU-only** (Accelerator: None).
+  - Ghi dữ liệu trên NVMe SSD cục bộ (`/content/fast_crawling_workspace`), giải nén và lọc TeX/Bib trên RAM disk (`/dev/shm`).
+  - Nạp trước siêu dữ liệu từ Kaggle snapshot (`arxiv-metadata-oai-snapshot.json`) giúp giảm hàng chục nghìn request Discovery.
+  - Bật mặc định `revision_history=True` trích xuất đầy đủ ngày nộp của mọi phiên bản.
+  - Tích hợp giai đoạn làm giàu dữ liệu Semantic Scholar (`enrich_cohort_s2`) tuân thủ nghiêm ngặt giới hạn tốc độ.
+  - Đóng gói sao lưu `.tar.gz` kèm mã băm `.sha256` lên Google Drive sau mỗi lô 100 bài, hỗ trợ khôi phục tiến trình an toàn khi ngắt kết nối.
+  - Xuất bảng báo cáo kiểm toán M1 và sinh tập dữ liệu đầu ra chuẩn hóa dạng Parquet (`papers.parquet`, `references.parquet`) và CSV.
+- **Tài liệu hướng dẫn:** Xem [Hướng dẫn vận hành Fast Production](docs/fast_crawling_guide.md).
 
-2. **Quy trình tối ưu tốc độ crawl (`notebooks/m1_colab_fast_production.ipynb`):**
-   - Chạy trên local SSD/RAM-disk (`/content/corpus_fast`), định kỳ đồng bộ về Google Drive.
-   - Tích hợp nạp trước siêu dữ liệu từ bản snapshot Kaggle (`arxiv-metadata-oai-snapshot.json`), giúp giảm đáng kể thời gian chờ khám phá bài báo.
-   - Quản lý token Kaggle an toàn qua biến môi trường hoặc Colab Secrets.
-   - Cơ chế sao lưu và khôi phục lũy tiến (incremental backup) đảm bảo không mất mát dữ liệu khi Colab ngắt kết nối đột ngột.
+### 2. Quy trình đối chứng chuẩn hóa (Baseline Benchmark Reference)
+- **Sổ tay:** [`notebooks/m1_colab_arxiv_production.ipynb`](notebooks/m1_colab_arxiv_production.ipynb)
+- **Vai trò:** Quy trình tham chiếu chuẩn mực ban đầu (arXiv-first, ghi trực tiếp lên Drive FUSE), được duy trì làm mốc so sánh hiệu năng (baseline) cho báo cáo kỹ thuật.
+- **Tài liệu hướng dẫn:** Xem [Tài liệu vận hành Baseline Production](docs/m1_production.md).
+
+### 3. Sổ tay thực nghiệm và kiểm chứng (Validation & Experiments)
+- **`notebooks/m1_colab_cpu_pilot.ipynb`:** Kiểm chứng filesystem Drive, đo đạc độ trễ I/O và kiểm tra tính năng checkpoint/resume độc lập.
+- **`notebooks/m1_colab_strategy_comparison.ipynb`:** Thực nghiệm so sánh có đối chứng A/B giữa chiến lược thuần arXiv và chiến lược kết hợp Semantic Scholar.
