@@ -134,10 +134,18 @@ def _cached(metadata):
     history = metadata["provenance"]["version_history"]
     if history is None:
         return False
-    _require(isinstance(history, dict) and history.get("provider") == "arxiv_atom_versioned"
+    _require(isinstance(history, dict), "history provenance dict")
+    provider = history.get("provider")
+    _require(provider in {"arxiv_atom_versioned", "kaggle_snapshot"}
              and history.get("query_identifier") == metadata["arxiv_id"],
              "unknown history provenance requires audit")
     _instant(history.get("retrieved_at"))
+    if provider == "kaggle_snapshot":
+        _require(all(v["date_status"] == "verified" for v in metadata["versions"])
+                 and metadata["revised_dates"] is not None
+                 and [v["date"] for v in metadata["versions"][1:]] == metadata["revised_dates"],
+                 "kaggle history disagreements")
+        return True
     dates = _verified_dates(metadata, history.get("snapshot"))
     _require(metadata["submission_date"] is not None
              and _instant(metadata["submission_date"]) == _instant(dates[0])

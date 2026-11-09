@@ -6,6 +6,7 @@ eliminating redundant 3.0-second network discovery queries on arXiv API.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import email.utils
 import gzip
 import io
@@ -218,6 +219,12 @@ def ingest_kaggle_snapshot(
                             if idx < len(meta.get("versions", [])) and _valid_date(rev_date):
                                 meta["versions"][idx]["date"] = rev_date
                                 meta["versions"][idx]["date_status"] = "verified"
+                        meta["provenance"]["version_history"] = {
+                            "provider": "kaggle_snapshot",
+                            "query_identifier": record_id,
+                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                            "snapshot": list(snapshot["revised_dates"]),
+                        }
                         store.save_metadata(mssv, record_id, meta)
                 remaining_ids.remove(record_id)
                 found_count += 1

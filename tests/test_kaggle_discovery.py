@@ -207,6 +207,35 @@ class TestKaggleDiscovery(unittest.TestCase):
         self.assertEqual(meta["versions"][1]["date"], "2025-08-03")
         self.assertEqual(meta["versions"][1]["date_status"], "verified")
 
+    def test_paper_row_accepts_verified_kaggle_multi_version_paper(self):
+        from src import arxiv_history
+        rec = {
+            "id": "2508.07872",
+            "title": "Kaggle Multi-version Paper",
+            "authors": "Author A",
+            "versions": [
+                {"version": "v1", "created": "2025-08-01"},
+                {"version": "v2", "created": "2025-08-03"},
+            ]
+        }
+        snap = build_discovery_snapshot("24120010", "2508.07872", rec)
+        self.store.record_discovery(snap)
+        meta = self.store.read_metadata("24120010", "2508.07872")
+        meta["revised_dates"] = snap["revised_dates"]
+        meta["versions"][1]["date"] = snap["revised_dates"][0]
+        meta["versions"][1]["date_status"] = "verified"
+        meta["provenance"]["version_history"] = {
+            "provider": "kaggle_snapshot",
+            "query_identifier": "2508.07872",
+            "retrieved_at": "2026-11-09T00:00:00Z",
+            "snapshot": snap["revised_dates"],
+        }
+        self.store.save_metadata("24120010", "2508.07872", meta)
+
+        row = arxiv_history.paper_row(self.store, "24120010", "2508.07872")
+        self.assertEqual(row["arxiv_id"], "2508.07872")
+        self.assertEqual(row["revised_dates"], ["2025-08-03"])
+
 
 if __name__ == "__main__":
     unittest.main()
