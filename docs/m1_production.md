@@ -53,10 +53,12 @@ cohort 51 thì cohort 52 chưa được chạy.
   đã kiểm chứng và toàn bộ ngày history verified. No-TeX được giữ riêng.
 - Metadata/publication có thể vẫn partial, references not_attempted; không
   dùng số references 0 để thay cho chưa thu thập, không tuyên bố M1 complete.
+- `max_attempts`: Có thể tùy biến trong cấu hình (mặc định 1 trong ProductionRun, có thể tăng lên 3 khi môi trường mạng có độ trễ cao để retry cho timeout/5xx).
 - 403/429 dừng ngay lượt Run, không sang version/paper/cohort tiếp theo;
-  `max_attempts=1`, pacing arXiv dùng chung từ client hiện có. Không có outer retry.
+  pacing arXiv dùng chung từ client hiện có. Không có outer retry.
   **Không bấm Run liên tục sau 403/429**: xem lỗi, chờ và quyết định trước.
   Bấm lại ô Run là yêu cầu thử mới của người vận hành, không tự lên lịch.
+- Ngoài quy trình chuẩn hóa trong `m1_colab_arxiv_production.ipynb`, nhóm có thể sử dụng `m1_colab_fast_production.ipynb` để thu thập dữ liệu nhanh trên SSD kèm nạp trước siêu dữ liệu Kaggle offline.
 - Checksum sai, orphan, thiếu log hoặc checkpoint không nhất quán: dừng để
   review, giữ nguyên bằng chứng, không tự sửa/xóa/ghi đè. Lỗi/exception nghiêm
   trọng cũng dừng; xem logs/reports trước lần tiếp theo.

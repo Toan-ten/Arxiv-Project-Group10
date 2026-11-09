@@ -411,6 +411,10 @@ class ProductionRunTests(unittest.TestCase):
             production._WRITER.release()
         self.assertFalse(self.drive.exists())
 
+    def test_production_run_passes_configurable_max_attempts(self):
+        op = production.ProductionRun(self.repo, self.drive, COMMIT, max_attempts=3)
+        self.assertEqual(op.settings["max_attempts"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

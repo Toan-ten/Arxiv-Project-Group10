@@ -71,7 +71,7 @@ class ProductionRun:
 
     def __init__(self, repo, drive_root, code_commit, *, timeout=60.0,
                  sample_interval=1.0, disk_interval=120.0,
-                 retry_429=False, retry_wait_budget=300.0):
+                 retry_429=False, retry_wait_budget=300.0, max_attempts=1):
         self.repo, self.root = Path(repo).resolve(), batch._safe(drive_root)
         _require(not (self.root.is_relative_to(self.repo) or self.repo.is_relative_to(self.root)),
                  "Production data must be outside the code checkout")
@@ -82,6 +82,7 @@ class ProductionRun:
         for value in (timeout, sample_interval, disk_interval):
             _require(type(value) in (int, float) and math.isfinite(value) and value > 0,
                      "Timeout and sampling intervals must be finite positive numbers")
+        _require(type(max_attempts) is int and max_attempts >= 1, "max_attempts must be an integer >= 1")
         _require(type(retry_429) is bool, "retry_429 must be bool")
         _require(type(retry_wait_budget) in (int, float)
                  and math.isfinite(retry_wait_budget) and retry_wait_budget >= 0,
@@ -91,12 +92,12 @@ class ProductionRun:
         self.corpus, self.logs = self.root / "corpus", self.root / "logs"
         self.reports, self.scratch = self.root / "reports", self.root / "scratch"
         self.settings = dict(timeout=float(timeout), sample_interval=float(sample_interval),
-                             disk_interval=float(disk_interval))
+                             disk_interval=float(disk_interval), max_attempts=int(max_attempts))
         self.definition = dict(schema_version=1, mode="arxiv_first", code_commit=commit,
             candidate_positions=20000, cohort_size=COHORT_SIZE,
             assignments=[asdict(r) for r in _assignments().values()],
             corpus_root=str(self.corpus), versions=None, revision_history=True,
-            s2_config=None, max_attempts=1, user_agent=arxiv_client.USER_AGENT, **self.settings)
+            s2_config=None, user_agent=arxiv_client.USER_AGENT, **self.settings)
         self.campaign_code_commit = commit
         path = self.root / "campaign.json"
         if self.root.exists():
@@ -112,9 +113,11 @@ class ProductionRun:
     def _compatible_campaign(self, saved):
         if saved == self.definition:
             return True
+        saved_copy = {k: v for k, v in saved.items() if k != "max_attempts"}
+        def_copy = {k: v for k, v in self.definition.items() if k != "max_attempts"}
         return (isinstance(saved.get("code_commit"), str)
                 and saved["code_commit"] in _COMPATIBLE_CAMPAIGNS
-                and {**saved, "code_commit": self.definition["code_commit"]} == self.definition)
+                and {**saved_copy, "code_commit": def_copy["code_commit"]} == def_copy)
 
     def _batch_id(self, number):
         cohort_pairs(number)  # Validate before constructing any path.
@@ -122,7 +125,7 @@ class ProductionRun:
 
     def _expected(self, pairs):
         return benchmark_runner._definition(pairs, self.corpus, len(pairs), None,
-            self.settings["timeout"], 1, arxiv_client.USER_AGENT, None, True)
+            self.settings["timeout"], self.settings["max_attempts"], arxiv_client.USER_AGENT, None, True)
 
     def audit(self, number):
         """Read-only source/checksum/history audit, including confirmed absence."""
@@ -227,7 +230,7 @@ class ProductionRun:
                             batch_id=result["batch_id"], max_ids=COHORT_SIZE,
                             log_root=self.logs, report_root=self.reports,
                             resume=mode == "resume", versions=None, revision_history=True,
-                            s2_config=None, max_attempts=1, disk_roots=[self.corpus, self.scratch], **self.settings)
+                            s2_config=None, disk_roots=[self.corpus, self.scratch], **self.settings)
                     finally:
                         tempfile.tempdir = old_temp
                         if old_tmpdir is None:

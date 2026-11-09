@@ -174,11 +174,18 @@ python -B -m unittest discover -s tests -v
 mock HTTP/clock; các file tạm của tests nằm ngoài repository.
 
 
-## Pilot Google Colab CPU-only
+## Pilot Google Colab CPU-only và Quy trình Sản xuất
 
-Dùng [notebook pilot](notebooks/m1_colab_cpu_pilot.ipynb) và
-[hướng dẫn bàn giao cho A](docs/colab.md). Notebook tải đúng commit đã review,
-cài `requirements-colab.txt`, kiểm tra Drive, chạy 3 ID arXiv-first với toàn bộ
-versions/history và thử Resume. Các ô gọi mạng mặc định tắt; chỉ một writer.
-Corpus/logs/reports ở Drive ngoài Git repository. Chưa thực thi notebook trên
-Colab; pilot arXiv-only không thay benchmark M1 cuối gồm cả arXiv và S2.
+Dự án cung cấp hai quy trình vận hành trên Google Colab CPU-only:
+
+1. **Quy trình nghiệm thu chuẩn hóa (`notebooks/m1_colab_arxiv_production.ipynb`):**
+   - Tuân thủ hợp đồng 2 ô code (**Setup** và **Run M1**).
+   - Kiểm tra commit sạch, audit nghiêm ngặt sau từng cohort 100 bài báo.
+   - Hỗ trợ resume và dừng ngay khi phát hiện `403` hoặc `429`.
+   - Xem hướng dẫn chi tiết tại [Tài liệu vận hành Production](docs/m1_production.md).
+
+2. **Quy trình tối ưu tốc độ crawl (`notebooks/m1_colab_fast_production.ipynb`):**
+   - Chạy trên local SSD/RAM-disk (`/content/corpus_fast`), định kỳ đồng bộ về Google Drive.
+   - Tích hợp nạp trước siêu dữ liệu từ bản snapshot Kaggle (`arxiv-metadata-oai-snapshot.json`), giúp giảm đáng kể thời gian chờ khám phá bài báo.
+   - Quản lý token Kaggle an toàn qua biến môi trường hoặc Colab Secrets.
+   - Cơ chế sao lưu và khôi phục lũy tiến (incremental backup) đảm bảo không mất mát dữ liệu khi Colab ngắt kết nối đột ngột.
