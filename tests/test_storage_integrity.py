@@ -327,6 +327,280 @@ class TestStorageIntegrity(unittest.TestCase):
         refs_skipped = export_references_table(self.store, pairs, verified_only=True)
         self.assertEqual(len(refs_skipped), 0)
 
+    # ---------------------------------------------------------
+    # R3: Enforce Complete Checksum Coverage Tests
+    # ---------------------------------------------------------
+    def test_audit_checksum_coverage_missing_entry(self):
+        """R3: Expected file missing checksum entry in manifest is flagged as incomplete."""
+        self._setup_valid_complete_paper()
+        man_path = self.paper_dir / "manifest.json"
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        # Delete checksum entry for main.tex while keeping file in files list
+        man["versions"]["v1"]["file_checksums"] = {}
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "incomplete" and "missing checksum" in v.message.lower() for v in res.violations))
+
+    def test_audit_checksum_coverage_unexpected_entry(self):
+        """R3: Extra checksum entry in manifest not in files list is flagged as invalid."""
+        self._setup_valid_complete_paper()
+        man_path = self.paper_dir / "manifest.json"
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        fake_sha = hashlib.sha256(b"dummy").hexdigest()
+        man["versions"]["v1"]["file_checksums"]["ghost.tex"] = fake_sha
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "invalid" and "unexpected checksum entries" in v.message.lower() for v in res.violations))
+
+    def test_audit_checksum_malformed_format(self):
+        """R3: Checksum not matching ^[0-9a-f]{64}$ is flagged as invalid."""
+        self._setup_valid_complete_paper()
+        man_path = self.paper_dir / "manifest.json"
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        # Malformed: uppercase hex or non-hex string
+        man["versions"]["v1"]["file_checksums"]["main.tex"] = "not_a_valid_sha256_hash"
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+
+        # 1. Direct version-level audit detects malformed checksum
+        v_violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "malformed sha-256" in v.message.lower() for v in v_violations))
+
+        # 2. Paper-level audit flags invalid schema
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "invalid" and "invalid sha-256" in v.message.lower() for v in res.violations))
+
+    def test_audit_content_mismatch_vs_missing_file_independent(self):
+        """R3: Content mismatch (corrupted) and missing file (missing) detected independently."""
+        self._setup_valid_complete_paper()
+        # Case A: Content mismatch (file exists, but modified)
+        tex_path = self.paper_dir / "v1" / "main.tex"
+        tex_path.write_text(r"\documentclass{article}\begin{document}Modified\end{document}", encoding="utf-8")
+        res_corrupt = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res_corrupt.is_valid)
+        self.assertTrue(any(v.category == "corrupted" and "mismatch" in v.message.lower() for v in res_corrupt.violations))
+        self.assertFalse(any(v.category == "missing" for v in res_corrupt.violations))
+
+        # Case B: Missing file on disk
+        tex_path.unlink()
+        res_missing = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res_missing.is_valid)
+        self.assertTrue(any(v.category == "missing" for v in res_missing.violations))
+
+    def test_audit_kept_bytes_mismatch(self):
+        """R3: kept_bytes mismatch with actual on-disk total bytes is flagged as corrupted."""
+        self._setup_valid_complete_paper()
+        man_path = self.paper_dir / "manifest.json"
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        man["versions"]["v1"]["kept_bytes"] = 999999
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "corrupted" and "kept bytes mismatch" in v.message.lower() for v in res.violations))
+
+    # ---------------------------------------------------------
+    # R4: Fully Validate no_tex_source Tests
+    # ---------------------------------------------------------
+    def test_audit_no_tex_source_valid_bib_only(self):
+        """R4: Valid bib-only no_tex_source passes audit cleanly."""
+        self.store.record_discovery({
+            "mssv": self.mssv, "arxiv_id": self.arxiv_id, "status": "found",
+            "version_status": "resolved", "version_ids": [f"{self.arxiv_id}v1"],
+            "latest_version_id": f"{self.arxiv_id}v1", "title": "Bib Paper",
+            "authors": ["Author"], "published": "2025-08-01",
+            "updated": "2025-08-01", "missing_fields": [],
+        })
+        dest = self.store.begin_version(self.mssv, self.arxiv_id, "v1")
+        assert dest is not None
+        dest.mkdir(parents=True, exist_ok=True)
+        bib_content = "@article{key, title={Test}}"
+        bib_file = dest / "refs.bib"
+        bib_file.write_text(bib_content, encoding="utf-8")
+        self.store.record_source_result({
+            "mssv": self.mssv, "arxiv_id": self.arxiv_id,
+            "versioned_id": f"{self.arxiv_id}v1", "status": "no_tex_source",
+            "files": ["refs.bib"], "downloaded_bytes": len(bib_content.encode("utf-8")),
+            "error": None,
+        })
+        # Version record audit for v1 must pass cleanly
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertEqual(len(violations), 0)
+
+    def test_audit_no_tex_source_missing_bib(self):
+        """R4: Missing bib file on disk in bib-only no_tex_source is flagged as missing."""
+        self.test_audit_no_tex_source_valid_bib_only()
+        (self.paper_dir / "v1" / "refs.bib").unlink()
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "missing" for v in violations))
+
+    def test_audit_no_tex_source_tampered_bib(self):
+        """R4: Checksum mismatch on bib file in no_tex_source is flagged as corrupted."""
+        self.test_audit_no_tex_source_valid_bib_only()
+        (self.paper_dir / "v1" / "refs.bib").write_text("@article{tampered}", encoding="utf-8")
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "corrupted" and "mismatch" in v.message.lower() for v in violations))
+
+    def test_audit_no_tex_source_rejects_non_bib_files(self):
+        """R4: no_tex_source rejects .tex, .png, and any other non-.bib files."""
+        self.test_audit_no_tex_source_valid_bib_only()
+        # Add forbidden .png file on disk
+        extra_png = self.paper_dir / "v1" / "chart.png"
+        extra_png.write_bytes(b"\x89PNG")
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "non-.bib file" in v.message.lower() for v in violations))
+
+        # Add forbidden .tex file on disk
+        extra_png.unlink()
+        extra_tex = self.paper_dir / "v1" / "forbidden.tex"
+        extra_tex.write_text(r"\documentclass{article}", encoding="utf-8")
+        violations_tex = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "non-.bib file" in v.message.lower() for v in violations_tex))
+
+    # ---------------------------------------------------------
+    # R5: Harden Filesystem Link Handling Tests
+    # ---------------------------------------------------------
+    def test_audit_rejects_symlink_file(self):
+        """R5: Symlink file pointing outside corpus is rejected as corrupted and NEVER hashed."""
+        self._setup_valid_complete_paper()
+        v1_dir = self.paper_dir / "v1"
+        tex_path = v1_dir / "main.tex"
+        tex_path.unlink()
+
+        # Create outside target in separate temporary directory
+        with tempfile.TemporaryDirectory() as outside_td:
+            outside_target = Path(outside_td) / "secret.tex"
+            outside_target.write_text("SENSITIVE_OUTSIDE_DATA", encoding="utf-8")
+
+            # Create symlink pointing outside corpus
+            tex_path.symlink_to(outside_target)
+            self.assertTrue(tex_path.is_symlink())
+
+            man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+
+            self.assertTrue(any(v.category == "corrupted" and "symbolic link" in v.message.lower() for v in violations))
+
+    def test_audit_rejects_symlink_directory(self):
+        """R5: Symlink directory pointing outside corpus is rejected as corrupted and not traversed."""
+        self._setup_valid_complete_paper()
+        v1_dir = self.paper_dir / "v1"
+
+        with tempfile.TemporaryDirectory() as outside_td:
+            outside_dir = Path(outside_td) / "outside_sub"
+            outside_dir.mkdir(parents=True, exist_ok=True)
+            (outside_dir / "sub.tex").write_text("sub file", encoding="utf-8")
+
+            sym_dir = v1_dir / "sub_sym"
+            sym_dir.symlink_to(outside_dir, target_is_directory=True)
+            self.assertTrue(sym_dir.is_symlink())
+
+            man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+
+            self.assertTrue(any(v.category == "corrupted" and "symbolic link" in v.message.lower() for v in violations))
+
+    def test_audit_rejects_hardlink_file(self):
+        """R5: Hardlinked file with st_nlink != 1 is rejected as corrupted."""
+        self._setup_valid_complete_paper()
+        v1_dir = self.paper_dir / "v1"
+        main_tex = v1_dir / "main.tex"
+
+        # Create hard link
+        hardlink_path = v1_dir / "hardlink.tex"
+        import os
+        try:
+            os.link(main_tex, hardlink_path)
+        except OSError:
+            self.skipTest("Filesystem does not support hard links")
+
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+
+        self.assertTrue(any(v.category == "corrupted" and "multiple hard links" in v.message.lower() for v in violations))
+
+    # ---------------------------------------------------------
+    # R6: Strengthen count_completed_papers Tests
+    # ---------------------------------------------------------
+    def test_count_completed_papers_tampered_content_hash(self):
+        """R6: count_completed_papers rejects paper with tampered content even if filename matches."""
+        runner_root = Path(self.td.name) / "runner_local_tamper"
+        drive_root = Path(self.td.name) / "drive_tamper"
+        runner = FastProductionRunner(runner_root, drive_root)
+
+        self._setup_valid_complete_paper()
+        p_folder = runner.corpus_dir / self.folder_key
+        p_folder.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copytree(self.paper_dir, p_folder)
+
+        self.assertEqual(runner.count_completed_papers(1), 1)
+
+        # Tamper content of main.tex without changing filename or manifest
+        (p_folder / "v1" / "main.tex").write_text(r"\documentclass{article}\begin{document}TAMPERED\end{document}", encoding="utf-8")
+
+        # Tampered content must fail cryptographic verification and NOT be counted
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_missing_checksum_entry(self):
+        """R6: count_completed_papers rejects paper if checksum entry missing in manifest."""
+        runner_root = Path(self.td.name) / "runner_local_nochecksum"
+        drive_root = Path(self.td.name) / "drive_nochecksum"
+        runner = FastProductionRunner(runner_root, drive_root)
+
+        self._setup_valid_complete_paper()
+        p_folder = runner.corpus_dir / self.folder_key
+        p_folder.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copytree(self.paper_dir, p_folder)
+
+        man_path = p_folder / "manifest.json"
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        man["versions"]["v1"]["file_checksums"] = {}
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_invalid_no_tex_source_layout(self):
+        """R6: count_completed_papers rejects paper with invalid no_tex_source layout."""
+        runner_root = Path(self.td.name) / "runner_local_notex"
+        drive_root = Path(self.td.name) / "drive_notex"
+        runner = FastProductionRunner(runner_root, drive_root)
+
+        # Setup paper with empty no_tex_source in manifest
+        p_folder = runner.corpus_dir / self.folder_key
+        p_folder.mkdir(parents=True, exist_ok=True)
+        (p_folder / "manifest.json").write_text(json.dumps({
+            "discovery_status": "found",
+            "version_status": "resolved",
+            "versions": {
+                "v1": {
+                    "versioned_id": f"{self.arxiv_id}v1",
+                    "status": "no_tex_source",
+                    "source_status": "no_tex_source",
+                    "files": [],
+                    "file_checksums": {},
+                    "kept_bytes": 0,
+                    "completed_at": "2026-11-09T00:00:00Z",
+                }
+            },
+        }), encoding="utf-8")
+
+        # Valid empty no_tex_source (v1 dir does not exist) -> counts as complete
+        self.assertEqual(runner.count_completed_papers(1), 1)
+
+        # Invalid layout: unexpected v1 directory on disk for empty no_tex_source
+        (p_folder / "v1").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

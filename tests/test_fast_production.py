@@ -1,5 +1,6 @@
 """Tests for high-throughput fast production runner."""
 import ast
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -518,10 +519,26 @@ class TestFastProduction(unittest.TestCase):
         # Paper 1: Terminal success
         p1 = runner.corpus_dir / "2508-07872"
         p1.mkdir(parents=True, exist_ok=True)
+        v1_dir = p1 / "v1"
+        v1_dir.mkdir(parents=True, exist_ok=True)
+        tex_path = v1_dir / "main.tex"
+        tex_content = r"\documentclass{article}\begin{document}Hello\end{document}"
+        tex_path.write_text(tex_content, encoding="utf-8")
+        sha = hashlib.sha256(tex_content.encode("utf-8")).hexdigest()
         (p1 / "manifest.json").write_text(json.dumps({
             "discovery_status": "found",
             "version_status": "resolved",
-            "versions": {"v1": {"status": "success"}},
+            "versions": {
+                "v1": {
+                    "versioned_id": "2508.07872v1",
+                    "status": "success",
+                    "source_status": "success",
+                    "files": ["main.tex"],
+                    "file_checksums": {"main.tex": sha},
+                    "kept_bytes": len(tex_content.encode("utf-8")),
+                    "completed_at": "2026-11-09T00:00:00Z",
+                }
+            },
         }), encoding="utf-8")
 
         # Paper 2: unsafe_archive error (non-terminal)

@@ -165,41 +165,46 @@ class FastProductionRunner:
         return reset_count
 
     def count_completed_papers(self, number: int) -> int:
-        """Count how many papers in the cohort have verified terminal completion."""
+        """Count how many papers in the cohort have verified terminal completion.
+
+        Enforces the Storage Contract by verifying:
+        - Negative terminal discovery (not_found)
+        - Resolved terminal versions (all versions in TERMINAL)
+        - Full cryptographic checksum and content validation for every successful or bib-only version
+        - Strict no_tex_source and filesystem link invariants
+        """
         from src.storage import TERMINAL, arxiv_id_to_folder_key
+        from src.storage_integrity import audit_version_integrity
+
         done = 0
         for _, arxiv_id in cohort_pairs(number):
-            manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
-            if manifest_path.is_file():
-                try:
-                    m = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    disc = m.get("discovery_status")
-                    if disc == "not_found":
-                        done += 1
+            paper_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id)
+            manifest_path = paper_dir / "manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                m = json.loads(manifest_path.read_text(encoding="utf-8"))
+                disc = m.get("discovery_status")
+                if disc == "not_found":
+                    done += 1
+                    continue
+                versions = m.get("versions") or {}
+                if disc == "found" and versions and m.get("version_status") == "resolved":
+                    if not all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
                         continue
-                    versions = m.get("versions") or {}
-                    if disc == "found" and versions and m.get("version_status") == "resolved":
-                        if all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
-                            all_verified = True
-                            for v_name, v_info in versions.items():
-                                if not isinstance(v_info, dict):
-                                    all_verified = False
-                                    break
-                                if v_info.get("status") == "success" and (v_info.get("files") or v_info.get("file_checksums")):
-                                    ver_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / v_name
-                                    if not ver_dir.is_dir():
-                                        all_verified = False
-                                        break
-                                    for fname in (v_info.get("files") or []):
-                                        if not (ver_dir / fname).is_file():
-                                            all_verified = False
-                                            break
-                                    if not all_verified:
-                                        break
-                            if all_verified:
-                                done += 1
-                except Exception:
-                    pass
+                    paper_ok = True
+                    for v_name, v_info in versions.items():
+                        if not isinstance(v_info, dict):
+                            paper_ok = False
+                            break
+                        v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
+                        if v_violations:
+                            paper_ok = False
+                            break
+                    if paper_ok:
+                        done += 1
+            except Exception:
+                continue
         return done
 
     def _resolve_batch_id(

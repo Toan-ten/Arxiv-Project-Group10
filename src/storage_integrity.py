@@ -120,6 +120,9 @@ class CohortIntegrityReport:
         }
 
 
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
 def _compute_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -168,6 +171,47 @@ def audit_version_integrity(
         return violations
 
     version_dir = paper_dir / version_name
+
+    # Reject version_dir if it is a symlink or resolves outside paper directory (R5)
+    if version_dir.is_symlink() or os.path.islink(version_dir):
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="corrupted",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Version directory {version_name} is a symbolic link",
+            )
+        )
+        return violations
+
+    try:
+        if version_dir.exists() and not version_dir.resolve().is_relative_to(paper_dir.resolve()):
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(version_dir),
+                    version=version_name,
+                    message=f"Version directory {version_name} resolves outside paper directory",
+                )
+            )
+            return violations
+    except OSError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="corrupted",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Filesystem error resolving version directory {version_name}: {exc}",
+            )
+        )
+        return violations
+
     src_st = version_record.get("source_status")
 
     if st == "success":
@@ -214,55 +258,269 @@ def audit_version_integrity(
             )
             return violations
 
-        # Verify files on disk vs files in manifest
-        expected_files = set(version_record.get("files") or [])
-        expected_checksums = version_record.get("file_checksums") or {}
+        # Verify files and checksum metadata in manifest (R3)
+        raw_files = version_record.get("files")
+        if not isinstance(raw_files, list) or not raw_files:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    version=version_name,
+                    message="Version marked 'success' must have non-empty files list in manifest",
+                )
+            )
+            expected_files = set()
+        else:
+            expected_files = set(raw_files)
+
+        raw_checksums = version_record.get("file_checksums")
+        if not isinstance(raw_checksums, dict):
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    version=version_name,
+                    message="file_checksums must be a dictionary in manifest",
+                )
+            )
+            expected_checksums = {}
+        else:
+            expected_checksums = raw_checksums
+
+        # Validate checksum format for each entry (R3)
+        for fname, sha in expected_checksums.items():
+            if not isinstance(sha, str) or not SHA256_HEX_RE.match(sha):
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(version_dir / str(fname)),
+                        version=version_name,
+                        expected="64-character lowercase hex string",
+                        actual=sha,
+                        message=f"Malformed SHA-256 checksum for {fname}: '{sha}'",
+                    )
+                )
+
+        # 1:1 match between expected files and checksum keys (R3)
+        missing_checksums = expected_files - set(expected_checksums.keys())
+        if missing_checksums:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="incomplete",
+                    severity="error",
+                    version=version_name,
+                    expected="SHA-256 checksum for every file in files list",
+                    actual=sorted(missing_checksums),
+                    message=f"Files missing checksum entries in manifest: {sorted(missing_checksums)}",
+                )
+            )
+
+        unexpected_checksums = set(expected_checksums.keys()) - expected_files
+        if unexpected_checksums:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    version=version_name,
+                    expected="checksums only for files in files list",
+                    actual=sorted(unexpected_checksums),
+                    message=f"Unexpected checksum entries in manifest not in files list: {sorted(unexpected_checksums)}",
+                )
+            )
+
         actual_files = set()
         actual_checksums = {}
         total_bytes = 0
         has_tex = False
 
-        for root, dirs, files in os.walk(version_dir):
-            for fname in files:
-                fpath = Path(root) / fname
-                rel_posix = fpath.relative_to(version_dir).as_posix()
-                actual_files.add(rel_posix)
-
-                info = fpath.stat()
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        # Non-following directory traversal (R5)
+        try:
+            for root, dirs, files in os.walk(version_dir, followlinks=False):
+                root_path = Path(root)
+                if root_path.is_symlink() or os.path.islink(root_path):
                     violations.append(
                         IntegrityViolation(
                             arxiv_id=arxiv_id,
                             category="corrupted",
                             severity="error",
-                            file_path=str(fpath),
+                            file_path=str(root_path),
                             version=version_name,
-                            message=f"Source file {rel_posix} is not a regular unlinked file",
+                            message=f"Directory {root_path} is a symbolic link",
                         )
                     )
+                    dirs.clear()
                     continue
 
-                suffix = fpath.suffix.lower()
-                if suffix not in {".tex", ".bib"}:
+                # Prune and report symlinked subdirectories (do not enter)
+                symlink_dirs = [d for d in dirs if (root_path / d).is_symlink() or os.path.islink(root_path / d)]
+                for d in symlink_dirs:
                     violations.append(
                         IntegrityViolation(
                             arxiv_id=arxiv_id,
-                            category="invalid",
+                            category="corrupted",
                             severity="error",
-                            file_path=str(fpath),
+                            file_path=str(root_path / d),
                             version=version_name,
-                            expected=[".tex", ".bib"],
-                            actual=suffix,
-                            message=f"Forbidden source file extension '{suffix}' in {rel_posix}",
+                            message=f"Subdirectory {d} is a symbolic link",
                         )
                     )
+                    dirs.remove(d)
 
-                if suffix == ".tex":
-                    has_tex = True
+                for fname in sorted(files):
+                    fpath = root_path / fname
+                    try:
+                        rel_posix = fpath.relative_to(version_dir).as_posix()
+                    except ValueError:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Path {fpath} outside version dir",
+                            )
+                        )
+                        continue
 
-                sha = _compute_sha256(fpath)
-                actual_checksums[rel_posix] = sha
-                total_bytes += info.st_size
+                    try:
+                        lstat_res = os.lstat(fpath)
+                    except OSError as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Filesystem error inspecting {rel_posix}: {exc}",
+                            )
+                        )
+                        continue
+
+                    # Reject symlink files immediately (do not open or hash) (R5)
+                    if stat.S_ISLNK(lstat_res.st_mode) or fpath.is_symlink() or os.path.islink(fpath):
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Source file {rel_posix} is a symbolic link",
+                            )
+                        )
+                        actual_files.add(rel_posix)
+                        continue
+
+                    if not stat.S_ISREG(lstat_res.st_mode):
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Source file {rel_posix} is not a regular file",
+                            )
+                        )
+                        actual_files.add(rel_posix)
+                        continue
+
+                    # Reject multi-link hardlinks (R5)
+                    if lstat_res.st_nlink != 1:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Source file {rel_posix} has multiple hard links ({lstat_res.st_nlink})",
+                            )
+                        )
+
+                    # Containment check within version_dir (R5)
+                    try:
+                        if not fpath.resolve().is_relative_to(version_dir.resolve()):
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Source file {rel_posix} resolves outside version directory",
+                                )
+                            )
+                            continue
+                    except OSError as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Filesystem error resolving {rel_posix}: {exc}",
+                            )
+                        )
+                        continue
+
+                    suffix = fpath.suffix.lower()
+                    if suffix not in {".tex", ".bib"}:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="invalid",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                expected=[".tex", ".bib"],
+                                actual=suffix,
+                                message=f"Forbidden source file extension '{suffix}' in {rel_posix}",
+                            )
+                        )
+
+                    if suffix == ".tex":
+                        has_tex = True
+
+                    try:
+                        sha = _compute_sha256(fpath)
+                    except OSError as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Filesystem error reading/hashing {rel_posix}: {exc}",
+                            )
+                        )
+                        actual_files.add(rel_posix)
+                        continue
+
+                    actual_files.add(rel_posix)
+                    actual_checksums[rel_posix] = sha
+                    total_bytes += lstat_res.st_size
+        except OSError as exc:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(version_dir),
+                    version=version_name,
+                    message=f"Filesystem error traversing {version_name}/: {exc}",
+                )
+            )
 
         if not has_tex:
             violations.append(
@@ -277,7 +535,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Check missing files
+        # Check missing files on disk (R3)
         missing_files = expected_files - actual_files
         if missing_files:
             violations.append(
@@ -292,7 +550,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Check unmanaged extra files
+        # Check unmanaged extra files on disk (R3)
         extra_files = actual_files - expected_files
         if extra_files:
             violations.append(
@@ -307,24 +565,26 @@ def audit_version_integrity(
                 )
             )
 
-        # Check checksums
-        for fname, exp_sha in expected_checksums.items():
-            act_sha = actual_checksums.get(fname)
-            if act_sha and act_sha != exp_sha:
-                violations.append(
-                    IntegrityViolation(
-                        arxiv_id=arxiv_id,
-                        category="corrupted",
-                        severity="error",
-                        file_path=str(version_dir / fname),
-                        version=version_name,
-                        expected=exp_sha,
-                        actual=act_sha,
-                        message=f"SHA-256 checksum mismatch for {version_name}/{fname}",
+        # Check checksums for present expected files (R3)
+        for fname in sorted(expected_files & actual_files):
+            if fname in expected_checksums and fname in actual_checksums:
+                exp_sha = expected_checksums[fname]
+                act_sha = actual_checksums[fname]
+                if act_sha != exp_sha:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            file_path=str(version_dir / fname),
+                            version=version_name,
+                            expected=exp_sha,
+                            actual=act_sha,
+                            message=f"SHA-256 checksum mismatch for {version_name}/{fname}",
+                        )
                     )
-                )
 
-        # Check kept_bytes
+        # Check kept_bytes (R3)
         exp_kept = version_record.get("kept_bytes")
         if exp_kept is not None and exp_kept != total_bytes:
             violations.append(
@@ -353,8 +613,12 @@ def audit_version_integrity(
             )
 
     elif st == "no_tex_source":
-        expected_files = version_record.get("files") or []
+        # Fully validate no_tex_source (R4)
+        raw_files = version_record.get("files") or []
+        expected_files = set(raw_files)
+
         if not expected_files:
+            # Empty no_tex_source: directory vN/ must not exist on disk
             if version_dir.exists():
                 violations.append(
                     IntegrityViolation(
@@ -368,8 +632,31 @@ def audit_version_integrity(
                         message=f"Unexpected version directory {version_name}/ for empty no_tex_source",
                     )
                 )
+            raw_checksums = version_record.get("file_checksums")
+            if raw_checksums:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        message="Empty no_tex_source must not have file_checksums",
+                    )
+                )
+            exp_kept = version_record.get("kept_bytes")
+            if exp_kept not in (0, None):
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        message=f"Empty no_tex_source must have kept_bytes=0, got {exp_kept}",
+                    )
+                )
         else:
-            if not version_dir.is_dir():
+            # Non-empty no_tex_source (bib-only): version directory must exist and be a directory
+            if not version_dir.exists():
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
@@ -380,19 +667,347 @@ def audit_version_integrity(
                         message=f"Source directory {version_name}/ missing for bib-only no_tex_source",
                     )
                 )
+                return violations
+
+            if not version_dir.is_dir():
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(version_dir),
+                        version=version_name,
+                        message=f"Source path {version_name} is not a directory",
+                    )
+                )
+                return violations
+
+            # All files in manifest must strictly be .bib files
+            for f in expected_files:
+                if Path(f).suffix.lower() != ".bib":
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            version=version_name,
+                            expected=".bib file",
+                            actual=Path(f).suffix.lower(),
+                            message=f"no_tex_source cannot contain non-.bib file '{f}' in files list",
+                        )
+                    )
+
+            raw_checksums = version_record.get("file_checksums")
+            if not isinstance(raw_checksums, dict):
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        message="file_checksums must be a dictionary in manifest",
+                    )
+                )
+                expected_checksums = {}
             else:
-                for f in version_dir.glob("**/*"):
-                    if f.is_file() and f.suffix.lower() == ".tex":
+                expected_checksums = raw_checksums
+
+            # Validate checksum format
+            for fname, sha in expected_checksums.items():
+                if not isinstance(sha, str) or not SHA256_HEX_RE.match(sha):
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            file_path=str(version_dir / str(fname)),
+                            version=version_name,
+                            expected="64-character lowercase hex string",
+                            actual=sha,
+                            message=f"Malformed SHA-256 checksum for {fname}: '{sha}'",
+                        )
+                    )
+
+            missing_checksums = expected_files - set(expected_checksums.keys())
+            if missing_checksums:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="incomplete",
+                        severity="error",
+                        version=version_name,
+                        expected="SHA-256 checksum for every .bib file in files list",
+                        actual=sorted(missing_checksums),
+                        message=f"Files missing checksum entries in manifest: {sorted(missing_checksums)}",
+                    )
+                )
+
+            unexpected_checksums = set(expected_checksums.keys()) - expected_files
+            if unexpected_checksums:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        expected="checksums only for files in files list",
+                        actual=sorted(unexpected_checksums),
+                        message=f"Unexpected checksum entries in manifest not in files list: {sorted(unexpected_checksums)}",
+                    )
+                )
+
+            actual_files = set()
+            actual_checksums = {}
+            total_bytes = 0
+
+            # Non-following traversal of version_dir (R4, R5)
+            try:
+                for root, dirs, files in os.walk(version_dir, followlinks=False):
+                    root_path = Path(root)
+                    if root_path.is_symlink() or os.path.islink(root_path):
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
-                                category="invalid",
+                                category="corrupted",
                                 severity="error",
-                                file_path=str(f),
+                                file_path=str(root_path),
                                 version=version_name,
-                                message=f"no_tex_source cannot contain .tex file {f.name}",
+                                message=f"Directory {root_path} is a symbolic link",
                             )
                         )
+                        dirs.clear()
+                        continue
+
+                    symlink_dirs = [d for d in dirs if (root_path / d).is_symlink() or os.path.islink(root_path / d)]
+                    for d in symlink_dirs:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(root_path / d),
+                                version=version_name,
+                                message=f"Subdirectory {d} is a symbolic link",
+                            )
+                        )
+                        dirs.remove(d)
+
+                    for fname in sorted(files):
+                        fpath = root_path / fname
+                        try:
+                            rel_posix = fpath.relative_to(version_dir).as_posix()
+                        except ValueError:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Path {fpath} outside version dir",
+                                )
+                            )
+                            continue
+
+                        try:
+                            lstat_res = os.lstat(fpath)
+                        except OSError as exc:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Filesystem error inspecting {rel_posix}: {exc}",
+                                )
+                            )
+                            continue
+
+                        if stat.S_ISLNK(lstat_res.st_mode) or fpath.is_symlink() or os.path.islink(fpath):
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Source file {rel_posix} is a symbolic link",
+                                )
+                            )
+                            actual_files.add(rel_posix)
+                            continue
+
+                        if not stat.S_ISREG(lstat_res.st_mode):
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Source file {rel_posix} is not a regular file",
+                                )
+                            )
+                            actual_files.add(rel_posix)
+                            continue
+
+                        if lstat_res.st_nlink != 1:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Source file {rel_posix} has multiple hard links ({lstat_res.st_nlink})",
+                                )
+                            )
+
+                        try:
+                            if not fpath.resolve().is_relative_to(version_dir.resolve()):
+                                violations.append(
+                                    IntegrityViolation(
+                                        arxiv_id=arxiv_id,
+                                        category="corrupted",
+                                        severity="error",
+                                        file_path=str(fpath),
+                                        version=version_name,
+                                        message=f"Source file {rel_posix} resolves outside version directory",
+                                    )
+                                )
+                                continue
+                        except OSError as exc:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Filesystem error resolving {rel_posix}: {exc}",
+                                )
+                            )
+                            continue
+
+                        suffix = fpath.suffix.lower()
+                        if suffix != ".bib":
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="invalid",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    expected=[".bib"],
+                                    actual=suffix,
+                                    message=f"no_tex_source cannot contain non-.bib file '{rel_posix}' (found '{suffix}')",
+                                )
+                            )
+
+                        try:
+                            sha = _compute_sha256(fpath)
+                        except OSError as exc:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Filesystem error reading/hashing {rel_posix}: {exc}",
+                                )
+                            )
+                            actual_files.add(rel_posix)
+                            continue
+
+                        actual_files.add(rel_posix)
+                        actual_checksums[rel_posix] = sha
+                        total_bytes += lstat_res.st_size
+            except OSError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(version_dir),
+                        version=version_name,
+                        message=f"Filesystem error traversing {version_name}/: {exc}",
+                    )
+                )
+
+            missing_files = expected_files - actual_files
+            if missing_files:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="missing",
+                        severity="error",
+                        version=version_name,
+                        expected=sorted(missing_files),
+                        actual="not on disk",
+                        message=f"Expected bib files missing from {version_name}/: {sorted(missing_files)}",
+                    )
+                )
+
+            extra_files = actual_files - expected_files
+            if extra_files:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="unmanaged",
+                        severity="error",
+                        version=version_name,
+                        expected="files recorded in manifest",
+                        actual=sorted(extra_files),
+                        message=f"Unmanaged files found in {version_name}/: {sorted(extra_files)}",
+                    )
+                )
+
+            for fname in sorted(expected_files & actual_files):
+                if fname in expected_checksums and fname in actual_checksums:
+                    exp_sha = expected_checksums[fname]
+                    act_sha = actual_checksums[fname]
+                    if act_sha != exp_sha:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(version_dir / fname),
+                                version=version_name,
+                                expected=exp_sha,
+                                actual=act_sha,
+                                message=f"SHA-256 checksum mismatch for {version_name}/{fname}",
+                            )
+                        )
+
+            exp_kept = version_record.get("kept_bytes")
+            if exp_kept is not None and exp_kept != total_bytes:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        version=version_name,
+                        expected=exp_kept,
+                        actual=total_bytes,
+                        message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                    )
+                )
+
+            if not version_record.get("completed_at"):
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="incomplete",
+                        severity="error",
+                        version=version_name,
+                        expected="ISO-8601 timestamp",
+                        actual=None,
+                        message=f"Missing completed_at timestamp for terminal version {version_name}",
+                    )
+                )
 
     else:
         # Non-terminal version: version directory should NOT exist on disk
@@ -734,7 +1349,17 @@ def audit_paper_integrity(
             allowed_paper_entries.add(v_name)
 
     for child in paper_dir.iterdir():
-        if child.name not in allowed_paper_entries:
+        if child.is_symlink() or os.path.islink(child):
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(child),
+                    message=f"Symbolic link found in paper directory: {child.name}",
+                )
+            )
+        elif child.name not in allowed_paper_entries:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,

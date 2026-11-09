@@ -12,24 +12,27 @@ def export_papers_table(
     store: CorpusStorage,
     pairs: Iterable[Tuple[str, str]],
     *,
-    verified_only: bool = False,
+    verified_only: bool = True,
 ) -> List[Dict]:
     """Export the official M1 `papers` table matching crawling.md schema.
 
     Schema:
       - arxiv_id (str, non-null)
-      - title (str)
-      - authors (list[str])
-      - submission_date (str, ISO YYYY-MM-DD)
-      - revised_dates (list[str])
+      - title (str, nullable)
+      - authors (list[str], nullable: None when unobserved, [] when empty)
+      - submission_date (str, ISO YYYY-MM-DD, nullable)
+      - revised_dates (list[str], nullable: None when unobserved, [] when confirmed no revisions)
       - venue (str, nullable)
 
-    When verified_only=True, restricts output strictly to M1 complete papers.
+    Default verified_only=True: restricts output strictly to verified M1 complete papers (status == "complete").
+    Incomplete or partial records are excluded from official production exports.
     """
     rows = []
     for mssv, arxiv_id in pairs:
         try:
             meta = store.read_metadata(mssv, arxiv_id)
+            if not isinstance(meta, dict):
+                continue
             status = meta.get("status")
             if verified_only:
                 if status != "complete":
@@ -43,14 +46,28 @@ def export_papers_table(
             rows.append({
                 "arxiv_id": str(arxiv_id),
                 "title": meta.get("title"),
-                "authors": list(authors) if authors is not None else [],
+                "authors": list(authors) if authors is not None else None,
                 "submission_date": meta.get("submission_date"),
-                "revised_dates": list(revised_dates) if revised_dates is not None else [],
+                "revised_dates": list(revised_dates) if revised_dates is not None else None,
                 "venue": meta.get("venue"),
             })
         except Exception:
             continue
     return rows
+
+
+def export_diagnostic_papers_table(
+    store: CorpusStorage,
+    pairs: Iterable[Tuple[str, str]],
+    *,
+    include_partial: bool = True,
+) -> List[Dict]:
+    """Export intermediate/diagnostic papers table for analysis and inspection.
+
+    Separated from the official `export_papers_table`: allows intermediate records
+    (status in {'partial', 'complete'}) when include_partial=True.
+    """
+    return export_papers_table(store, pairs, verified_only=not include_partial)
 
 
 def export_references_table(
@@ -65,28 +82,39 @@ def export_references_table(
     When verified_only=True, only exports references from papers with verified complete coverage
     (references.status == 'complete' and coverage.complete is True).
     Preserves null for ref_submission_date when unobserved in source data (never fabricates dates).
+    Preserves null for ref_authors when unobserved in source data (never converts null to []).
 
     Schema:
       - arxiv_id (str, non-null)
       - ref_arxiv_id (str, non-null)
-      - ref_title (str)
-      - ref_authors (list[str])
+      - ref_title (str, nullable)
+      - ref_authors (list[str], nullable: None when unobserved, [] when empty)
       - ref_submission_date (str, nullable)
-      - ref_s2_id (str)
+      - ref_s2_id (str, nullable)
     """
     rows = []
     seen = set()
     for mssv, arxiv_id in pairs:
         try:
             ref_data = store.read_references(mssv, arxiv_id)
+            if not isinstance(ref_data, dict):
+                continue
             if verified_only:
-                cov = ref_data.get("coverage") or {}
+                cov = ref_data.get("coverage")
+                if not isinstance(cov, dict):
+                    continue
                 if ref_data.get("status") != "complete" or cov.get("complete") is not True:
                     continue
 
-            for item in ref_data.get("items", []):
+            items = ref_data.get("items")
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
                 ref_arxiv = item.get("arxiv_id")
-                if not ref_arxiv:
+                if not ref_arxiv or not isinstance(ref_arxiv, str):
                     continue  # Only include citations resolved to an arXiv ID
                 key = (str(arxiv_id), str(ref_arxiv))
                 if key in seen:
@@ -94,12 +122,13 @@ def export_references_table(
                 seen.add(key)
 
                 ref_sub_date = item.get("submission_date")
+                raw_authors = item.get("authors")
 
                 rows.append({
                     "arxiv_id": str(arxiv_id),
                     "ref_arxiv_id": str(ref_arxiv),
                     "ref_title": item.get("title"),
-                    "ref_authors": list(item.get("authors")) if item.get("authors") is not None else [],
+                    "ref_authors": list(raw_authors) if raw_authors is not None else None,
                     "ref_submission_date": str(ref_sub_date) if ref_sub_date else None,
                     "ref_s2_id": item.get("s2_paper_id"),
                 })
@@ -118,7 +147,7 @@ def validate_exported_tables(
     - Non-null arxiv_id in papers and references.
     - No duplicate arxiv_id in papers.
     - Required keys present in every record.
-    - Valid types (authors as list, strings, nulls preserved).
+    - Valid nullable list semantics (authors/revised_dates/ref_authors can be None or list of strings).
     - Foreign key consistency and duplicate edge prevention.
     """
     issues: List[str] = []
@@ -140,10 +169,20 @@ def validate_exported_tables(
             issues.append(f"Duplicate paper arxiv_id: {aid}")
         else:
             seen_paper_ids.add(aid)
-        if not isinstance(p.get("authors"), list):
-            issues.append(f"Paper row {idx} authors must be a list")
-        if not isinstance(p.get("revised_dates"), list):
-            issues.append(f"Paper row {idx} revised_dates must be a list")
+
+        authors = p.get("authors")
+        if authors is not None:
+            if not isinstance(authors, list):
+                issues.append(f"Paper row {idx} authors must be a list or None")
+            elif not all(isinstance(a, str) for a in authors):
+                issues.append(f"Paper row {idx} authors elements must be strings")
+
+        revised_dates = p.get("revised_dates")
+        if revised_dates is not None:
+            if not isinstance(revised_dates, list):
+                issues.append(f"Paper row {idx} revised_dates must be a list or None")
+            elif not all(isinstance(d, str) for d in revised_dates):
+                issues.append(f"Paper row {idx} revised_dates elements must be strings")
 
     seen_ref_pairs = set()
     for idx, r in enumerate(references_rows):
@@ -164,8 +203,13 @@ def validate_exported_tables(
             issues.append(f"Duplicate reference edge: {pair_key}")
         else:
             seen_ref_pairs.add(pair_key)
-        if not isinstance(r.get("ref_authors"), list):
-            issues.append(f"Reference row {idx} ref_authors must be a list")
+
+        ref_authors = r.get("ref_authors")
+        if ref_authors is not None:
+            if not isinstance(ref_authors, list):
+                issues.append(f"Reference row {idx} ref_authors must be a list or None")
+            elif not all(isinstance(a, str) for a in ref_authors):
+                issues.append(f"Reference row {idx} ref_authors elements must be strings")
 
     is_valid = len(issues) == 0
     return {

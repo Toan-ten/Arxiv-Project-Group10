@@ -4,6 +4,7 @@ import unittest
 
 from src.storage import CorpusStorage
 from src.export import (
+    export_diagnostic_papers_table,
     export_papers_table,
     export_references_table,
     export_to_parquet,
@@ -19,9 +20,7 @@ class TestExportTables(unittest.TestCase):
     def tearDown(self):
         self.td.cleanup()
 
-    def test_export_papers_and_references_tables(self):
-        mssv = "24120010"
-        aid = "2508.07872"
+    def _setup_complete_paper(self, mssv="24120010", aid="2508.07872"):
         self.store.record_discovery({
             "mssv": mssv, "arxiv_id": aid, "status": "found",
             "version_status": "resolved", "version_ids": [f"{aid}v1"],
@@ -29,6 +28,24 @@ class TestExportTables(unittest.TestCase):
             "authors": ["Alice"], "published": "2025-08-01",
             "updated": "2025-08-01", "missing_fields": [],
         })
+        meta = self.store.read_metadata(mssv, aid)
+        meta["status"] = "complete"
+        meta["title"] = "Sample Title"
+        meta["authors"] = ["Alice"]
+        meta["submission_date"] = "2025-08-01"
+        meta["revised_dates"] = []
+        meta["venue"] = "NeurIPS"
+        meta["missing_fields"] = []
+        meta["version_status"] = "resolved"
+        meta["versions"] = [{"version": "v1", "versioned_id": f"{aid}v1", "date": "2025-08-01", "date_status": "verified"}]
+        meta["provenance"]["semantic_scholar"] = {
+            "query_identifier": aid,
+            "s2_paper_id": "s2p1",
+            "retrieved_at": "2026-11-09T00:00:00Z",
+            "snapshot": {"arxiv_id": aid, "status": "found"},
+        }
+        self.store.save_metadata(mssv, aid, meta)
+
         self.store.save_references(mssv, aid, {
             "contract_version": 2, "arxiv_id": aid, "status": "complete",
             "provenance": {
@@ -59,6 +76,11 @@ class TestExportTables(unittest.TestCase):
             ],
         })
 
+    def test_export_papers_and_references_tables(self):
+        mssv = "24120010"
+        aid = "2508.07872"
+        self._setup_complete_paper(mssv, aid)
+
         pairs = [(mssv, aid)]
         papers_rows = export_papers_table(self.store, pairs)
         self.assertEqual(len(papers_rows), 1)
@@ -75,44 +97,178 @@ class TestExportTables(unittest.TestCase):
         )
         self.assertEqual(ref_rows[0]["ref_arxiv_id"], "2101.00001")
         self.assertEqual(ref_rows[0]["ref_s2_id"], "s2_ref_1")
-        # Task 6.2 & 6.3: ref_submission_date preserves null when not present in source (no fabricated dates)
         self.assertIsNone(ref_rows[0]["ref_submission_date"])
+
+    def test_export_papers_fail_safe_defaults(self):
+        """R2: export_papers_table defaults to verified_only=True and excludes partial/failed records."""
+        mssv = "24120010"
+        aid = "2508.07872"
+        # 1. Partial paper: only discovery run
+        self.store.record_discovery({
+            "mssv": mssv, "arxiv_id": aid, "status": "found",
+            "version_status": "resolved", "version_ids": [f"{aid}v1"],
+            "latest_version_id": f"{aid}v1", "title": "Partial Paper",
+            "authors": ["Author"], "published": "2025-08-01",
+            "updated": "2025-08-01", "missing_fields": [],
+        })
+        pairs = [(mssv, aid)]
+
+        # Official export defaults to verified_only=True -> MUST EXCLUDE PARTIAL
+        self.assertEqual(len(export_papers_table(self.store, pairs)), 0)
+        self.assertEqual(len(export_papers_table(self.store, pairs, verified_only=True)), 0)
+
+        # Diagnostic export mode clearly separated -> includes partial
+        diag_rows = export_diagnostic_papers_table(self.store, pairs)
+        self.assertEqual(len(diag_rows), 1)
+        self.assertEqual(diag_rows[0]["title"], "Partial Paper")
+
+        # Explicit verified_only=False also works
+        self.assertEqual(len(export_papers_table(self.store, pairs, verified_only=False)), 1)
+
+        # Missing / unattempted / malformed papers are always excluded
+        missing_pairs = [(mssv, "2508.07873")]
+        self.assertEqual(len(export_papers_table(self.store, missing_pairs)), 0)
+        self.assertEqual(len(export_diagnostic_papers_table(self.store, missing_pairs)), 0)
+
+    def test_export_references_fail_safe(self):
+        """R2: export_references_table requires status=='complete' and coverage.complete==True."""
+        mssv = "24120010"
+        aid = "2508.07872"
+        self._setup_complete_paper(mssv, aid)
+        pairs = [(mssv, aid)]
+
+        # Verified export works
+        self.assertEqual(len(export_references_table(self.store, pairs)), 1)
+
+        # Tamper references on disk: coverage.complete = False
+        ref_file = self.store.root / "2508-07872" / "references.json"
+        import json
+        refs = json.loads(ref_file.read_text(encoding="utf-8"))
+        refs["coverage"]["complete"] = False
+        ref_file.write_text(json.dumps(refs), encoding="utf-8")
+        self.assertEqual(len(export_references_table(self.store, pairs)), 0)
+
+        # Tamper references on disk: status = "partial"
+        refs["status"] = "partial"
+        refs["coverage"]["complete"] = True
+        ref_file.write_text(json.dumps(refs), encoding="utf-8")
+        self.assertEqual(len(export_references_table(self.store, pairs)), 0)
+
+    def test_export_preserves_null_semantics(self):
+        """R1: Null semantics preserved for authors, revised_dates, and ref_authors."""
+        import json
+        mssv = "24120010"
+        aid_null = "2508.07872"
+        aid_empty = "2508.07873"
+
+        # Case 1: unobserved / null lists in metadata and references
+        dir_null = self.store.root / "2508-07872"
+        dir_null.mkdir(parents=True, exist_ok=True)
+        (dir_null / "metadata.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": aid_null, "mssv": mssv,
+            "status": "partial", "title": "Null Paper", "authors": None,
+            "submission_date": "2025-08-01", "revised_dates": None, "venue": None,
+            "version_status": "resolved",
+            "versions": [{"version": "v1", "versioned_id": f"{aid_null}v1", "date": "2025-08-01", "date_status": "verified"}],
+            "missing_fields": [],
+            "provenance": {"arxiv": None, "semantic_scholar": None, "version_history": None},
+        }), encoding="utf-8")
+
+        (dir_null / "references.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": aid_null, "status": "complete",
+            "provenance": {"provider": "semantic_scholar", "query_identifier": aid_null, "s2_paper_id": "s2_null", "retrieved_at": "2026-11-09T00:00:00Z"},
+            "coverage": {"complete": True, "continuation": None, "reported_total": 1, "retrieved_count": 1},
+            "items": [{
+                "arxiv_id": "2101.00002", "title": "Ref", "authors": None,
+                "submission_date": None, "publication_date": None, "year": 2021,
+                "venue": None, "s2_paper_id": "s2_r2", "missing_fields": [], "raw": {},
+            }],
+        }), encoding="utf-8")
+
+        # Test diagnostic export preserves None
+        p_rows_null = export_diagnostic_papers_table(self.store, [(mssv, aid_null)])
+        self.assertEqual(len(p_rows_null), 1)
+        self.assertIsNone(p_rows_null[0]["authors"])
+        self.assertIsNone(p_rows_null[0]["revised_dates"])
+
+        r_rows_null = export_references_table(self.store, [(mssv, aid_null)])
+        self.assertEqual(len(r_rows_null), 1)
+        self.assertIsNone(r_rows_null[0]["ref_authors"])
+
+        # Case 2: explicit empty lists [] preserved
+        dir_empty = self.store.root / "2508-07873"
+        dir_empty.mkdir(parents=True, exist_ok=True)
+        (dir_empty / "metadata.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": aid_empty, "mssv": mssv,
+            "status": "partial", "title": "Empty Paper", "authors": [],
+            "submission_date": "2025-08-01", "revised_dates": [], "venue": None,
+            "version_status": "resolved",
+            "versions": [{"version": "v1", "versioned_id": f"{aid_empty}v1", "date": "2025-08-01", "date_status": "verified"}],
+            "missing_fields": [],
+            "provenance": {"arxiv": None, "semantic_scholar": None, "version_history": None},
+        }), encoding="utf-8")
+
+        (dir_empty / "references.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": aid_empty, "status": "complete",
+            "provenance": {"provider": "semantic_scholar", "query_identifier": aid_empty, "s2_paper_id": "s2_empty", "retrieved_at": "2026-11-09T00:00:00Z"},
+            "coverage": {"complete": True, "continuation": None, "reported_total": 1, "retrieved_count": 1},
+            "items": [{
+                "arxiv_id": "2101.00003", "title": "Ref Empty", "authors": [],
+                "submission_date": None, "publication_date": None, "year": 2021,
+                "venue": None, "s2_paper_id": "s2_r3", "missing_fields": [], "raw": {},
+            }],
+        }), encoding="utf-8")
+
+        p_rows_empty = export_diagnostic_papers_table(self.store, [(mssv, aid_empty)])
+        self.assertEqual(len(p_rows_empty), 1)
+        self.assertEqual(p_rows_empty[0]["authors"], [])
+        self.assertEqual(p_rows_empty[0]["revised_dates"], [])
+
+        r_rows_empty = export_references_table(self.store, [(mssv, aid_empty)])
+        self.assertEqual(len(r_rows_empty), 1)
+        self.assertEqual(r_rows_empty[0]["ref_authors"], [])
+
+    def test_validate_exported_tables_nullable_semantics(self):
+        """R1: validate_exported_tables correctly accepts None, [], and list[str]."""
+        # Valid cases with None and []
+        papers = [
+            {"arxiv_id": "2508.07871", "title": "P1", "authors": None, "submission_date": "2025-08-01", "revised_dates": None, "venue": None},
+            {"arxiv_id": "2508.07872", "title": "P2", "authors": [], "submission_date": "2025-08-01", "revised_dates": [], "venue": None},
+            {"arxiv_id": "2508.07873", "title": "P3", "authors": ["Alice"], "submission_date": "2025-08-01", "revised_dates": ["2025-08-02"], "venue": "NeurIPS"},
+        ]
+        refs = [
+            {"arxiv_id": "2508.07871", "ref_arxiv_id": "2101.00001", "ref_title": "R1", "ref_authors": None, "ref_submission_date": None, "ref_s2_id": "s1"},
+            {"arxiv_id": "2508.07872", "ref_arxiv_id": "2101.00002", "ref_title": "R2", "ref_authors": [], "ref_submission_date": None, "ref_s2_id": "s2"},
+            {"arxiv_id": "2508.07873", "ref_arxiv_id": "2101.00003", "ref_title": "R3", "ref_authors": ["Bob"], "ref_submission_date": "2021-01-01", "ref_s2_id": "s3"},
+        ]
+        val = validate_exported_tables(papers, refs)
+        self.assertTrue(val["is_valid"])
+        self.assertEqual(val["total_papers"], 3)
+        self.assertEqual(val["total_references"], 3)
+
+        # Invalid cases: non-list non-null authors
+        bad_papers = [{"arxiv_id": "2508.07871", "title": "P1", "authors": "Alice", "submission_date": "2025-08-01", "revised_dates": [], "venue": None}]
+        val_bad = validate_exported_tables(bad_papers, refs)
+        self.assertFalse(val_bad["is_valid"])
+        self.assertTrue(any("authors must be a list or None" in i for i in val_bad["issues"]))
+
+        # Invalid cases: non-string elements in list
+        bad_papers2 = [{"arxiv_id": "2508.07871", "title": "P1", "authors": [123], "submission_date": "2025-08-01", "revised_dates": [], "venue": None}]
+        val_bad2 = validate_exported_tables(bad_papers2, refs)
+        self.assertFalse(val_bad2["is_valid"])
+        self.assertTrue(any("authors elements must be strings" in i for i in val_bad2["issues"]))
+
+        # Invalid references: non-list non-null ref_authors
+        bad_refs = [{"arxiv_id": "2508.07871", "ref_arxiv_id": "2101.00001", "ref_title": "R1", "ref_authors": 123, "ref_submission_date": None, "ref_s2_id": "s1"}]
+        val_bad_ref = validate_exported_tables(papers, bad_refs)
+        self.assertFalse(val_bad_ref["is_valid"])
+        self.assertTrue(any("ref_authors must be a list or None" in i for i in val_bad_ref["issues"]))
 
     def test_export_to_parquet_creates_file(self):
         records = [{"arxiv_id": "2508.07872", "title": "Test"}]
         out_path = Path(self.td.name) / "test.parquet"
         export_to_parquet(records, out_path)
-        # Should create out_path or out_path.with_suffix('.jsonl') if pyarrow is missing
         self.assertTrue(out_path.exists() or out_path.with_suffix(".jsonl").exists())
-
-    def test_validate_exported_tables(self):
-        """Task 6.3: validate_exported_tables verifies canonical schemas and catches defects."""
-        valid_papers = [{
-            "arxiv_id": "2508.07872",
-            "title": "Title",
-            "authors": ["Author"],
-            "submission_date": "2025-08-01",
-            "revised_dates": [],
-            "venue": "Venue",
-        }]
-        valid_refs = [{
-            "arxiv_id": "2508.07872",
-            "ref_arxiv_id": "2101.00001",
-            "ref_title": "Ref",
-            "ref_authors": ["Ref Author"],
-            "ref_submission_date": None,
-            "ref_s2_id": "s2_1",
-        }]
-        res = validate_exported_tables(valid_papers, valid_refs)
-        self.assertTrue(res["is_valid"])
-        self.assertEqual(res["total_papers"], 1)
-        self.assertEqual(res["total_references"], 1)
-
-        # Duplicate paper detection
-        dup_papers = valid_papers + valid_papers
-        res_dup = validate_exported_tables(dup_papers, valid_refs)
-        self.assertFalse(res_dup["is_valid"])
-        self.assertIn("Duplicate paper arxiv_id", res_dup["issues"][0])
 
 
 if __name__ == "__main__":

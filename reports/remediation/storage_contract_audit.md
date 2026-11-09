@@ -103,25 +103,70 @@ Module [`src/storage_integrity.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-
 
 ## 5. Kết Quả Kiểm Thử (Verification Evidence)
 
-Đã xây dựng bộ kiểm thử chuyên biệt [`tests/test_storage_integrity.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/tests/test_storage_integrity.py) với 13 ca kiểm thử bao phủ toàn bộ các kịch bản lỗi và bất biến:
+Đã xây dựng bộ kiểm thử chuyên biệt [`tests/test_storage_integrity.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/tests/test_storage_integrity.py) và [`tests/test_export.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/tests/test_export.py) bao phủ toàn bộ các kịch bản lỗi và bất biến.
 
-```text
-$ python3 -m pytest tests/test_storage_integrity.py -v
-============================= test session starts ==============================
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_cohort_integrity_and_report_generation PASSED [  7%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_corrupted_json PASSED [ 15%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_cross_file_status_mismatch PASSED [ 23%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_forbidden_extensions_in_source PASSED [ 30%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_missing_mandatory_jsons PASSED [ 38%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_missing_paper_directory PASSED [ 46%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_no_tex_source_semantics PASSED [ 53%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_references_coverage_semantics PASSED [ 61%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_source_checksum_verification PASSED [ 69%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_unmanaged_extraneous_files_in_paper_dir PASSED [ 76%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_audit_unmanaged_extraneous_files_in_version_dir PASSED [ 84%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_count_completed_papers_verifies_disk_source PASSED [ 92%]
-tests/test_storage_integrity.py::TestStorageIntegrity::test_export_verified_only_enforcement PASSED [100%]
-============================== 13 passed in 0.28s ==============================
-```
+---
 
-Toàn bộ các bài kiểm thử liên quan (`test_storage.py`, `test_export.py`, `test_fast_production.py`) đều vượt qua 100% không phát sinh hồi quy.
+## 6. Khắc Phục Độc Lập Theo Yêu Cầu Audit (Phase 1 Remediation: R1 – R6)
+
+Căn cứ biên bản audit độc lập đối với commit `bf4e5ff`, hệ thống đã hoàn thiện triệt để 6 yêu cầu kỹ thuật:
+
+### R1. Bảo toàn ngữ nghĩa Null trong xuất dữ liệu (Preserve Null Semantics in Exports)
+- **Nguyên nhân gốc rễ:** Hàm `export_papers_table` và `export_references_table` áp dụng biểu thức gán mặc định `list(...) if ... else []`, vô tình chuẩn hóa giá trị `None` (chưa quan sát hoặc chưa thu thập) thành danh sách rỗng (`[]`). Đồng thời `validate_exported_tables` yêu cầu `authors` và `revised_dates` bắt buộc phải là kiểu `list`.
+- **Biện pháp xử lý:**
+  + Trong [`src/export.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/src/export.py): Bảo toàn nguyên trạng `None` khi trường `authors`, `revised_dates` hoặc `ref_authors` mang giá trị `None`. Chỉ khởi tạo `list(...)` khi trường có dữ liệu thực tế.
+  + Cập nhật `validate_exported_tables`: Chấp nhận giá trị `None` hoặc `list[str]`, đồng thời kiểm tra nghiêm ngặt từng phần tử phải là chuỗi ký tự (`str`).
+  + Bổ sung ca kiểm thử hồi quy xác nhận tính đúng đắn cho cả 3 trường hợp: `None`, `[]`, và danh sách có dữ liệu.
+
+### R2. Thiết lập cơ chế Fail-Safe cho xuất bản dữ liệu chính thức (Fail-Safe Official Papers Export)
+- **Nguyên nhân gốc rễ:** `export_papers_table` nhận giá trị mặc định `verified_only=False`, trong khi ô thực thi số 7 của sổ tay Colab production gọi hàm mà không truyền tham số tường minh, dẫn đến nguy cơ các bản ghi metadata dở dang (`partial`) lọt vào tập dữ liệu xuất bản chính thức.
+- **Biện pháp xử lý:**
+  + Đổi giá trị mặc định của `export_papers_table` thành `verified_only=True`. Khi ở chế độ này, hàm loại bỏ hoàn toàn các bản ghi chưa đạt trạng thái `complete`.
+  + Tách biệt rõ ràng hàm xuất dữ liệu chẩn đoán trung gian: `export_diagnostic_papers_table(store, pairs, include_partial=True)`.
+  + Cập nhật trực tiếp ô Bước 6 trong sổ tay [`notebooks/m1_colab_fast_production.ipynb`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/notebooks/m1_colab_fast_production.ipynb), truyền tường minh `verified_only=True` cho cả `export_papers_table` và `export_references_table`.
+  + Thắt chặt kiểm tra trong `export_references_table`: Bắt buộc `ref_data["status"] == "complete"` và `coverage["complete"] is True`, ngăn chặn việc xuất trích dẫn chưa hoàn tất.
+
+### R3. Thực thi đối chiếu toàn diện mã băm (Enforce Complete Checksum Coverage)
+- **Nguyên nhân gốc rễ:** Hàm `audit_version_integrity` trước đây chỉ lặp qua các khóa có trong từ điển `file_checksums`, bỏ sót trường hợp tệp nguồn được khai báo trong danh sách `files` nhưng thiếu mã băm trong `file_checksums`, hoặc mã băm không đúng định dạng.
+- **Biện pháp xử lý:**
+  + Áp dụng biểu thức chính quy `^[0-9a-f]{64}$` để kiểm tra định dạng của từng mã băm SHA-256.
+  + Bắt buộc tương ứng 1:1 giữa tập tệp dự kiến `files` và các khóa trong `file_checksums`:
+    * Tệp thiếu mã băm: Phát sinh vi phạm `category="incomplete"`.
+    * Khóa băm dư thừa không có trong `files`: Phát sinh vi phạm `category="invalid"`.
+  + Tách biệt độc lập việc phát hiện tệp thiếu trên đĩa (`category="missing"`), tệp dư thừa không quản lý (`category="unmanaged"`), và nội dung tệp bị sai khác mã băm (`category="corrupted"`).
+  + Đối chiếu tổng số byte thực tế của các tệp thường trên đĩa với giá trị `kept_bytes` trong manifest.
+
+### R4. Xác thực toàn diện trạng thái `no_tex_source` (Fully Validate no_tex_source)
+- **Nguyên nhân gốc rễ:** Implementation trước đây chỉ kiểm tra không có tệp đuôi `.tex`, chưa thực thi đầy đủ quy chuẩn cho tệp `.bib` và trạng thái thư mục rỗng.
+- **Biện pháp xử lý:**
+  + Trường hợp `no_tex_source` rỗng (`files` rỗng): Thư mục `vN/` tuyệt đối không được phép tồn tại trên đĩa. Nếu tồn tại, hệ thống ghi nhận vi phạm `category="unmanaged"`. Đồng thời `file_checksums` phải rỗng và `kept_bytes` phải bằng 0 hoặc `None`.
+  + Trường hợp `no_tex_source` có tệp `.bib`:
+    * Toàn bộ tệp dự kiến và tệp thực tế trên đĩa bắt buộc phải có phần mở rộng `.bib`. Chặn đứng tệp `.tex` và mọi định dạng khác (`.png`, `.pdf`, `.py`, v.v.).
+    * Thực hiện đầy đủ quy trình kiểm tra mã băm SHA-256 từng tệp `.bib`, đối chiếu danh sách tệp và kiểm tra `kept_bytes`.
+    * Cấm tuyệt đối symlink và hardlink.
+
+### R5. Gia cố an toàn xử lý liên kết hệ thống tệp (Harden Filesystem Link Handling)
+- **Nguyên nhân gốc rễ:** Phương thức `Path.stat()` tự động phân giải và duyệt theo symbolic link. Khi gặp symlink trỏ ra ngoài corpus, việc mở tệp để tính băm có thể đọc nhầm dữ liệu bên ngoài hoặc gây rò rỉ thông tin.
+- **Biện pháp xử lý:**
+  + Sử dụng `os.lstat()` và `os.walk(..., followlinks=False)` để kiểm tra trạng thái tệp mà không duyệt theo symlink.
+  + Nếu phát hiện thư mục là symlink: Loại bỏ ngay khỏi danh sách duyệt, không đi vào bên trong, và ghi nhận vi phạm `category="corrupted"`.
+  + Nếu phát hiện tệp là symlink: Tuyệt đối không mở và không tính băm tệp đích; ghi nhận ngay vi phạm `category="corrupted"`.
+  + Kiểm tra hardlink: Bắt buộc `st_nlink == 1` đối với mọi tệp nguồn thông thường. Trường hợp `st_nlink > 1` bị ghi nhận vi phạm `category="corrupted"`.
+  + Xác thực phạm vi đường dẫn: Kiểm tra `fpath.resolve().is_relative_to(version_dir.resolve())` để bảo đảm không xảy ra vượt ranh giới thư mục.
+  + Xử lý lỗi hệ thống tệp (`OSError`) thành các vi phạm kiểm toán tường minh.
+
+### R6. Gia cố hàm `count_completed_papers` (Strengthen count_completed_papers)
+- **Nguyên nhân gốc rễ:** Hàm `count_completed_papers` trong `src/fast_production.py` trước đây chỉ kiểm tra sự tồn tại của tệp trên đĩa (`is_file()`), bỏ qua việc tính toán mã băm SHA-256 thực tế và không kiểm tra quy chuẩn thư mục `no_tex_source`.
+- **Biện pháp xử lý:**
+  + Tái sử dụng trực tiếp API kiểm toán `audit_version_integrity` từ module `src.storage_integrity` cho từng phiên bản của bài báo.
+  + Kiểm tra đầy đủ mã băm SHA-256 trên đĩa, định dạng metadata và quy chuẩn `no_tex_source`.
+  + Nếu bất kỳ phiên bản nào phát sinh vi phạm tính toàn vẹn (ví dụ: nội dung tệp bị sửa đổi dù tên tệp giữ nguyên, thiếu mã băm, tồn tại symlink, hoặc sai cấu trúc `no_tex_source`), bài báo sẽ không được tính vào số lượng hoàn tất (`done`).
+
+---
+
+## 7. Giới Hạn Kỹ Thuật Còn Lại (Remaining Limitations)
+
+1. **Hiệu năng băm đĩa trên tập dữ liệu quy mô lớn:**
+   - Việc tính toán mã băm SHA-256 trực tiếp trên đĩa tại mỗi lần gọi `count_completed_papers` bảo đảm an toàn dữ liệu tuyệt đối nhưng tiêu tốn I/O. Đối với quy mô production Colab (1.200 bài báo), thời gian xác thực nằm trong khoảng 2-4 giây trên SSD cục bộ.
+2. **Ký hiệu commit lịch sử được bảo toàn:**
+   - Biến `CODE_COMMIT = "489a82fd959ccc6cced7c59fc309255e4421bef2"` được giữ nguyên vẹn xuyên suốt Phase 1 theo đúng chỉ thị kiểm toán, bảo đảm tính hồi cứu nguồn gốc (provenance). Hằng số này sẽ chỉ được cập nhật trong bước nghiệm thu cuối cùng.
