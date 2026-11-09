@@ -90,4 +90,4 @@ một ID. Hàm chỉ hỗ trợ khoảng cùng tháng. Khoảng khác tháng/nă
 version; giới hạn này không áp dụng cho toàn bộ crawler hay references. Định dạng hợp lệ không xác nhận paper tồn tại trên arXiv; 20.000
 ID ứng viên không đồng nghĩa 20.000 publication hợp lệ.
 
-Hợp đồng output cho crawler nằm ở [`docs/m1_contract.md`](m1_contract.md).
+Hợp đồng output cho crawler nằm ở [`docs/contracts/m1_contract.md`](../contracts/m1_contract.md).

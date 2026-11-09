@@ -14,6 +14,7 @@ from src.pilots import build_pilot_set, build_smoke_set, write_pilot_file
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = DEFAULT_CONFIG_PATH.parent
+PILOTS_DIR = CONFIG_DIR / "pilots"
 
 
 def main() -> int:
@@ -21,8 +22,9 @@ def main() -> int:
     smoke = build_smoke_set(members)
     pilot = build_pilot_set(members)
 
-    smoke_path = CONFIG_DIR / "pilot_10.json"
-    pilot_path = CONFIG_DIR / "pilot_500.json"
+    PILOTS_DIR.mkdir(parents=True, exist_ok=True)
+    smoke_path = PILOTS_DIR / "pilot_10.json"
+    pilot_path = PILOTS_DIR / "pilot_500.json"
     write_pilot_file(smoke_path, smoke)
     write_pilot_file(pilot_path, pilot)
 

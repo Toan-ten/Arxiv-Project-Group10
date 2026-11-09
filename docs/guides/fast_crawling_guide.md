@@ -21,7 +21,7 @@ Tài liệu này hướng dẫn chi tiết quy trình vận hành quy trình thu
 ## 2. Chuẩn bị môi trường trên Google Colab
 
 1. **Cấu hình phần cứng:**
-   - Mở sổ tay [`notebooks/m1_colab_fast_production.ipynb`](../notebooks/m1_colab_fast_production.ipynb).
+   - Mở sổ tay [`notebooks/m1_colab_fast_production.ipynb`](../../notebooks/m1_colab_fast_production.ipynb).
    - Chọn **Runtime** → **Change runtime type** → **CPU** (Accelerator: None).
    - *Lưu ý:* Hệ thống sẽ tự động phát hiện và chặn thực thi nếu runtime đang bật GPU.
 2. **Cấu hình biến bảo mật (Colab Secrets):**

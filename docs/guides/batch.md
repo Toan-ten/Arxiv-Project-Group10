@@ -115,7 +115,7 @@ Các lần thử giả lập trong tests không phải benchmark crawler thật.
 finished chỉ nghĩa Pipeline đã xử lý hết danh sách, có thể gồm failed/blocked
 hoặc not_found. Không đồng nghĩa corpus/publication complete; khi S2 tắt,
 references mới vẫn not_attempted. Benchmark foundation được adapter dùng lại; xem
-[Benchmark Adapter v1](benchmark_runner.md) để phân biệt execution, batch và độ phủ dữ liệu.
+[Benchmark Adapter v1](../operations/benchmark_runner.md) để phân biệt execution, batch và độ phủ dữ liệu.
 
 ## Kiểm thử offline trên PowerShell
 

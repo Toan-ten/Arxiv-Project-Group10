@@ -2,7 +2,7 @@
 
 Computes comprehensive crawling, storage, extraction, metadata, reference coverage,
 and M1 milestone completeness metrics strictly aligned with the M1 v2 Storage Contract
-(docs/m1_contract.md, src.storage, src.storage_integrity, and docs/reporting_metrics.md).
+(docs/contracts/m1_contract.md, src.storage, src.storage_integrity, and docs/contracts/reporting_metrics.md).
 """
 from __future__ import annotations
 

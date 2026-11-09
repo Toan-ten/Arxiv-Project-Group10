@@ -2,7 +2,7 @@
 
 Provides unified, robust cross-file consistency verification, source file and checksum
 auditing, schema validation, and lifecycle invariant enforcement across corpus papers.
-Adheres strictly to the M1 v2 Storage Contract (docs/m1_contract.md and src/storage.py).
+Adheres strictly to the M1 v2 Storage Contract (docs/contracts/m1_contract.md and src/storage.py).
 """
 from __future__ import annotations
 

@@ -168,7 +168,7 @@ run logs và lịch sử attempt qua progress callback.
 Benchmark foundation không đọc summary để xác định corpus success; không dùng
 dummy benchmark hoặc fixtures làm kết quả corpus thật.
 
-Nguồn quy định: [contract v2](m1_contract.md), [Storage](storage.md),
+Nguồn quy định: [contract v2](../contracts/m1_contract.md), [Storage](../contracts/storage.md),
 [HTTP client](arxiv_client.md), [Source Downloader](arxiv_source.md).
 
 ## Progress callback
@@ -212,4 +212,4 @@ là false cho lỗi history; diagnostic vẫn được callback ghi vào attempt
 
 History thành công không tự hoàn thành publication. Metadata còn partial nếu
 thiếu title/authors/ngày hoặc chưa có S2 verified; publication còn partial nếu
-thiếu source versions hoặc references theo contract. Xem [M1 finalization](m1_finalization.md).
+thiếu source versions hoặc references theo contract. Xem [M1 finalization](../audits/m1_finalization.md).

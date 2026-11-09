@@ -1,8 +1,8 @@
 # Đặc Tả Chỉ Số Thống Kê & Báo Cáo Milestone 1 (Canonical Reporting Metric Specification)
 
 **Phiên bản định nghĩa số liệu (Metric Definition Version):** `2.1.0`  
-**Tuân thủ:** Hợp đồng lưu trữ Milestone 1 v2 ([`docs/m1_contract.md`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/docs/m1_contract.md))  
-**Tài liệu tham chiếu:** [`reports/remediation/storage_contract_audit.md`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/reports/remediation/storage_contract_audit.md), [`reports/remediation/reporting_audit.md`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/reports/remediation/reporting_audit.md)  
+**Tuân thủ:** Hợp đồng lưu trữ Milestone 1 v2 ([`docs/contracts/m1_contract.md`](m1_contract.md))  
+**Tài liệu tham chiếu:** [`reports/remediation/storage_contract_audit.md`](../../reports/remediation/storage_contract_audit.md), [`reports/remediation/reporting_audit.md`](../../reports/remediation/reporting_audit.md)  
 **Ngày hiệu lực:** 2026-11-09  
 
 ---

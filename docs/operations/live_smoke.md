@@ -49,7 +49,7 @@ Thư mục đã tồn tại bị từ chối nếu chưa chọn resume; không t
 ## Người dùng tự chạy live sau khi review
 
 Có thể lưu key một lần trong `.env` tại root theo
-[hướng dẫn cấu hình S2](semantic_scholar.md#api-key-môi-trường-hoặc-env-tại-root).
+[hướng dẫn cấu hình S2](../guides/semantic_scholar.md#api-key-môi-trường-hoặc-env-tại-root).
 Các lần chạy sau tự đọc file; biến môi trường đã đặt luôn được ưu tiên.
 Nếu biến Windows cũ đang sai, xem hướng dẫn gỡ biến ở liên kết trên.
 

@@ -1,6 +1,6 @@
 # M1: Combined vs Two-phase trên Colab CPU-only
 
-[Notebook riêng](../notebooks/m1_colab_strategy_comparison.ipynb) dùng helper
+[Notebook riêng](../../notebooks/m1_colab_strategy_comparison.ipynb) dùng helper
 `scripts/colab_comparison.py`. Không thay notebook Pilot, Storage contract hay
 crawler. Chưa chạy Colab/API thật trong lần chuẩn bị; chưa có kết quả A/B.
 

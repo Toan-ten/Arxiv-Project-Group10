@@ -1,6 +1,6 @@
 # M1 Colab CPU-only — pilot và bàn giao vận hành
 
-Notebook: [m1_colab_cpu_pilot.ipynb](../notebooks/m1_colab_cpu_pilot.ipynb).
+Notebook: [m1_colab_cpu_pilot.ipynb](../../notebooks/m1_colab_cpu_pilot.ipynb).
 API baseline đã đọc: commit `63f80da`; notebook/hướng dẫn này chưa được chạy trên
 Colab. Smoke Windows một paper không chứng minh Drive hoặc Colab đã nghiệm thu.
 

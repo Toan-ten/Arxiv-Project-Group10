@@ -247,7 +247,7 @@ foundation thật trên fixture nhỏ để kiểm tra semantics và lược b�
 
 `run_benchmark(..., s2_config={...})` truyền cùng cấu hình qua Batch/Pipeline và
 lưu cấu hình không có key trong report/run definition. Mặc định None giữ logs
-arXiv-only; đổi cấu hình cần batch_id mới. Xem [S2 integration](s2_integration.md).
+arXiv-only; đổi cấu hình cần batch_id mới. Xem [S2 integration](../guides/s2_integration.md).
 Wall time/resource sampling bao gồm S2; Discovery timing vẫn chỉ thuộc arXiv.
 History nhận diện stage s2_metadata/s2_references, nhưng không suy HTTP counts
 từ attempts hoặc số items. References chưa complete vẫn có count unknown.

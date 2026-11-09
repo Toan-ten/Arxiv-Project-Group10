@@ -216,7 +216,7 @@ Tích hợp Pipeline/Storage và chính sách dừng toàn Pipeline thuộc bư�
 
 `fetch_references()` lấy một snapshot mới trong bộ nhớ, theo
 [Issue #6](https://github.com/Toan-ten/Arxiv-Project-Group10/issues/6) và schema
-references của [contract v2](m1_contract.md#4-referencesjson-toàn-bộ-references-trung-gian).
+references của [contract v2](../contracts/m1_contract.md#4-referencesjson-toàn-bộ-references-trung-gian).
 Không ghi corpus, không cập nhật manifest, không nhận/ghi đè snapshot cũ.
 
 ```python

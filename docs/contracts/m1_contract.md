@@ -56,7 +56,7 @@ Chưa hỗ trợ archive/gzip lồng nhau, ZIP mã hóa, `.Z`, bz2 hoặc xz.
 Extraction từ chối traversal, đường dẫn nguy hiểm, links/special files và đường
 dẫn trùng/xung đột chữ hoa-thường. Downloader không tự có resume theo byte
 hoặc checkpoint; Storage giai đoạn 1 đảm nhiệm checkpoint theo version.
-Chưa bảo vệ trước process khác thay đổi thư mục đích. Chi tiết: [source downloader](arxiv_source.md).
+Chưa bảo vệ trước process khác thay đổi thư mục đích. Chi tiết: [source downloader](../guides/arxiv_source.md).
 
 ## 3. `metadata.json`
 

@@ -31,37 +31,37 @@ Tổng số tệp tin được theo dõi bởi Git (Git-tracked files): **98 t�
 | `LICENSE` | Giấy phép mã nguồn mở (MIT) | Root | `LICENSE` | **KEEP** | GitHub repo | Thấp | Đọc tệp |
 | `README.md` | Tài liệu giới thiệu tổng quan và hướng dẫn dự án | Docs | `README.md` | **UPDATE** | Toàn bộ người dùng | Trung bình | Rà soát liên kết, cập nhật hiện trạng |
 | `requirements.txt` | Phụ thuộc môi trường runtime chính thức của dự án | Requirements | `requirements.txt` | **KEEP** | Notebooks, Colab, CI | Trung bình | `pip install -r requirements.txt` |
-| `src/requirements.txt` | Bản sao chép trùng lặp của `requirements.txt` trong package | Requirements | *(Xóa)* | **DELETE** | Không có mã nguồn nào trỏ vào | Thấp | `git diff`, kiểm thử test suite |
+| `src/requirements.txt` | Bản sao chép trùng lặp của `requirements.txt` trong package | Requirements | *(Đã xóa)* | **DELETED** | Không có mã nguồn nào trỏ vào | Thấp | `git diff`, kiểm thử test suite |
 | `requirements-colab.txt` | Khóa phiên bản `psutil` cho môi trường Colab | Requirements | `requirements-colab.txt` | **KEEP** | Notebooks | Thấp | Cài đặt pip |
 | `requirements-colab-compare.txt` | Phụ thuộc cho notebook so sánh chiến lược | Requirements | `requirements-colab-compare.txt` | **KEEP** | `m1_colab_strategy_comparison.ipynb` | Thấp | Cài đặt pip |
 | `config/group10_id_ranges.json` | Cấu hình gốc phân bổ 20.000 IDs / 200 lô cho 4 thành viên | Config | `config/group10_id_ranges.json` | **KEEP** | `id_ranges.py`, `fast_production.py`, notebooks | Cao | `test_id_ranges.py`, `test_fast_production.py` |
-| `config/pilot_10.json` | Tập mẫu 10 định danh arXiv cho kiểm thử nhanh | Config | `config/pilots/pilot_10.json` | **MOVE** | `pilots.py`, `test_pilot_sets.py`, notebooks | Trung bình | `test_pilot_sets.py` |
-| `config/pilot_500.json` | Tập mẫu 500 định danh arXiv cho kiểm thử tải vừa | Config | `config/pilots/pilot_500.json` | **MOVE** | `pilots.py`, `test_pilot_sets.py`, notebooks | Trung bình | `test_pilot_sets.py` |
-| `docs/m1_contract.md` | Storage Contract v2 quy định cấu trúc và tính toàn vẹn | Contracts | `docs/contracts/m1_contract.md` | **MOVE** | `storage.py`, `storage_integrity.py`, README | Trung bình | Rà soát liên kết |
-| `docs/reporting_metrics.md` | Quy chuẩn số liệu báo cáo, invariants và đối chiếu | Contracts | `docs/contracts/reporting_metrics.md` | **MOVE** | `reporting.py`, `generate_m1_report.py` | Trung bình | Rà soát liên kết |
-| `docs/arxiv_client.md` | Hướng dẫn kỹ thuật module giao tiếp arXiv API | Guides | `docs/guides/arxiv_client.md` | **MOVE** | README, `arxiv_client.py` | Thấp | Rà soát liên kết |
-| `docs/arxiv_discovery.md` | Hướng dẫn kỹ thuật module khám phá bài báo arXiv | Guides | `docs/guides/arxiv_discovery.md` | **MOVE** | README, `arxiv_discovery.py` | Thấp | Rà soát liên kết |
-| `docs/arxiv_source.md` | Hướng dẫn kỹ thuật tải và trích xuất TeX source | Guides | `docs/guides/arxiv_source.md` | **MOVE** | README, `arxiv_source.py` | Thấp | Rà soát liên kết |
-| `docs/batch.md` | Hướng dẫn xử lý lô và checkpoint | Guides | `docs/guides/batch.md` | **MOVE** | README, `batch.py` | Thấp | Rà soát liên kết |
-| `docs/benchmark_runner.md` | Hướng dẫn đo lường tài nguyên và hiệu năng thu thập | Guides | `docs/guides/benchmark_runner.md` | **MOVE** | README, `benchmark_runner.py` | Thấp | Rà soát liên kết |
-| `docs/id_ranges.md` | Hướng dẫn xử lý khoảng dải ID và định dạng arXiv ID | Guides | `docs/guides/id_ranges.md` | **MOVE** | README, `id_ranges.py` | Thấp | Rà soát liên kết |
-| `docs/pipeline.md` | Hướng dẫn quy trình pipeline thu thập dữ liệu tuần tự | Guides | `docs/guides/pipeline.md` | **MOVE** | README, `pipeline.py` | Thấp | Rà soát liên kết |
-| `docs/s2_integration.md` | Hướng dẫn tích hợp Semantic Scholar metadata | Guides | `docs/guides/s2_integration.md` | **MOVE** | README, `s2_integration.py` | Thấp | Rà soát liên kết |
-| `docs/semantic_scholar.md` | Hướng dẫn chi tiết Semantic Scholar API & Rate Limiting | Guides | `docs/guides/semantic_scholar.md` | **MOVE** | README, `semantic_scholar.py` | Thấp | Rà soát liên kết |
-| `docs/storage.md` | Hướng dẫn lưu trữ tệp, atomic commit và manifest | Guides | `docs/guides/storage.md` | **MOVE** | README, `storage.py` | Thấp | Rà soát liên kết |
-| `docs/colab.md` | Hướng dẫn vận hành trên Google Colab cơ bản | Operations | `docs/operations/colab.md` | **MOVE** | README, notebooks | Thấp | Rà soát liên kết |
-| `docs/colab_comparison.md` | Hướng dẫn so sánh các chiến lược thu thập trên Colab | Operations | `docs/operations/colab_comparison.md` | **MOVE** | `m1_colab_strategy_comparison.ipynb` | Thấp | Rà soát liên kết |
-| `docs/fast_crawling_guide.md` | Hướng dẫn thu thập tốc độ cao qua SSD và RAM-disk | Operations | `docs/operations/fast_crawling_guide.md` | **MOVE** | README, `fast_production.py` | Thấp | Rà soát liên kết |
-| `docs/live_smoke.md` | Hướng dẫn kiểm thử smoke có kiểm soát | Operations | `docs/operations/live_smoke.md` | **MOVE** | `scripts/live_smoke.py` | Thấp | Rà soát liên kết |
-| `docs/m1_finalization.md` | Tài liệu chốt tiêu chí kỹ thuật hoàn thiện M1 | Operations | `docs/operations/m1_finalization.md` | **MOVE** | README | Thấp | Rà soát liên kết |
-| `docs/m1_production.md` | Tài liệu sản xuất dữ liệu quy mô lớn M1 | Operations | `docs/operations/m1_production.md` | **MOVE** | README, `scripts/m1_production.py` | Thấp | Rà soát liên kết |
-| `docs/M1_HANDOFF.md` | Sổ tay vận hành chính thức dành cho 4 thành viên | Operations | `docs/operations/m1_handoff.md` | **MOVE/RENAME** | Notebook sản xuất, README | Cao | Rà soát liên kết, test notebook |
-| `docs/fast_production_audit.md` | Báo cáo kiểm toán fast production runner | Audits | `docs/audits/fast_production_audit.md` | **MOVE** | README | Thấp | Rà soát liên kết |
-| `docs/M1_FINAL_ACCEPTANCE.md` | Báo cáo nghiệm thu toàn diện Milestone 1 | Acceptance | `docs/acceptance/m1_final_acceptance.md` | **MOVE/RENAME** | README, ban kiểm toán | Cao | Rà soát liên kết, sửa link request |
-| `notebooks/m1_colab_fast_production.ipynb` | Sổ tay Colab sản xuất chính thức M1 cho 4 thành viên | Notebooks | `notebooks/production/m1_colab_fast_production.ipynb` | **MOVE** | `test_fast_production.py`, thành viên | Rất cao | AST parse, test notebook execution |
-| `notebooks/m1_colab_cpu_pilot.ipynb` | Sổ tay Colab chạy pilot xác minh CPU-only | Notebooks | `notebooks/pilots/m1_colab_cpu_pilot.ipynb` | **MOVE** | `test_colab_notebook.py` | Cao | `test_colab_notebook.py` |
-| `notebooks/m1_colab_arxiv_production.ipynb` | Sổ tay Colab sản xuất baseline (truy vấn trực tiếp) | Notebooks | `notebooks/pilots/m1_colab_arxiv_production.ipynb` | **MOVE** | Tham chiếu tham khảo | Trung bình | AST parse |
-| `notebooks/m1_colab_strategy_comparison.ipynb` | Sổ tay Colab đo lường và so sánh hiệu năng I/O | Notebooks | `notebooks/experiments/m1_colab_strategy_comparison.ipynb` | **MOVE** | `colab_comparison.py` | Trung bình | AST parse |
+| `config/pilots/pilot_10.json` | Tập mẫu 10 định danh arXiv cho kiểm thử nhanh | Config | `config/pilots/pilot_10.json` | **MOVED** | `pilots.py`, `test_pilot_sets.py`, notebooks | Trung bình | `test_pilot_sets.py` |
+| `config/pilots/pilot_500.json` | Tập mẫu 500 định danh arXiv cho kiểm thử tải vừa | Config | `config/pilots/pilot_500.json` | **MOVED** | `pilots.py`, `test_pilot_sets.py`, notebooks | Trung bình | `test_pilot_sets.py` |
+| `docs/contracts/m1_contract.md` | Storage Contract v2 quy định cấu trúc và tính toàn vẹn | Contracts | `docs/contracts/m1_contract.md` | **MOVED** | `storage.py`, `storage_integrity.py`, README | Trung bình | Rà soát liên kết |
+| `docs/contracts/reporting_metrics.md` | Quy chuẩn số liệu báo cáo, invariants và đối chiếu | Contracts | `docs/contracts/reporting_metrics.md` | **MOVED** | `reporting.py`, `generate_m1_report.py` | Trung bình | Rà soát liên kết |
+| `docs/guides/arxiv_client.md` | Hướng dẫn kỹ thuật module giao tiếp arXiv API | Guides | `docs/guides/arxiv_client.md` | **MOVED** | README, `arxiv_client.py` | Thấp | Rà soát liên kết |
+| `docs/guides/arxiv_discovery.md` | Hướng dẫn kỹ thuật module khám phá bài báo arXiv | Guides | `docs/guides/arxiv_discovery.md` | **MOVED** | README, `arxiv_discovery.py` | Thấp | Rà soát liên kết |
+| `docs/guides/arxiv_source.md` | Hướng dẫn kỹ thuật tải và trích xuất TeX source | Guides | `docs/guides/arxiv_source.md` | **MOVED** | README, `arxiv_source.py` | Thấp | Rà soát liên kết |
+| `docs/guides/batch.md` | Hướng dẫn xử lý lô và checkpoint | Guides | `docs/guides/batch.md` | **MOVED** | README, `batch.py` | Thấp | Rà soát liên kết |
+| `docs/operations/benchmark_runner.md` | Hướng dẫn đo lường tài nguyên và hiệu năng thu thập | Operations | `docs/operations/benchmark_runner.md` | **MOVED** | README, `benchmark_runner.py` | Thấp | Rà soát liên kết |
+| `docs/guides/id_ranges.md` | Hướng dẫn xử lý khoảng dải ID và định dạng arXiv ID | Guides | `docs/guides/id_ranges.md` | **MOVED** | README, `id_ranges.py` | Thấp | Rà soát liên kết |
+| `docs/guides/pipeline.md` | Hướng dẫn quy trình pipeline thu thập dữ liệu tuần tự | Guides | `docs/guides/pipeline.md` | **MOVED** | README, `pipeline.py` | Thấp | Rà soát liên kết |
+| `docs/guides/s2_integration.md` | Hướng dẫn tích hợp Semantic Scholar metadata | Guides | `docs/guides/s2_integration.md` | **MOVED** | README, `s2_integration.py` | Thấp | Rà soát liên kết |
+| `docs/guides/semantic_scholar.md` | Hướng dẫn chi tiết Semantic Scholar API & Rate Limiting | Guides | `docs/guides/semantic_scholar.md` | **MOVED** | README, `semantic_scholar.py` | Thấp | Rà soát liên kết |
+| `docs/contracts/storage.md` | Hướng dẫn lưu trữ tệp, atomic commit và manifest | Contracts | `docs/contracts/storage.md` | **MOVED** | README, `storage.py` | Thấp | Rà soát liên kết |
+| `docs/guides/colab.md` | Hướng dẫn vận hành trên Google Colab cơ bản | Guides | `docs/guides/colab.md` | **MOVED** | README, notebooks | Thấp | Rà soát liên kết |
+| `docs/operations/colab_comparison.md` | Hướng dẫn so sánh các chiến lược thu thập trên Colab | Operations | `docs/operations/colab_comparison.md` | **MOVED** | `m1_colab_strategy_comparison.ipynb` | Thấp | Rà soát liên kết |
+| `docs/guides/fast_crawling_guide.md` | Hướng dẫn thu thập tốc độ cao qua SSD và RAM-disk | Guides | `docs/guides/fast_crawling_guide.md` | **MOVED** | README, `fast_production.py` | Thấp | Rà soát liên kết |
+| `docs/operations/live_smoke.md` | Hướng dẫn kiểm thử smoke có kiểm soát | Operations | `docs/operations/live_smoke.md` | **MOVED** | `scripts/live_smoke.py` | Thấp | Rà soát liên kết |
+| `docs/audits/m1_finalization.md` | Tài liệu chốt tiêu chí kỹ thuật hoàn thiện M1 | Audits | `docs/audits/m1_finalization.md` | **MOVED** | README | Thấp | Rà soát liên kết |
+| `docs/operations/m1_production.md` | Tài liệu sản xuất dữ liệu quy mô lớn M1 | Operations | `docs/operations/m1_production.md` | **MOVED** | README, `scripts/m1_production.py` | Thấp | Rà soát liên kết |
+| `docs/acceptance/M1_HANDOFF.md` | Sổ tay vận hành chính thức dành cho 4 thành viên | Acceptance | `docs/acceptance/M1_HANDOFF.md` | **MOVED** | Notebook sản xuất, README | Cao | Rà soát liên kết, test notebook |
+| `docs/audits/fast_production_audit.md` | Báo cáo kiểm toán fast production runner | Audits | `docs/audits/fast_production_audit.md` | **MOVED** | README | Thấp | Rà soát liên kết |
+| `docs/acceptance/M1_FINAL_ACCEPTANCE.md` | Báo cáo nghiệm thu toàn diện Milestone 1 | Acceptance | `docs/acceptance/M1_FINAL_ACCEPTANCE.md` | **MOVED** | README, ban kiểm toán | Cao | Rà soát liên kết, sửa link request |
+| `notebooks/m1_colab_fast_production.ipynb` | Sổ tay Colab sản xuất chính thức M1 cho 4 thành viên | Notebooks | `notebooks/m1_colab_fast_production.ipynb` | **KEEP** | `test_fast_production.py`, thành viên, Colab badges | Cao | AST parse, test notebook execution |
+| `notebooks/m1_colab_cpu_pilot.ipynb` | Sổ tay Colab chạy pilot xác minh CPU-only | Notebooks | `notebooks/m1_colab_cpu_pilot.ipynb` | **KEEP** | `test_colab_notebook.py` | Trung bình | `test_colab_notebook.py` |
+| `notebooks/m1_colab_arxiv_production.ipynb` | Sổ tay Colab sản xuất baseline (truy vấn trực tiếp) | Notebooks | `notebooks/m1_colab_arxiv_production.ipynb` | **KEEP** | Tham chiếu tham khảo | Trung bình | AST parse |
+| `notebooks/m1_colab_strategy_comparison.ipynb` | Sổ tay Colab đo lường và so sánh hiệu năng I/O | Notebooks | `notebooks/m1_colab_strategy_comparison.ipynb` | **KEEP** | `colab_comparison.py` | Trung bình | AST parse |
 | `reports/remediation/baseline.md` | Báo cáo kiểm toán baseline ban đầu | Reports | `reports/remediation/baseline.md` | **KEEP** | Lịch sử nghiệm thu | Không | Bảo lưu nguyên vẹn |
 | `reports/remediation/reporting_audit.md` | Báo cáo kiểm toán báo cáo Milestone 1 | Reports | `reports/remediation/reporting_audit.md` | **KEEP** | Lịch sử nghiệm thu | Không | Bảo lưu nguyên vẹn |
 | `reports/remediation/reporting_correctness_audit.md` | Báo cáo kiểm toán tính đúng đắn của reconciliation | Reports | `reports/remediation/reporting_correctness_audit.md` | **KEEP** | Lịch sử nghiệm thu | Không | Bảo lưu nguyên vẹn |
