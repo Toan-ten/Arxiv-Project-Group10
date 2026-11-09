@@ -14,9 +14,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
-import re
 import shutil
-import subprocess
 import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
@@ -24,25 +22,6 @@ from typing import Dict, List, Optional, Tuple
 from src import arxiv_client, batch, benchmark, benchmark_runner, id_ranges
 from src.kaggle_discovery import ingest_kaggle_snapshot
 from src.storage import CorpusStorage, _atomic_json
-
-
-def validate_and_checkout_commit(code_commit: str, repo_dir: Optional[str | Path] = None) -> str:
-    """Validate CODE_COMMIT 40-char hex format and checkout commit in detached HEAD mode (fail-closed).
-    
-    1. If code_commit is not a 40-character hexadecimal string, raises RuntimeError.
-    2. Runs git fetch origin.
-    3. Runs git checkout --detach <code_commit>.
-    4. Verifies git rev-parse HEAD matches code_commit; raises RuntimeError if mismatched.
-    """
-    if not isinstance(code_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", code_commit):
-        raise RuntimeError("Bắt buộc phải điền đầy đủ mã commit 40 ký tự cho CODE_COMMIT để bảo đảm tính tái lập (fail-closed).")
-    cwd = str(repo_dir) if repo_dir else None
-    subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True)
-    subprocess.run(["git", "checkout", "--detach", code_commit], cwd=cwd, check=True)
-    current_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, text=True).strip()
-    if current_head != code_commit:
-        raise RuntimeError(f"Commit sau khi checkout ({current_head}) không khớp với CODE_COMMIT ({code_commit}).")
-    return current_head
 
 
 COHORT_SIZE = 100
