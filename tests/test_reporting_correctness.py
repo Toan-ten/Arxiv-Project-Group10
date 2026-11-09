@@ -18,8 +18,9 @@ import shutil
 import tempfile
 import unittest
 from unittest import mock
+from unittest.mock import patch
 
-from src.storage import CorpusStorage
+from src.storage import CorpusStorage, arxiv_id_to_folder_key
 from src.reporting import (
     METRIC_DEFINITION_VERSION,
     REPORT_SCHEMA_VERSION,
@@ -720,7 +721,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
 
     def test_has_integrity_failure_semantic_boundaries(self):
         """FIND-REP-B Boundaries: Incomplete lifecycle stages are NOT integrity failures; corruptions are."""
-        from src.storage_integrity import IntegrityViolation, PaperIntegrityResult
+        from src.storage_integrity import IntegrityCode, IntegrityViolation, PaperIntegrityResult
 
         # 1. Normal unattempted stage: missing metadata or references is NOT an integrity failure
         normal_incomplete = PaperIntegrityResult(
@@ -735,6 +736,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
                     category="missing",
                     severity="error",
                     message="metadata.json not yet written",
+                    code=IntegrityCode.MISSING_METADATA,
                 )
             ],
             manifest_status="not_attempted",
@@ -754,6 +756,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
                     category="invalid",
                     severity="error",
                     message="SHA-256 checksum mismatch for v1/main.tex",
+                    code=IntegrityCode.CHECKSUM_MISMATCH,
                 )
             ],
         )
@@ -772,6 +775,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
                     category="invalid",
                     severity="error",
                     message="Kept bytes mismatch for v1",
+                    code=IntegrityCode.KEPT_BYTES_MISMATCH,
                 )
             ],
         )
@@ -790,6 +794,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
                     category="invalid",
                     severity="error",
                     message="Version directory v1 is a symbolic link",
+                    code=IntegrityCode.SYMLINK_VERSION_DIR,
                 )
             ],
         )
@@ -808,6 +813,7 @@ class TestPhase2RemediationAudit(BaseReportingTest):
                     category="invalid",
                     severity="error",
                     message="Version directory v1 exists on disk for not_found paper",
+                    code=IntegrityCode.NOT_FOUND_VERSION_DIR_EXISTS,
                 )
             ],
         )
@@ -843,6 +849,163 @@ class TestPhase2RemediationAudit(BaseReportingTest):
             from src.local_config import PROJECT_ROOT
             expected_sha = subprocess.check_output(["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"], text=True).strip()
             self.assertEqual(actual_sha, expected_sha)
+
+
+class TestReportingReconciliationFailClosed(BaseReportingTest):
+    """Test fail-closed behavior of independent reconciliation on I/O and traversal errors."""
+
+    def test_paper_dir_oserror_fails_reconciliation_even_if_counters_match(self):
+        """Filesystem or access error resolving paper directory forces is_reconciled = False."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+
+        original_resolve = Path.resolve
+
+        def broken_resolve(self_path, *args, **kwargs):
+            if self_path.name == arxiv_id_to_folder_key(self.aid1):
+                raise OSError("Simulated hardware I/O error on paper directory")
+            return original_resolve(self_path, *args, **kwargs)
+
+        try:
+            Path.resolve = broken_resolve
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            Path.resolve = original_resolve
+
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Filesystem or access error for paper directory" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected filesystem discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_manifest_read_permission_error_fails_reconciliation_even_if_counters_match(self):
+        """PermissionError reading manifest.json forces is_reconciled = False."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+
+        original_read_bytes = Path.read_bytes
+
+        def unreadable_manifest(self_path):
+            if self_path.name == "manifest.json":
+                raise PermissionError("EACCES Permission denied reading manifest.json")
+            return original_read_bytes(self_path)
+
+        try:
+            Path.read_bytes = unreadable_manifest
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            Path.read_bytes = original_read_bytes
+
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Filesystem or access error reading manifest.json" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected manifest I/O discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_corpus_root_unresolvable_fails_reconciliation(self):
+        """If corpus root itself raises OSError during resolve, reconciliation fails closed."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+
+        original_resolve = Path.resolve
+
+        def broken_root_resolve(self_path, *args, **kwargs):
+            if self_path == self.store.root:
+                raise OSError("Corpus root filesystem unresolvable")
+            return original_resolve(self_path, *args, **kwargs)
+
+        try:
+            Path.resolve = broken_root_resolve
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            Path.resolve = original_resolve
+
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Corpus root unresolvable" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected root unresolvable discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_paper_dir_runtime_error_fails_reconciliation_even_if_counters_match(self):
+        """RuntimeError during paper directory resolution forces is_reconciled = False."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+
+        original_resolve = Path.resolve
+
+        def broken_resolve_runtime(self_path, *args, **kwargs):
+            if self_path.name == arxiv_id_to_folder_key(self.aid1):
+                raise RuntimeError("Simulated symlink recursion loop")
+            return original_resolve(self_path, *args, **kwargs)
+
+        try:
+            Path.resolve = broken_resolve_runtime
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            Path.resolve = original_resolve
+
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Filesystem or access error for paper directory" in d and "RuntimeError" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected RuntimeError discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_json_decode_error_reconciles_consistency_but_fails_corpus_integrity(self):
+        """Invalid manifest JSON reconciles pass counters but explicitly reports corpus integrity failure."""
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+        p_dir.mkdir(parents=True, exist_ok=True)
+        (p_dir / "manifest.json").write_text("{malformed json: true,", encoding="utf-8")
+
+        pairs = [(self.mssv, self.aid1)]
+        stats = compute_m1_statistics(self.store, pairs)
+
+        # 1. Reconciliation consistency: both passes agree on invalid_manifests count
+        self.assertTrue(stats["is_reconciled"], "Reconciliation consistency should match between passes")
+        self.assertEqual(stats["reconciliation"]["discrepancies"], [])
+        self.assertEqual(stats["invalid_manifests"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_invalid_manifest_count"], 1)
+
+        # 2. Corpus integrity: corpus state is NOT an integrity pass
+        self.assertEqual(stats["integrity_failed_papers"], 1, "Must be accounted as integrity failure")
+        self.assertEqual(stats["m1_complete_papers"], 0, "Cannot be considered M1 complete")
+        self.assertEqual(stats["source_complete_papers"], 0, "Cannot be considered source complete")
+        self.assertIsNone(stats["m1_completion_rate"], "Rate must be None when found_papers == 0")
+
+    def test_m1_complete_candidate_with_json_decode_error_in_revalidation_fails_reconciliation(self):
+        """Pass 2B revalidation of M1-complete candidate encounters JSONDecodeError and fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+        man_path = p_dir / "manifest.json"
+
+        # Corrupt manifest between passes using hook
+        def corrupt_manifest_hook():
+            man_path.write_text("{truncated json", encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=corrupt_manifest_hook,
+        )
+
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Check 2 (raw manifest)" in d and "read/parse error" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected Pass 2B JSON parse discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
 
 
 if __name__ == "__main__":

@@ -34,6 +34,148 @@ from src.storage import (
 )
 
 
+class IntegrityCode:
+    GENERIC = "GENERIC"
+
+    # Version format & identity
+    INVALID_VERSION_NAME = "INVALID_VERSION_NAME"
+    VERSION_ID_MISMATCH = "VERSION_ID_MISMATCH"
+    UNKNOWN_VERSION_STATUS = "UNKNOWN_VERSION_STATUS"
+    SOURCE_STATUS_MISMATCH = "SOURCE_STATUS_MISMATCH"
+    MISSING_COMPLETED_AT = "MISSING_COMPLETED_AT"
+
+    # Path safety & filesystem
+    PATH_SAFETY_VIOLATION = "PATH_SAFETY_VIOLATION"
+    SYMLINK_VERSION_DIR = "SYMLINK_VERSION_DIR"
+    SYMLINK_SUBDIR = "SYMLINK_SUBDIR"
+    SYMLINK_SOURCE_FILE = "SYMLINK_SOURCE_FILE"
+    SYMLINK_PAPER_ENTRY = "SYMLINK_PAPER_ENTRY"
+    PATH_TRAVERSAL = "PATH_TRAVERSAL"
+    FILESYSTEM_TRAVERSAL_ERROR = "FILESYSTEM_TRAVERSAL_ERROR"
+    FILESYSTEM_ERROR = "FILESYSTEM_ERROR"
+
+    # Source files & directories
+    MISSING_SOURCE_DIR = "MISSING_SOURCE_DIR"
+    NON_DIR_SOURCE_PATH = "NON_DIR_SOURCE_PATH"
+    MISSING_FILES_LIST = "MISSING_FILES_LIST"
+    FORBIDDEN_SOURCE_EXTENSION = "FORBIDDEN_SOURCE_EXTENSION"
+    SOURCE_VALIDATION_FAILED = "SOURCE_VALIDATION_FAILED"
+    NO_TEX_IN_SUCCESS = "NO_TEX_IN_SUCCESS"
+    MISSING_SOURCE_FILES = "MISSING_SOURCE_FILES"
+    UNMANAGED_SOURCE_FILES = "UNMANAGED_SOURCE_FILES"
+    UNEXPECTED_VERSION_DIR = "UNEXPECTED_VERSION_DIR"
+    NON_BIB_IN_NO_TEX = "NON_BIB_IN_NO_TEX"
+
+    # Checksums & byte counts
+    FILE_CHECKSUMS_NOT_DICT = "FILE_CHECKSUMS_NOT_DICT"
+    MALFORMED_CHECKSUM = "MALFORMED_CHECKSUM"
+    MISSING_CHECKSUM_ENTRIES = "MISSING_CHECKSUM_ENTRIES"
+    UNEXPECTED_CHECKSUM_ENTRIES = "UNEXPECTED_CHECKSUM_ENTRIES"
+    CHECKSUM_MISMATCH = "CHECKSUM_MISMATCH"
+    CHECKSUM_IO_ERROR = "CHECKSUM_IO_ERROR"
+    MISSING_KEPT_BYTES = "MISSING_KEPT_BYTES"
+    INVALID_KEPT_BYTES = "INVALID_KEPT_BYTES"
+    NEGATIVE_KEPT_BYTES = "NEGATIVE_KEPT_BYTES"
+    NONZERO_KEPT_BYTES_EMPTY = "NONZERO_KEPT_BYTES_EMPTY"
+    KEPT_BYTES_MISMATCH = "KEPT_BYTES_MISMATCH"
+
+    # Checkpoints & schemas
+    INVALID_ARXIV_ID = "INVALID_ARXIV_ID"
+    MISSING_PAPER_DIR = "MISSING_PAPER_DIR"
+    MISSING_MANIFEST = "MISSING_MANIFEST"
+    MANIFEST_CORRUPTED = "MANIFEST_CORRUPTED"
+    MANIFEST_SCHEMA_VIOLATION = "MANIFEST_SCHEMA_VIOLATION"
+    MANIFEST_UNPARSEABLE = "MANIFEST_UNPARSEABLE"
+    MISSING_METADATA = "MISSING_METADATA"
+    METADATA_VALIDATION_FAILED = "METADATA_VALIDATION_FAILED"
+    METADATA_UNPARSEABLE = "METADATA_UNPARSEABLE"
+    MISSING_REFERENCES = "MISSING_REFERENCES"
+    REFERENCES_VALIDATION_FAILED = "REFERENCES_VALIDATION_FAILED"
+    REFERENCES_UNPARSEABLE = "REFERENCES_UNPARSEABLE"
+
+    # Negative discovery
+    NOT_FOUND_HAS_VERSIONS = "NOT_FOUND_HAS_VERSIONS"
+    NOT_FOUND_VERSION_DIR_EXISTS = "NOT_FOUND_VERSION_DIR_EXISTS"
+    UNMANAGED_PAPER_ENTRY = "UNMANAGED_PAPER_ENTRY"
+
+    # Cross-file consistency
+    CROSS_FILE_METADATA_STATUS_MISMATCH = "CROSS_FILE_METADATA_STATUS_MISMATCH"
+    CROSS_FILE_VERSION_STATUS_MISMATCH = "CROSS_FILE_VERSION_STATUS_MISMATCH"
+    CROSS_FILE_VERSIONS_MISMATCH = "CROSS_FILE_VERSIONS_MISMATCH"
+    CROSS_FILE_REFERENCES_STATUS_MISMATCH = "CROSS_FILE_REFERENCES_STATUS_MISMATCH"
+    REFERENCES_COVERAGE_INCOMPLETE = "REFERENCES_COVERAGE_INCOMPLETE"
+    REFERENCES_CONTINUATION_NOT_NULL = "REFERENCES_CONTINUATION_NOT_NULL"
+
+
+INTEGRITY_FAILURE_CODES = {
+    # Checksums & metrics
+    IntegrityCode.CHECKSUM_MISMATCH,
+    IntegrityCode.MALFORMED_CHECKSUM,
+    IntegrityCode.FILE_CHECKSUMS_NOT_DICT,
+    IntegrityCode.MISSING_CHECKSUM_ENTRIES,
+    IntegrityCode.UNEXPECTED_CHECKSUM_ENTRIES,
+    IntegrityCode.CHECKSUM_IO_ERROR,
+    IntegrityCode.KEPT_BYTES_MISMATCH,
+    IntegrityCode.INVALID_KEPT_BYTES,
+    IntegrityCode.NEGATIVE_KEPT_BYTES,
+    IntegrityCode.NONZERO_KEPT_BYTES_EMPTY,
+    IntegrityCode.MISSING_KEPT_BYTES,
+    IntegrityCode.MISSING_COMPLETED_AT,
+
+    # Path safety & symlinks
+    IntegrityCode.PATH_SAFETY_VIOLATION,
+    IntegrityCode.SYMLINK_VERSION_DIR,
+    IntegrityCode.SYMLINK_SUBDIR,
+    IntegrityCode.SYMLINK_SOURCE_FILE,
+    IntegrityCode.SYMLINK_PAPER_ENTRY,
+    IntegrityCode.PATH_TRAVERSAL,
+    IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
+    IntegrityCode.FILESYSTEM_ERROR,
+
+    # Source files & versions
+    IntegrityCode.INVALID_VERSION_NAME,
+    IntegrityCode.VERSION_ID_MISMATCH,
+    IntegrityCode.UNKNOWN_VERSION_STATUS,
+    IntegrityCode.SOURCE_STATUS_MISMATCH,
+    IntegrityCode.MISSING_SOURCE_DIR,
+    IntegrityCode.NON_DIR_SOURCE_PATH,
+    IntegrityCode.MISSING_FILES_LIST,
+    IntegrityCode.FORBIDDEN_SOURCE_EXTENSION,
+    IntegrityCode.SOURCE_VALIDATION_FAILED,
+    IntegrityCode.NO_TEX_IN_SUCCESS,
+    IntegrityCode.MISSING_SOURCE_FILES,
+    IntegrityCode.UNMANAGED_SOURCE_FILES,
+    IntegrityCode.UNEXPECTED_VERSION_DIR,
+    IntegrityCode.NON_BIB_IN_NO_TEX,
+
+    # Schemas & files
+    IntegrityCode.MANIFEST_CORRUPTED,
+    IntegrityCode.MANIFEST_SCHEMA_VIOLATION,
+    IntegrityCode.MANIFEST_UNPARSEABLE,
+    IntegrityCode.METADATA_VALIDATION_FAILED,
+    IntegrityCode.METADATA_UNPARSEABLE,
+    IntegrityCode.REFERENCES_VALIDATION_FAILED,
+    IntegrityCode.REFERENCES_UNPARSEABLE,
+    IntegrityCode.MISSING_MANIFEST,
+
+    # Negative discovery
+    IntegrityCode.NOT_FOUND_HAS_VERSIONS,
+    IntegrityCode.NOT_FOUND_VERSION_DIR_EXISTS,
+    IntegrityCode.UNMANAGED_PAPER_ENTRY,
+
+    # References completeness claims
+    IntegrityCode.REFERENCES_COVERAGE_INCOMPLETE,
+    IntegrityCode.REFERENCES_CONTINUATION_NOT_NULL,
+}
+
+CROSS_FILE_INCONSISTENCY_CODES = {
+    IntegrityCode.CROSS_FILE_METADATA_STATUS_MISMATCH,
+    IntegrityCode.CROSS_FILE_VERSION_STATUS_MISMATCH,
+    IntegrityCode.CROSS_FILE_VERSIONS_MISMATCH,
+    IntegrityCode.CROSS_FILE_REFERENCES_STATUS_MISMATCH,
+}
+
+
 @dataclass
 class IntegrityViolation:
     """Represents a specific contract violation or integrity error."""
@@ -45,6 +187,7 @@ class IntegrityViolation:
     expected: Any = None
     actual: Any = None
     message: str = ""
+    code: str = IntegrityCode.GENERIC
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -76,55 +219,27 @@ class PaperIntegrityResult:
         """Return True if this paper has actual corruption or integrity failure.
 
         Distinguishes genuine integrity corruption (corrupted files, hash mismatches,
-        unmanaged files, symlinks, missing declared source files) from normal pipeline
-        incomplete states (e.g. metadata or references not yet attempted/created).
+        unmanaged files, symlinks, missing declared source files, schema violations,
+        missing checksum entries, source_status mismatch, missing completed_at) from
+        normal pipeline incomplete states (e.g. metadata or references not yet
+        attempted/created, in_progress, not_attempted).
         """
         if self.status == "corrupted":
             return True
         for v in self.violations:
             if v.category in {"corrupted", "unmanaged"}:
                 return True
-            if v.category == "invalid":
-                msg = v.message.lower()
-                # 1. Checksum, SHA-256 or byte metric failures
-                if "checksum" in msg or "sha" in msg or "kept_bytes" in msg or "byte" in msg:
+            if v.code in INTEGRITY_FAILURE_CODES:
+                return True
+            if v.code in CROSS_FILE_INCONSISTENCY_CODES:
+                if (
+                    self.manifest_status in {"complete", "complete_with_no_tex"}
+                    or self.metadata_status == "complete"
+                    or self.references_status == "complete"
+                ):
                     return True
-                # 2. Path safety, symlinks, containment failures
-                if "symlink" in msg or "symbolic link" in msg or "path safety" in msg or "resolves outside" in msg:
-                    return True
-                # 3. Source file validity failures (e.g. non-tex, missing tex in success version)
-                if ".tex" in msg or ".bib" in msg or "files list" in msg:
-                    return True
-                # 4. Schema and parse validation failures on existing files
-                if "schema violation" in msg or "validation failed" in msg or "unparseable" in msg:
-                    return True
-                # 5. Negative discovery structural violations (version dir exists on disk for not_found)
-                if "not_found" in msg and "version" in msg:
-                    return True
-                # 6. Version structure errors
-                if "version name format" in msg or "version id mismatch" in msg or "unknown version status" in msg:
-                    return True
-                # 7. Cross-file consistency:
-                # Disagreement between manifest and stage files when a stage or paper is declared complete
-                if "disagrees with" in msg or "do not match" in msg:
-                    if (
-                        self.manifest_status in {"complete", "complete_with_no_tex"}
-                        or self.metadata_status == "complete"
-                        or self.references_status == "complete"
-                    ):
-                        return True
-                # 8. References completeness claims:
-                if "marked 'complete' but" in msg:
-                    return True
-            if v.category == "missing":
-                msg = v.message.lower()
-                # Missing declared source file or version directory for a success version
-                if "source directory" in msg or "expected files missing" in msg or "manifest.json" in msg:
-                    return True
-                # Missing metadata or references when manifest explicitly claimed it was complete
-                if "metadata.json" in msg and self.manifest_status in {"complete", "complete_with_no_tex"}:
-                    return True
-                if "references.json" in msg and self.manifest_status in {"complete", "complete_with_no_tex"}:
+            if v.code in {IntegrityCode.MISSING_METADATA, IntegrityCode.MISSING_REFERENCES}:
+                if self.manifest_status in {"complete", "complete_with_no_tex"}:
                     return True
         return False
 
@@ -271,6 +386,7 @@ def audit_version_integrity(
                 expected="valid version name matching v1, v2, ...",
                 actual=version_name,
                 message=f"Invalid version name format: {exc}",
+                code=IntegrityCode.INVALID_VERSION_NAME,
             )
         )
         return violations
@@ -288,6 +404,7 @@ def audit_version_integrity(
                 expected=expected_versioned_id,
                 actual=actual_versioned_id,
                 message=f"Version ID mismatch in manifest: expected {expected_versioned_id}, got {actual_versioned_id}",
+                code=IntegrityCode.VERSION_ID_MISMATCH,
             )
         )
 
@@ -302,6 +419,7 @@ def audit_version_integrity(
                 expected=list(VERSION_STATES),
                 actual=st,
                 message=f"Unknown version status '{st}'",
+                code=IntegrityCode.UNKNOWN_VERSION_STATUS,
             )
         )
         return violations
@@ -318,6 +436,7 @@ def audit_version_integrity(
                 file_path=str(version_dir),
                 version=version_name,
                 message=f"Version directory {version_name} is a symbolic link",
+                code=IntegrityCode.SYMLINK_VERSION_DIR,
             )
         )
         return violations
@@ -333,6 +452,7 @@ def audit_version_integrity(
                     file_path=str(version_dir),
                     version=version_name,
                     message=f"Version directory {version_name} resolves outside paper directory",
+                    code=IntegrityCode.PATH_TRAVERSAL,
                 )
             )
             return violations
@@ -345,6 +465,7 @@ def audit_version_integrity(
                 file_path=str(version_dir),
                 version=version_name,
                 message=f"Filesystem error resolving version directory {version_name}: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
             )
         )
         return violations
@@ -362,6 +483,7 @@ def audit_version_integrity(
                     expected="success",
                     actual=src_st,
                     message="source_status must match status 'success'",
+                    code=IntegrityCode.SOURCE_STATUS_MISMATCH,
                 )
             )
 
@@ -376,6 +498,7 @@ def audit_version_integrity(
                     expected="directory",
                     actual="missing",
                     message=f"Source directory {version_name}/ is missing for status 'success'",
+                    code=IntegrityCode.MISSING_SOURCE_DIR,
                 )
             )
             return violations
@@ -391,6 +514,7 @@ def audit_version_integrity(
                     expected="directory",
                     actual="file",
                     message=f"Source path {version_name} is not a directory",
+                    code=IntegrityCode.NON_DIR_SOURCE_PATH,
                 )
             )
             return violations
@@ -405,6 +529,7 @@ def audit_version_integrity(
                     severity="error",
                     version=version_name,
                     message="Version marked 'success' must have non-empty files list in manifest",
+                    code=IntegrityCode.MISSING_FILES_LIST,
                 )
             )
             expected_files = set()
@@ -420,6 +545,7 @@ def audit_version_integrity(
                     severity="error",
                     version=version_name,
                     message="file_checksums must be a dictionary in manifest",
+                    code=IntegrityCode.FILE_CHECKSUMS_NOT_DICT,
                 )
             )
             expected_checksums = {}
@@ -439,6 +565,7 @@ def audit_version_integrity(
                         expected="64-character lowercase hex string",
                         actual=sha,
                         message=f"Malformed SHA-256 checksum for {fname}: '{sha}'",
+                        code=IntegrityCode.MALFORMED_CHECKSUM,
                     )
                 )
 
@@ -454,6 +581,7 @@ def audit_version_integrity(
                     expected="SHA-256 checksum for every file in files list",
                     actual=sorted(missing_checksums),
                     message=f"Files missing checksum entries in manifest: {sorted(missing_checksums)}",
+                    code=IntegrityCode.MISSING_CHECKSUM_ENTRIES,
                 )
             )
 
@@ -468,6 +596,7 @@ def audit_version_integrity(
                     expected="checksums only for files in files list",
                     actual=sorted(unexpected_checksums),
                     message=f"Unexpected checksum entries in manifest not in files list: {sorted(unexpected_checksums)}",
+                    code=IntegrityCode.UNEXPECTED_CHECKSUM_ENTRIES,
                 )
             )
 
@@ -488,6 +617,7 @@ def audit_version_integrity(
                     file_path=str(getattr(err, "filename", version_dir)),
                     version=version_name,
                     message=f"Filesystem traversal error: {err}",
+                    code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                 )
             )
 
@@ -504,6 +634,7 @@ def audit_version_integrity(
                             file_path=str(root_path),
                             version=version_name,
                             message=f"Directory {root_path} is a symbolic link",
+                            code=IntegrityCode.SYMLINK_VERSION_DIR,
                         )
                     )
                     dirs.clear()
@@ -520,6 +651,7 @@ def audit_version_integrity(
                             file_path=str(root_path / d),
                             version=version_name,
                             message=f"Subdirectory {d} is a symbolic link",
+                            code=IntegrityCode.SYMLINK_SUBDIR,
                         )
                     )
                     dirs.remove(d)
@@ -537,6 +669,7 @@ def audit_version_integrity(
                                 file_path=str(fpath),
                                 version=version_name,
                                 message=f"Path {fpath} outside version dir",
+                                code=IntegrityCode.PATH_TRAVERSAL,
                             )
                         )
                         continue
@@ -551,6 +684,7 @@ def audit_version_integrity(
                                 file_path=str(fpath),
                                 version=version_name,
                                 message=f"Source file {rel_posix} is a symbolic link",
+                                code=IntegrityCode.SYMLINK_SOURCE_FILE,
                             )
                         )
                         actual_files.add(rel_posix)
@@ -567,6 +701,7 @@ def audit_version_integrity(
                                     file_path=str(fpath),
                                     version=version_name,
                                     message=f"Source file {rel_posix} resolves outside version directory",
+                                    code=IntegrityCode.PATH_TRAVERSAL,
                                 )
                             )
                             continue
@@ -579,6 +714,7 @@ def audit_version_integrity(
                                 file_path=str(fpath),
                                 version=version_name,
                                 message=f"Filesystem error resolving {rel_posix}: {exc}",
+                                code=IntegrityCode.FILESYSTEM_ERROR,
                             )
                         )
                         continue
@@ -595,6 +731,7 @@ def audit_version_integrity(
                                 expected=[".tex", ".bib"],
                                 actual=suffix,
                                 message=f"Forbidden source file extension '{suffix}' in {rel_posix}",
+                                code=IntegrityCode.FORBIDDEN_SOURCE_EXTENSION,
                             )
                         )
 
@@ -612,6 +749,7 @@ def audit_version_integrity(
                                 file_path=str(fpath),
                                 version=version_name,
                                 message=f"Source file {rel_posix} validation failed: {err_msg}",
+                                code=IntegrityCode.SOURCE_VALIDATION_FAILED,
                             )
                         )
                         actual_files.add(rel_posix)
@@ -629,6 +767,7 @@ def audit_version_integrity(
                     file_path=str(version_dir),
                     version=version_name,
                     message=f"Filesystem error traversing {version_name}/: {exc}",
+                    code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                 )
             )
 
@@ -641,6 +780,7 @@ def audit_version_integrity(
                     file_path=str(version_dir),
                     version=version_name,
                     message=f"Filesystem traversal failed to inspect full subtree of {version_name}/",
+                    code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                 )
             )
 
@@ -654,6 +794,7 @@ def audit_version_integrity(
                     expected="at least one .tex file",
                     actual="no .tex files found",
                     message="Version marked 'success' must contain at least one .tex file",
+                    code=IntegrityCode.NO_TEX_IN_SUCCESS,
                 )
             )
 
@@ -669,6 +810,7 @@ def audit_version_integrity(
                     expected=sorted(missing_files),
                     actual="not on disk",
                     message=f"Expected files missing from {version_name}/: {sorted(missing_files)}",
+                    code=IntegrityCode.MISSING_SOURCE_FILES,
                 )
             )
 
@@ -684,6 +826,7 @@ def audit_version_integrity(
                     expected="files recorded in manifest",
                     actual=sorted(extra_files),
                     message=f"Unmanaged files found in {version_name}/: {sorted(extra_files)}",
+                    code=IntegrityCode.UNMANAGED_SOURCE_FILES,
                 )
             )
 
@@ -703,6 +846,7 @@ def audit_version_integrity(
                             expected=exp_sha,
                             actual=act_sha,
                             message=f"SHA-256 checksum mismatch for {version_name}/{fname}",
+                            code=IntegrityCode.CHECKSUM_MISMATCH,
                         )
                     )
 
@@ -717,6 +861,7 @@ def audit_version_integrity(
                     expected="non-null integer",
                     actual=None,
                     message=f"Missing or null kept_bytes for terminal version {version_name}",
+                    code=IntegrityCode.MISSING_KEPT_BYTES,
                 )
             )
         else:
@@ -731,6 +876,7 @@ def audit_version_integrity(
                         expected="exact integer type (reject bool)",
                         actual=type(exp_kept).__name__,
                         message=f"kept_bytes must be exact integer (got {type(exp_kept).__name__}: {exp_kept!r})",
+                        code=IntegrityCode.INVALID_KEPT_BYTES,
                     )
                 )
             elif exp_kept < 0:
@@ -743,6 +889,7 @@ def audit_version_integrity(
                         expected="non-negative integer",
                         actual=exp_kept,
                         message=f"kept_bytes cannot be negative (got {exp_kept})",
+                        code=IntegrityCode.NEGATIVE_KEPT_BYTES,
                     )
                 )
             elif exp_kept != total_bytes:
@@ -755,6 +902,7 @@ def audit_version_integrity(
                         expected=exp_kept,
                         actual=total_bytes,
                         message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                        code=IntegrityCode.KEPT_BYTES_MISMATCH,
                     )
                 )
 
@@ -768,6 +916,7 @@ def audit_version_integrity(
                     expected="ISO-8601 timestamp",
                     actual=None,
                     message=f"Missing completed_at timestamp for terminal version {version_name}",
+                    code=IntegrityCode.MISSING_COMPLETED_AT,
                 )
             )
 
@@ -789,6 +938,7 @@ def audit_version_integrity(
                         expected="directory should not exist for empty no_tex_source",
                         actual="directory exists",
                         message=f"Unexpected version directory {version_name}/ for empty no_tex_source",
+                        code=IntegrityCode.UNEXPECTED_VERSION_DIR,
                     )
                 )
             raw_checksums = version_record.get("file_checksums")
@@ -800,6 +950,7 @@ def audit_version_integrity(
                         severity="error",
                         version=version_name,
                         message="Empty no_tex_source must not have file_checksums",
+                        code=IntegrityCode.UNEXPECTED_CHECKSUM_ENTRIES,
                     )
                 )
             # R7: Enforce exact integer 0 for empty no_tex_source
@@ -813,6 +964,7 @@ def audit_version_integrity(
                         expected=0,
                         actual=None,
                         message=f"Missing or null kept_bytes for empty no_tex_source in {version_name}",
+                        code=IntegrityCode.MISSING_KEPT_BYTES,
                     )
                 )
             else:
@@ -827,6 +979,7 @@ def audit_version_integrity(
                             expected=0,
                             actual=exp_kept,
                             message=f"Empty no_tex_source must have exact integer kept_bytes=0, got {exp_kept!r}",
+                            code=IntegrityCode.NONZERO_KEPT_BYTES_EMPTY,
                         )
                     )
         else:
@@ -840,6 +993,7 @@ def audit_version_integrity(
                         file_path=str(version_dir),
                         version=version_name,
                         message=f"Source directory {version_name}/ missing for bib-only no_tex_source",
+                        code=IntegrityCode.MISSING_SOURCE_DIR,
                     )
                 )
                 return violations
@@ -853,6 +1007,7 @@ def audit_version_integrity(
                         file_path=str(version_dir),
                         version=version_name,
                         message=f"Source path {version_name} is not a directory",
+                        code=IntegrityCode.NON_DIR_SOURCE_PATH,
                     )
                 )
                 return violations
@@ -869,6 +1024,7 @@ def audit_version_integrity(
                             expected=".bib file",
                             actual=Path(f).suffix.lower(),
                             message=f"no_tex_source cannot contain non-.bib file '{f}' in files list",
+                            code=IntegrityCode.NON_BIB_IN_NO_TEX,
                         )
                     )
 
@@ -881,6 +1037,7 @@ def audit_version_integrity(
                         severity="error",
                         version=version_name,
                         message="file_checksums must be a dictionary in manifest",
+                        code=IntegrityCode.FILE_CHECKSUMS_NOT_DICT,
                     )
                 )
                 expected_checksums = {}
@@ -900,6 +1057,7 @@ def audit_version_integrity(
                             expected="64-character lowercase hex string",
                             actual=sha,
                             message=f"Malformed SHA-256 checksum for {fname}: '{sha}'",
+                            code=IntegrityCode.MALFORMED_CHECKSUM,
                         )
                     )
 
@@ -914,6 +1072,7 @@ def audit_version_integrity(
                         expected="SHA-256 checksum for every .bib file in files list",
                         actual=sorted(missing_checksums),
                         message=f"Files missing checksum entries in manifest: {sorted(missing_checksums)}",
+                        code=IntegrityCode.MISSING_CHECKSUM_ENTRIES,
                     )
                 )
 
@@ -928,6 +1087,7 @@ def audit_version_integrity(
                         expected="checksums only for files in files list",
                         actual=sorted(unexpected_checksums),
                         message=f"Unexpected checksum entries in manifest not in files list: {sorted(unexpected_checksums)}",
+                        code=IntegrityCode.UNEXPECTED_CHECKSUM_ENTRIES,
                     )
                 )
 
@@ -947,6 +1107,7 @@ def audit_version_integrity(
                         file_path=str(getattr(err, "filename", version_dir)),
                         version=version_name,
                         message=f"Filesystem traversal error: {err}",
+                        code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                     )
                 )
 
@@ -963,6 +1124,7 @@ def audit_version_integrity(
                                 file_path=str(root_path),
                                 version=version_name,
                                 message=f"Directory {root_path} is a symbolic link",
+                                code=IntegrityCode.SYMLINK_VERSION_DIR,
                             )
                         )
                         dirs.clear()
@@ -978,6 +1140,7 @@ def audit_version_integrity(
                                 file_path=str(root_path / d),
                                 version=version_name,
                                 message=f"Subdirectory {d} is a symbolic link",
+                                code=IntegrityCode.SYMLINK_SUBDIR,
                             )
                         )
                         dirs.remove(d)
@@ -995,6 +1158,7 @@ def audit_version_integrity(
                                     file_path=str(fpath),
                                     version=version_name,
                                     message=f"Path {fpath} outside version dir",
+                                    code=IntegrityCode.PATH_TRAVERSAL,
                                 )
                             )
                             continue
@@ -1009,6 +1173,7 @@ def audit_version_integrity(
                                     file_path=str(fpath),
                                     version=version_name,
                                     message=f"Source file {rel_posix} is a symbolic link",
+                                    code=IntegrityCode.SYMLINK_SOURCE_FILE,
                                 )
                             )
                             actual_files.add(rel_posix)
@@ -1024,6 +1189,7 @@ def audit_version_integrity(
                                         file_path=str(fpath),
                                         version=version_name,
                                         message=f"Source file {rel_posix} resolves outside version directory",
+                                        code=IntegrityCode.PATH_TRAVERSAL,
                                     )
                                 )
                                 continue
@@ -1036,6 +1202,7 @@ def audit_version_integrity(
                                     file_path=str(fpath),
                                     version=version_name,
                                     message=f"Filesystem error resolving {rel_posix}: {exc}",
+                                    code=IntegrityCode.FILESYSTEM_ERROR,
                                 )
                             )
                             continue
@@ -1052,6 +1219,7 @@ def audit_version_integrity(
                                     expected=[".bib"],
                                     actual=suffix,
                                     message=f"no_tex_source cannot contain non-.bib file '{rel_posix}' (found '{suffix}')",
+                                    code=IntegrityCode.NON_BIB_IN_NO_TEX,
                                 )
                             )
 
@@ -1066,6 +1234,7 @@ def audit_version_integrity(
                                     file_path=str(fpath),
                                     version=version_name,
                                     message=f"Source file {rel_posix} validation failed: {err_msg}",
+                                    code=IntegrityCode.SOURCE_VALIDATION_FAILED,
                                 )
                             )
                             actual_files.add(rel_posix)
@@ -1083,6 +1252,7 @@ def audit_version_integrity(
                         file_path=str(version_dir),
                         version=version_name,
                         message=f"Filesystem error traversing {version_name}/: {exc}",
+                        code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                     )
                 )
 
@@ -1095,6 +1265,7 @@ def audit_version_integrity(
                         file_path=str(version_dir),
                         version=version_name,
                         message=f"Filesystem traversal failed to inspect full subtree of {version_name}/",
+                        code=IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
                     )
                 )
 
@@ -1109,6 +1280,7 @@ def audit_version_integrity(
                         expected=sorted(missing_files),
                         actual="not on disk",
                         message=f"Expected bib files missing from {version_name}/: {sorted(missing_files)}",
+                        code=IntegrityCode.MISSING_SOURCE_FILES,
                     )
                 )
 
@@ -1123,6 +1295,7 @@ def audit_version_integrity(
                         expected="files recorded in manifest",
                         actual=sorted(extra_files),
                         message=f"Unmanaged files found in {version_name}/: {sorted(extra_files)}",
+                        code=IntegrityCode.UNMANAGED_SOURCE_FILES,
                     )
                 )
 
@@ -1141,6 +1314,7 @@ def audit_version_integrity(
                                 expected=exp_sha,
                                 actual=act_sha,
                                 message=f"SHA-256 checksum mismatch for {version_name}/{fname}",
+                                code=IntegrityCode.CHECKSUM_MISMATCH,
                             )
                         )
 
@@ -1155,6 +1329,7 @@ def audit_version_integrity(
                         expected="non-null integer",
                         actual=None,
                         message=f"Missing or null kept_bytes for bib-only no_tex_source in {version_name}",
+                        code=IntegrityCode.MISSING_KEPT_BYTES,
                     )
                 )
             else:
@@ -1169,6 +1344,7 @@ def audit_version_integrity(
                             expected="exact integer type (reject bool)",
                             actual=type(exp_kept).__name__,
                             message=f"kept_bytes must be exact integer (got {type(exp_kept).__name__}: {exp_kept!r})",
+                            code=IntegrityCode.INVALID_KEPT_BYTES,
                         )
                     )
                 elif exp_kept < 0:
@@ -1181,6 +1357,7 @@ def audit_version_integrity(
                             expected="non-negative integer",
                             actual=exp_kept,
                             message=f"kept_bytes cannot be negative (got {exp_kept})",
+                            code=IntegrityCode.NEGATIVE_KEPT_BYTES,
                         )
                     )
                 elif exp_kept != total_bytes:
@@ -1193,6 +1370,7 @@ def audit_version_integrity(
                             expected=exp_kept,
                             actual=total_bytes,
                             message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                            code=IntegrityCode.KEPT_BYTES_MISMATCH,
                         )
                     )
 
@@ -1206,6 +1384,7 @@ def audit_version_integrity(
                         expected="ISO-8601 timestamp",
                         actual=None,
                         message=f"Missing completed_at timestamp for terminal version {version_name}",
+                        code=IntegrityCode.MISSING_COMPLETED_AT,
                     )
                 )
 
@@ -1222,6 +1401,7 @@ def audit_version_integrity(
                     expected="no directory for non-terminal version",
                     actual="directory exists",
                     message=f"Uncommitted or orphaned source directory {version_name}/ exists while status is '{st}'",
+                    code=IntegrityCode.UNEXPECTED_VERSION_DIR,
                 )
             )
 
@@ -1246,6 +1426,7 @@ def audit_paper_integrity(
                 category="invalid",
                 severity="error",
                 message=f"Invalid assigned arXiv ID format: {exc}",
+                code=IntegrityCode.INVALID_ARXIV_ID,
             )
         )
         return PaperIntegrityResult(
@@ -1268,6 +1449,7 @@ def audit_paper_integrity(
                 severity="error",
                 file_path=str(paper_dir),
                 message="Paper directory does not exist in corpus root",
+                code=IntegrityCode.MISSING_PAPER_DIR,
             )
         )
         return PaperIntegrityResult(
@@ -1290,6 +1472,7 @@ def audit_paper_integrity(
                 severity="error",
                 file_path=str(paper_dir),
                 message=f"Path safety violation: {exc}",
+                code=IntegrityCode.PATH_SAFETY_VIOLATION,
             )
         )
         return PaperIntegrityResult(
@@ -1319,6 +1502,7 @@ def audit_paper_integrity(
                 severity="error",
                 file_path=str(manifest_path),
                 message="manifest.json does not exist",
+                code=IntegrityCode.MISSING_MANIFEST,
             )
         )
     else:
@@ -1332,6 +1516,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(manifest_path),
                     message=f"manifest.json corrupted or invalid checkpoint: {exc}",
+                    code=IntegrityCode.MANIFEST_CORRUPTED,
                 )
             )
         except StorageError as exc:
@@ -1342,6 +1527,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(manifest_path),
                     message=f"manifest.json schema violation: {exc}",
+                    code=IntegrityCode.MANIFEST_SCHEMA_VIOLATION,
                 )
             )
         except Exception as exc:
@@ -1352,6 +1538,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(manifest_path),
                     message=f"manifest.json unparseable JSON: {exc}",
+                    code=IntegrityCode.MANIFEST_UNPARSEABLE,
                 )
             )
 
@@ -1366,6 +1553,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(metadata_path),
                     message="metadata.json does not exist",
+                    code=IntegrityCode.MISSING_METADATA,
                 )
             )
     else:
@@ -1379,6 +1567,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(metadata_path),
                     message=f"metadata.json validation failed: {exc}",
+                    code=IntegrityCode.METADATA_VALIDATION_FAILED,
                 )
             )
         except Exception as exc:
@@ -1389,6 +1578,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(metadata_path),
                     message=f"metadata.json unparseable JSON: {exc}",
+                    code=IntegrityCode.METADATA_UNPARSEABLE,
                 )
             )
 
@@ -1402,6 +1592,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(references_path),
                     message="references.json does not exist",
+                    code=IntegrityCode.MISSING_REFERENCES,
                 )
             )
     else:
@@ -1415,6 +1606,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(references_path),
                     message=f"references.json validation failed: {exc}",
+                    code=IntegrityCode.REFERENCES_VALIDATION_FAILED,
                 )
             )
         except Exception as exc:
@@ -1425,6 +1617,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(references_path),
                     message=f"references.json unparseable JSON: {exc}",
+                    code=IntegrityCode.REFERENCES_UNPARSEABLE,
                 )
             )
 
@@ -1462,6 +1655,7 @@ def audit_paper_integrity(
                     expected={},
                     actual=manifest_versions,
                     message="Paper marked not_found but manifest has versions",
+                    code=IntegrityCode.NOT_FOUND_HAS_VERSIONS,
                 )
             )
         try:
@@ -1474,6 +1668,7 @@ def audit_paper_integrity(
                             severity="error",
                             file_path=str(child),
                             message=f"Symbolic link found in not_found paper directory: {child.name}",
+                            code=IntegrityCode.SYMLINK_PAPER_ENTRY,
                         )
                     )
                 elif child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
@@ -1486,6 +1681,7 @@ def audit_paper_integrity(
                             expected="no version directories for not_found paper",
                             actual=child.name,
                             message=f"Paper marked not_found but version directory {child.name} exists on filesystem",
+                            code=IntegrityCode.NOT_FOUND_VERSION_DIR_EXISTS,
                         )
                     )
                 elif child.name not in {"manifest.json", "metadata.json", "references.json"}:
@@ -1498,6 +1694,7 @@ def audit_paper_integrity(
                             expected="only manifest.json or checkpoint files",
                             actual=child.name,
                             message=f"Unmanaged extraneous entry in not_found paper directory: {child.name}",
+                            code=IntegrityCode.UNMANAGED_PAPER_ENTRY,
                         )
                     )
         except OSError as exc:
@@ -1508,6 +1705,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(paper_dir),
                     message=f"Filesystem error inspecting not_found paper directory: {exc}",
+                    code=IntegrityCode.FILESYSTEM_ERROR,
                 )
             )
 
@@ -1521,6 +1719,7 @@ def audit_paper_integrity(
                     expected=meta_status,
                     actual=manifest.get("metadata_status"),
                     message="manifest.metadata_status disagrees with metadata.status",
+                    code=IntegrityCode.CROSS_FILE_METADATA_STATUS_MISMATCH,
                 )
             )
 
@@ -1533,6 +1732,7 @@ def audit_paper_integrity(
                     expected=metadata.get("version_status"),
                     actual=ver_status,
                     message="manifest.version_status disagrees with metadata.version_status",
+                    code=IntegrityCode.CROSS_FILE_VERSION_STATUS_MISMATCH,
                 )
             )
 
@@ -1549,6 +1749,7 @@ def audit_paper_integrity(
                     expected=sorted(metadata_versions),
                     actual=sorted(manifest_versions.keys()),
                     message="Version keys in manifest do not match version list in metadata",
+                    code=IntegrityCode.CROSS_FILE_VERSIONS_MISMATCH,
                 )
             )
 
@@ -1564,6 +1765,7 @@ def audit_paper_integrity(
                     expected=ref_status,
                     actual=manifest.get("references_status"),
                     message="manifest.references_status disagrees with references.status",
+                    code=IntegrityCode.CROSS_FILE_REFERENCES_STATUS_MISMATCH,
                 )
             )
 
@@ -1581,6 +1783,7 @@ def audit_paper_integrity(
                         expected=True,
                         actual=ref_coverage.get("complete"),
                         message="references marked 'complete' but coverage.complete is False",
+                        code=IntegrityCode.REFERENCES_COVERAGE_INCOMPLETE,
                     )
                 )
             if ref_coverage.get("continuation") is not None:
@@ -1592,6 +1795,7 @@ def audit_paper_integrity(
                         expected=None,
                         actual=ref_coverage.get("continuation"),
                         message="references marked 'complete' but continuation token is not None",
+                        code=IntegrityCode.REFERENCES_CONTINUATION_NOT_NULL,
                     )
                 )
 
@@ -1625,6 +1829,7 @@ def audit_paper_integrity(
                     severity="error",
                     file_path=str(child),
                     message=f"Symbolic link found in paper directory: {child.name}",
+                    code=IntegrityCode.SYMLINK_PAPER_ENTRY,
                 )
             )
         elif child.name not in allowed_paper_entries:
@@ -1637,6 +1842,7 @@ def audit_paper_integrity(
                     expected="managed files or terminal version folders",
                     actual=child.name,
                     message=f"Unmanaged extraneous file or folder in paper directory: {child.name}",
+                    code=IntegrityCode.UNMANAGED_PAPER_ENTRY,
                 )
             )
 

@@ -17,6 +17,9 @@ from src.export import export_papers_table, export_references_table
 from src.fast_production import FastProductionRunner
 from src.storage import CorpusStorage, arxiv_id_to_folder_key
 from src.storage_integrity import (
+    IntegrityCode,
+    IntegrityViolation,
+    PaperIntegrityResult,
     _open_and_hash_source_file,
     audit_cohort_integrity,
     audit_paper_integrity,
@@ -970,6 +973,194 @@ class TestStorageIntegrity(unittest.TestCase):
         }
         violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", valid_rec)
         self.assertEqual(len(violations), 0)
+
+
+class TestStructuredIntegrityClassification(unittest.TestCase):
+    def setUp(self):
+        self.mssv = "24120010"
+        self.arxiv_id = "2508.07872"
+
+    def test_message_tampering_does_not_affect_integrity_classification(self):
+        """Classification depends strictly on code and category, not on English substrings."""
+        sample_codes = [
+            (IntegrityCode.CHECKSUM_MISMATCH, "invalid"),
+            (IntegrityCode.MISSING_CHECKSUM_ENTRIES, "incomplete"),
+            (IntegrityCode.SOURCE_STATUS_MISMATCH, "invalid"),
+            (IntegrityCode.MISSING_COMPLETED_AT, "incomplete"),
+            (IntegrityCode.KEPT_BYTES_MISMATCH, "corrupted"),
+            (IntegrityCode.SYMLINK_VERSION_DIR, "corrupted"),
+            (IntegrityCode.PATH_TRAVERSAL, "corrupted"),
+            (IntegrityCode.NO_TEX_IN_SUCCESS, "invalid"),
+            (IntegrityCode.NOT_FOUND_VERSION_DIR_EXISTS, "invalid"),
+        ]
+
+        sample_messages = [
+            "Lỗi sai lệch mã băm SHA-256 trong tệp mã nguồn",
+            "Non-English error or localized message",
+            "Random string with no keywords 12345",
+            "",
+            "ALL_CAPS_CUSTOM_SYSTEM_MESSAGE",
+            "Arbitrary Vietnamese text: thiếu tệp tin hoặc hỏng cấu trúc",
+        ]
+
+        for code, cat in sample_codes:
+            for msg in sample_messages:
+                res = PaperIntegrityResult(
+                    arxiv_id=self.arxiv_id,
+                    mssv=self.mssv,
+                    status="invalid",
+                    is_source_complete=False,
+                    is_m1_complete=False,
+                    violations=[
+                        IntegrityViolation(
+                            arxiv_id=self.arxiv_id,
+                            category=cat,
+                            severity="error",
+                            message=msg,
+                            code=code,
+                        )
+                    ],
+                )
+                self.assertTrue(
+                    res.has_integrity_failure,
+                    f"Failed for code={code}, category={cat}, message={msg!r}",
+                )
+
+    def test_missing_checksum_entries_is_integrity_failure(self):
+        """MISSING_CHECKSUM_ENTRIES must be classified as an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="incomplete",
+                    severity="error",
+                    version="v1",
+                    message="Custom localized: thieu ma bam",
+                    code=IntegrityCode.MISSING_CHECKSUM_ENTRIES,
+                )
+            ],
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_source_status_mismatch_is_integrity_failure(self):
+        """SOURCE_STATUS_MISMATCH must be classified as an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    version="v1",
+                    message="source_status mismatch error",
+                    code=IntegrityCode.SOURCE_STATUS_MISMATCH,
+                )
+            ],
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_missing_completed_at_is_integrity_failure(self):
+        """MISSING_COMPLETED_AT on terminal version must be classified as an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="incomplete",
+                    severity="error",
+                    version="v1",
+                    message="Missing completed_at timestamp",
+                    code=IntegrityCode.MISSING_COMPLETED_AT,
+                )
+            ],
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_normal_incomplete_states_are_not_integrity_failures(self):
+        """Normal unattempted or in-progress pipeline stages are NOT integrity failures."""
+        for man_st in ["not_attempted", "in_progress", "partial"]:
+            # Missing metadata during normal incomplete pipeline
+            res_meta = PaperIntegrityResult(
+                arxiv_id=self.arxiv_id,
+                mssv=self.mssv,
+                status="incomplete",
+                is_source_complete=False,
+                is_m1_complete=False,
+                violations=[
+                    IntegrityViolation(
+                        arxiv_id=self.arxiv_id,
+                        category="missing",
+                        severity="error",
+                        file_path="metadata.json",
+                        message="metadata.json does not exist",
+                        code=IntegrityCode.MISSING_METADATA,
+                    )
+                ],
+                manifest_status=man_st,
+            )
+            self.assertFalse(
+                res_meta.has_integrity_failure,
+                f"Missing metadata should not be integrity failure when manifest is {man_st}",
+            )
+
+            # Missing references during normal incomplete pipeline
+            res_ref = PaperIntegrityResult(
+                arxiv_id=self.arxiv_id,
+                mssv=self.mssv,
+                status="incomplete",
+                is_source_complete=False,
+                is_m1_complete=False,
+                violations=[
+                    IntegrityViolation(
+                        arxiv_id=self.arxiv_id,
+                        category="missing",
+                        severity="error",
+                        file_path="references.json",
+                        message="references.json does not exist",
+                        code=IntegrityCode.MISSING_REFERENCES,
+                    )
+                ],
+                manifest_status=man_st,
+            )
+            self.assertFalse(
+                res_ref.has_integrity_failure,
+                f"Missing references should not be integrity failure when manifest is {man_st}",
+            )
+
+    def test_missing_metadata_when_manifest_claimed_complete_is_integrity_failure(self):
+        """If manifest claims complete, missing checkpoint files MUST be an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="missing",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path="metadata.json",
+                    message="metadata.json does not exist",
+                    code=IntegrityCode.MISSING_METADATA,
+                )
+            ],
+            manifest_status="complete",
+        )
+        self.assertTrue(res.has_integrity_failure)
 
 
 if __name__ == "__main__":

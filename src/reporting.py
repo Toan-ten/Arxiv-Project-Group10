@@ -24,6 +24,7 @@ from src.storage import (
     TERMINAL,
 )
 from src.storage_integrity import (
+    IntegrityCode,
     IntegrityViolation,
     audit_paper_integrity,
     audit_version_integrity,
@@ -127,8 +128,11 @@ def _perform_independent_reconciliation(
             if not paper_dir.resolve().is_relative_to(resolved_corpus_root):
                 raw_other_unresolved_count += 1
                 continue
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as exc:
             raw_other_unresolved_count += 1
+            discrepancies.append(
+                f"Filesystem or access error for paper directory {folder_key} ({arxiv_id}): {type(exc).__name__}: {exc}"
+            )
             continue
 
         manifest_path = paper_dir / "manifest.json"
@@ -141,16 +145,35 @@ def _perform_independent_reconciliation(
                 raw_missing_manifest_count += 1
                 continue
 
-            raw_bytes = manifest_path.read_bytes()
-            raw_man = json.loads(raw_bytes.decode("utf-8"))
+            try:
+                raw_bytes = manifest_path.read_bytes()
+            except (OSError, RuntimeError) as exc:
+                raw_invalid_manifest_count += 1
+                discrepancies.append(
+                    f"Filesystem or access error reading manifest.json for {arxiv_id}: {type(exc).__name__}: {exc}"
+                )
+                continue
+
+            try:
+                raw_man = json.loads(raw_bytes.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raw_invalid_manifest_count += 1
+                continue
+
             if not isinstance(raw_man, dict):
                 raw_invalid_manifest_count += 1
                 continue
-        except (OSError, RuntimeError, json.JSONDecodeError):
+        except (OSError, RuntimeError) as exc:
             raw_invalid_manifest_count += 1
+            discrepancies.append(
+                f"Filesystem error inspecting manifest for {arxiv_id}: {type(exc).__name__}: {exc}"
+            )
             continue
-        except Exception:
+        except Exception as exc:
             raw_invalid_manifest_count += 1
+            discrepancies.append(
+                f"Unexpected error inspecting manifest for {arxiv_id}: {type(exc).__name__}: {exc}"
+            )
             continue
 
         disc = raw_man.get("discovery_status")
@@ -855,7 +878,15 @@ def compute_m1_statistics(
                 try:
                     v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
                 except Exception:
-                    v_violations = [IntegrityViolation(arxiv_id=arxiv_id, category="corrupted", severity="error", message="Filesystem error auditing version")]
+                    v_violations = [
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            message="Filesystem error auditing version",
+                            code=IntegrityCode.FILESYSTEM_ERROR,
+                        )
+                    ]
                 if v_violations:
                     source_integrity_failed_versions += 1
 
