@@ -404,6 +404,24 @@ class ArxivClientTests(unittest.TestCase):
             self.query()
         self.assertFalse(client._request_lock.locked())
 
+    def test_golden_ratio_backoff_honors_zero_budget_and_retry_after(self):
+        self.outcomes = [http_error(429, "45"), FakeResponse()]
+        with client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0, wait_budget_seconds=0.0) as policy:
+            result = self.query(max_attempts=6)
+        self.assertEqual(result["status"], "rate_limited")
+        self.assertEqual(result["attempts"], 1)
+        self.assertTrue(policy.exhausted)
+        self.assertEqual(len(self.starts), 1)
+
+    def test_golden_ratio_backoff_waits_for_longer_retry_after_within_budget(self):
+        self.outcomes = [http_error(429, "25"), FakeResponse()]
+        with client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0, wait_budget_seconds=60.0) as policy:
+            result = self.query(max_attempts=3)
+        self.assertEqual(result["status"], "found")
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(self.starts, [0.0, 25.0])
+        self.assertAlmostEqual(policy.waited, 25.0, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

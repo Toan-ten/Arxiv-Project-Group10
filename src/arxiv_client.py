@@ -78,15 +78,62 @@ def retry_429_policy(wait_budget_seconds=None):
         _RETRY_429.reset(token)
 
 
-@contextmanager
-def golden_ratio_backoff_policy(base_seconds: float = 8.0, cap_seconds: float = 60.0):
-    """Opt-in Golden-Ratio / Fibonacci backoff schedule w_k = min(base * phi^(k-1), cap) + U(0, 1)."""
-    def _schedule(attempt: int) -> float:
-        return min(base_seconds * (PHI ** (attempt - 1)), cap_seconds) + random.uniform(0.0, 1.0)
+class _BackoffPolicy:
+    """Configurable Golden-Ratio backoff schedule with optional cumulative wait budget."""
 
-    token = _BACKOFF_SCHEDULE.set(_schedule)
+    def __init__(
+        self,
+        base_seconds: float = 8.0,
+        cap_seconds: float = 60.0,
+        wait_budget_seconds: float | None = None,
+    ):
+        if type(base_seconds) not in (int, float) or not math.isfinite(base_seconds) or base_seconds < MIN_INTERVAL:
+            raise ValueError("base_seconds must be a finite number >= MIN_INTERVAL")
+        if type(cap_seconds) not in (int, float) or not math.isfinite(cap_seconds) or cap_seconds < base_seconds:
+            raise ValueError("cap_seconds must be a finite number >= base_seconds")
+        if wait_budget_seconds is not None and (
+            type(wait_budget_seconds) not in (int, float)
+            or not math.isfinite(wait_budget_seconds)
+            or wait_budget_seconds < 0
+        ):
+            raise ValueError("wait_budget_seconds must be a finite nonnegative number or None")
+        self.base_seconds = float(base_seconds)
+        self.cap_seconds = float(cap_seconds)
+        self.budget = None if wait_budget_seconds is None else float(wait_budget_seconds)
+        self.waited = 0.0
+        self.exhausted = False
+
+    @property
+    def remaining(self) -> float | None:
+        return None if self.budget is None else max(0.0, self.budget - self.waited)
+
+    def __call__(self, attempt: int) -> float:
+        return min(self.base_seconds * (PHI ** (attempt - 1)), self.cap_seconds) + random.uniform(0.0, 1.0)
+
+    def next_delay(self, attempt: int, retry_after: float = 0.0) -> float | None:
+        computed = self(attempt)
+        delay = max(computed, float(retry_after or 0.0), MIN_INTERVAL)
+        if self.budget is not None and delay > (self.remaining or 0.0) + 1e-6:
+            self.exhausted = True
+            return None
+        return delay
+
+
+@contextmanager
+def golden_ratio_backoff_policy(
+    base_seconds: float = 8.0,
+    cap_seconds: float = 60.0,
+    wait_budget_seconds: float | None = None,
+):
+    """Opt-in Golden-Ratio / Fibonacci backoff schedule w_k = min(base * phi^(k-1), cap) + U(0, 1)."""
+    policy = _BackoffPolicy(
+        base_seconds=base_seconds,
+        cap_seconds=cap_seconds,
+        wait_budget_seconds=wait_budget_seconds,
+    )
+    token = _BACKOFF_SCHEDULE.set(policy)
     try:
-        yield _schedule
+        yield policy
     finally:
         _BACKOFF_SCHEDULE.reset(token)
 
@@ -257,10 +304,19 @@ def _request_arxiv(
     })
     with _request_lock:
         last_failure = None
+        backoff_policy = _BACKOFF_SCHEDULE.get()
         for attempt in range(1, (2 if policy is not None else max_attempts) + 1):
             while (delay := _next_request_at - time.monotonic()) > 0:
                 if policy is not None and attempt == 2 and delay > policy.remaining + 1e-6:
                     policy.exhausted = True
+                    return last_failure
+                if (
+                    isinstance(backoff_policy, _BackoffPolicy)
+                    and backoff_policy.budget is not None
+                    and attempt > 1
+                    and delay > (backoff_policy.remaining or 0.0) + 1e-6
+                ):
+                    backoff_policy.exhausted = True
                     return last_failure
                 started_wait = time.monotonic()
                 try:
@@ -270,14 +326,25 @@ def _request_arxiv(
                     http_metrics.waited("arxiv", elapsed)
                     if policy is not None and attempt == 2:
                         policy.waited += elapsed
+                    if isinstance(backoff_policy, _BackoffPolicy) and attempt > 1:
+                        backoff_policy.waited += elapsed
                 if policy is not None and attempt == 2 and policy.waited > policy.budget + 1e-6:
                     policy.exhausted = True
+                    return last_failure
+                if (
+                    isinstance(backoff_policy, _BackoffPolicy)
+                    and backoff_policy.budget is not None
+                    and attempt > 1
+                    and backoff_policy.waited > backoff_policy.budget + 1e-6
+                ):
+                    backoff_policy.exhausted = True
                     return last_failure
             http_status = None
             retry_after = 0.0
             retry = False
             sink = _REQUEST_LOG.get()
             event = _request_event(url, attempt) if sink is not None else None
+            event_flushed = False
             try:
                 with http_metrics.request("arxiv", attempt) as observe:
                     with _opener.open(request, timeout=timeout) as response:
@@ -287,8 +354,17 @@ def _request_arxiv(
                         retry_after = _retry_after(response.headers.get("Retry-After"))
                         if http_status != 200:
                             raise HTTPError(url, http_status, "Unexpected status", response.headers, None)
+                        _next_request_at = max(
+                            _next_request_at, time.monotonic() + max(MIN_INTERVAL, retry_after)
+                        )
+                        if sink is not None:
+                            sink(event)
+                            event_flushed = True
                         result = read_response(response)
-                    result.update(http_status=http_status, attempts=attempt)
+                    extra_attempts = result.pop("_extra_attempts", 0) if isinstance(result, dict) else 0
+                    if result.get("http_status") is None:
+                        result["http_status"] = http_status
+                    result["attempts"] = attempt + extra_attempts
                     return result
             except HTTPError as exc:
                 http_status = exc.code
@@ -311,26 +387,106 @@ def _request_arxiv(
                 )
                 if policy is not None and http_status == 429:
                     _plan_429(event, attempt, policy)
-                if sink is not None:
+                if sink is not None and not event_flushed:
                     sink(event)
 
+            last_failure = {
+                "status": status, "http_status": http_status,
+                "attempts": attempt, "error": error,
+            }
             if policy is not None:
-                last_failure = {"status": status, "http_status": http_status,
-                                "attempts": attempt, "error": error}
                 if http_status != 429 or event["retry_429_decision"] != "retry_once":
                     return last_failure
                 continue  # Same Request object; waiting stays in the shared limiter.
             if not retry or attempt == max_attempts:
-                return {
-                    "status": status, "http_status": http_status,
-                    "attempts": attempt, "error": error,
-                }
-            schedule = _BACKOFF_SCHEDULE.get()
-            if schedule is not None:
-                backoff = schedule(attempt)
+                return last_failure
+            if backoff_policy is not None:
+                if isinstance(backoff_policy, _BackoffPolicy):
+                    planned = backoff_policy.next_delay(attempt, retry_after)
+                    if planned is None:
+                        return last_failure
+                    backoff = planned
+                else:
+                    backoff = max(float(backoff_policy(attempt)), retry_after)
             else:
-                backoff = min(3.0 * 2 ** min(attempt - 1, 5), 60.0) + random.uniform(0.0, 1.0)
+                backoff = max(min(3.0 * 2 ** min(attempt - 1, 5), 60.0) + random.uniform(0.0, 1.0), retry_after)
             _next_request_at = max(_next_request_at, time.monotonic() + backoff)
+
+
+def _request_arxiv_range(
+    url: str,
+    *,
+    start_byte: int,
+    total_expected: int,
+    timeout: float,
+    user_agent: str,
+    attempt_number: int,
+    read_chunk,
+) -> dict:
+    """Execute one paced, audited HTTP Range request while _request_lock is held."""
+    global _next_request_at
+    backoff_policy = _BACKOFF_SCHEDULE.get()
+    while (delay := _next_request_at - time.monotonic()) > 0:
+        if (
+            isinstance(backoff_policy, _BackoffPolicy)
+            and backoff_policy.budget is not None
+            and delay > (backoff_policy.remaining or 0.0) + 1e-6
+        ):
+            backoff_policy.exhausted = True
+            return {"status": "rate_limited", "http_status": 429, "error": "Retry wait budget exhausted"}
+        started_wait = time.monotonic()
+        try:
+            time.sleep(delay)
+        finally:
+            elapsed = max(0.0, time.monotonic() - started_wait)
+            http_metrics.waited("arxiv", elapsed)
+            if isinstance(backoff_policy, _BackoffPolicy):
+                backoff_policy.waited += elapsed
+
+    range_req = Request(
+        url,
+        headers={
+            "User-Agent": user_agent,
+            "Accept": "application/octet-stream",
+            "Range": f"bytes={start_byte}-{total_expected - 1}",
+            "Connection": "close",
+        },
+    )
+    http_status = None
+    retry_after = 0.0
+    sink = _REQUEST_LOG.get()
+    event = _request_event(url, attempt_number) if sink is not None else None
+    try:
+        with http_metrics.request("arxiv", attempt_number) as observe:
+            with _opener.open(range_req, timeout=timeout) as response:
+                http_status = response.status
+                observe(http_status)
+                _response_event(event, http_status, response.headers)
+                retry_after = _retry_after(response.headers.get("Retry-After"))
+                if http_status != 206:
+                    raise HTTPError(url, http_status, "Unexpected range status", response.headers, None)
+                chunk_result = read_chunk(response)
+                return {"http_status": http_status, **chunk_result}
+    except HTTPError as exc:
+        http_status = exc.code
+        try:
+            _response_event(event, http_status, exc.headers)
+            retry_after = _retry_after(exc.headers.get("Retry-After")) if exc.headers else 0.0
+            status = (
+                "rate_limited" if exc.code == 429 else
+                "server_error" if 500 <= exc.code < 600 else "http_error"
+            )
+            return {"status": status, "http_status": http_status, "error": str(exc)}
+        finally:
+            exc.close()
+    except (URLError, OSError, HTTPException) as exc:
+        return {"status": _network_status(exc), "http_status": http_status, "error": str(exc)}
+    finally:
+        _next_request_at = max(
+            _next_request_at, time.monotonic() + max(MIN_INTERVAL, retry_after)
+        )
+        if sink is not None:
+            sink(event)
 
 
 def query_arxiv(
