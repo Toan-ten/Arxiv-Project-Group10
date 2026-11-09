@@ -3,7 +3,12 @@ from pathlib import Path
 import unittest
 
 from src.storage import CorpusStorage
-from src.export import export_papers_table, export_references_table, export_to_parquet
+from src.export import (
+    export_papers_table,
+    export_references_table,
+    export_to_parquet,
+    validate_exported_tables,
+)
 
 
 class TestExportTables(unittest.TestCase):
@@ -70,8 +75,8 @@ class TestExportTables(unittest.TestCase):
         )
         self.assertEqual(ref_rows[0]["ref_arxiv_id"], "2101.00001")
         self.assertEqual(ref_rows[0]["ref_s2_id"], "s2_ref_1")
-        # DATA-01 logic: ref_submission_date falls back to publication_date when submission_date is not available
-        self.assertEqual(ref_rows[0]["ref_submission_date"], "2021-01-15")
+        # Task 6.2 & 6.3: ref_submission_date preserves null when not present in source (no fabricated dates)
+        self.assertIsNone(ref_rows[0]["ref_submission_date"])
 
     def test_export_to_parquet_creates_file(self):
         records = [{"arxiv_id": "2508.07872", "title": "Test"}]
@@ -79,6 +84,35 @@ class TestExportTables(unittest.TestCase):
         export_to_parquet(records, out_path)
         # Should create out_path or out_path.with_suffix('.jsonl') if pyarrow is missing
         self.assertTrue(out_path.exists() or out_path.with_suffix(".jsonl").exists())
+
+    def test_validate_exported_tables(self):
+        """Task 6.3: validate_exported_tables verifies canonical schemas and catches defects."""
+        valid_papers = [{
+            "arxiv_id": "2508.07872",
+            "title": "Title",
+            "authors": ["Author"],
+            "submission_date": "2025-08-01",
+            "revised_dates": [],
+            "venue": "Venue",
+        }]
+        valid_refs = [{
+            "arxiv_id": "2508.07872",
+            "ref_arxiv_id": "2101.00001",
+            "ref_title": "Ref",
+            "ref_authors": ["Ref Author"],
+            "ref_submission_date": None,
+            "ref_s2_id": "s2_1",
+        }]
+        res = validate_exported_tables(valid_papers, valid_refs)
+        self.assertTrue(res["is_valid"])
+        self.assertEqual(res["total_papers"], 1)
+        self.assertEqual(res["total_references"], 1)
+
+        # Duplicate paper detection
+        dup_papers = valid_papers + valid_papers
+        res_dup = validate_exported_tables(dup_papers, valid_refs)
+        self.assertFalse(res_dup["is_valid"])
+        self.assertIn("Duplicate paper arxiv_id", res_dup["issues"][0])
 
 
 if __name__ == "__main__":

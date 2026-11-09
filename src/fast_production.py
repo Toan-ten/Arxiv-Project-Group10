@@ -195,7 +195,7 @@ class FastProductionRunner:
     ) -> Tuple[str, bool]:
         """Resolve a non-destructive batch_id and determine if it can safely resume."""
         effective_timeout = timeout if timeout is not None else self.timeout
-        base_id = f"fast-arxiv-{number:04d}"
+        base_id = f"fast-arxiv-{number:04d}" if s2_config is None else f"fast-arxiv-{number:04d}-s2"
         base_dir = self.logs_dir / base_id
         batch_json_path = base_dir / "batch.json"
         if not batch_json_path.is_file():
@@ -206,6 +206,7 @@ class FastProductionRunner:
                 saved_def.get("max_attempts") == max_attempts
                 and saved_def.get("revision_history", False) == bool(revision_history)
                 and saved_def.get("timeout") == effective_timeout
+                and saved_def.get("s2_config") == s2_config
             ):
                 return base_id, True
         except Exception:
@@ -221,6 +222,7 @@ class FastProductionRunner:
                     saved_def.get("max_attempts") == max_attempts
                     and saved_def.get("revision_history", False) == bool(revision_history)
                     and saved_def.get("timeout") == effective_timeout
+                    and saved_def.get("s2_config") == s2_config
                 ):
                     return variant_id, True
             except Exception:
@@ -234,10 +236,12 @@ class FastProductionRunner:
         resume: bool = True,
         revision_history: bool = True,
         s2_config: Optional[dict] = None,
+        max_ids: Optional[int] = None,
     ) -> dict:
         """Execute one cohort (100 papers) with SSD acceleration, backoff retries, Drive sync, and revision history."""
         self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
+        target_limit = min(max_ids, len(pairs)) if max_ids is not None else len(pairs)
         max_attempts = 6 if (self.retry_429 and self.retry_wait_budget > 0) else 1
         batch_id, can_resume = self._resolve_batch_id(
             number, max_attempts, revision_history, timeout=self.timeout, s2_config=s2_config
@@ -266,7 +270,7 @@ class FastProductionRunner:
                     pairs=pairs,
                     corpus_root=self.corpus_dir,
                     batch_id=batch_id,
-                    max_ids=len(pairs),
+                    max_ids=target_limit,
                     log_root=self.logs_dir,
                     report_root=self.reports_dir,
                     experiment_id=experiment_id,
@@ -311,6 +315,38 @@ class FastProductionRunner:
             "archive_path": str(archive_dest),
         }
         return report
+
+    def enrich_cohort_s2(
+        self,
+        number: int,
+        *,
+        s2_config: Optional[dict] = None,
+        max_ids: Optional[int] = None,
+    ) -> dict:
+        """Enrich a completed cohort with Semantic Scholar metadata and references.
+
+        Runs S2 enrichment safely without re-downloading arXiv TeX sources.
+        Synchronizes the enriched cohort back to Google Drive upon completion.
+        """
+        already_done = self.count_completed_papers(number)
+        if already_done == 0:
+            self.restore_cohort(number)
+            already_done = self.count_completed_papers(number)
+
+        effective_s2 = s2_config if s2_config is not None else {
+            "timeout": 30.0,
+            "max_attempts": 3,
+            "min_interval": 3.0,
+            "reference_limit": 100,
+        }
+        run_kwargs = {
+            "resume": True,
+            "revision_history": True,
+            "s2_config": effective_s2,
+        }
+        if max_ids is not None:
+            run_kwargs["max_ids"] = max_ids
+        return self.run_cohort(number, **run_kwargs)
 
     @staticmethod
     def _compute_sha256(file_path: Path) -> str:

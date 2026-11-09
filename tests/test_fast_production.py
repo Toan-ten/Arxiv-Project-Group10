@@ -339,6 +339,15 @@ class TestFastProduction(unittest.TestCase):
         self.assertNotEqual(batch_id_mismatch, "fast-arxiv-0001")
         self.assertFalse(can_resume_mismatch)
 
+    def test_enrich_cohort_s2_invokes_run_cohort_with_s2(self):
+        """Task 5.3: enrich_cohort_s2 configures S2 and runs safe enrichment."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        with patch.object(runner, "run_cohort", return_value={"status": "enriched"}) as mock_run:
+            custom_s2 = {"timeout": 15.0, "max_attempts": 2, "min_interval": 2.0}
+            res = runner.enrich_cohort_s2(1, s2_config=custom_s2)
+            self.assertEqual(res, {"status": "enriched"})
+            mock_run.assert_called_once_with(1, resume=True, revision_history=True, s2_config=custom_s2)
+
 
 if __name__ == "__main__":
     unittest.main()
