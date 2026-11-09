@@ -220,13 +220,25 @@ class PaperIntegrityResult:
 
         Distinguishes genuine integrity corruption (corrupted files, hash mismatches,
         unmanaged files, symlinks, missing declared source files, schema violations,
-        missing checksum entries, source_status mismatch, missing completed_at) from
-        normal pipeline incomplete states (e.g. metadata or references not yet
-        attempted/created, in_progress, not_attempted).
+        missing checksum entries, source_status mismatch, missing completed_at, filesystem errors)
+        from normal pipeline incomplete states (e.g. metadata or references not yet
+        attempted/created, in_progress, not_attempted, missing uncreated paper dir).
+
+        Fail-closed policy:
+        - Any violation with category in {'corrupted', 'unmanaged'} is an integrity failure.
+        - Any explicit integrity code in INTEGRITY_FAILURE_CODES is an integrity failure.
+        - Any cross-file inconsistency code is an integrity failure if a stage/manifest claimed complete.
+        - MISSING_METADATA and MISSING_REFERENCES are integrity failures ONLY if manifest claimed complete.
+        - MISSING_PAPER_DIR is a normal unattempted lifecycle missing state (NOT an integrity failure).
+        - Any other error violation (including GENERIC or unknown/unrecognized codes) with severity="error"
+          fails closed as an integrity failure so that unknown codes and generic violations cannot silently
+          bypass integrity classification.
         """
         if self.status == "corrupted":
             return True
         for v in self.violations:
+            if v.severity != "error":
+                continue
             if v.category in {"corrupted", "unmanaged"}:
                 return True
             if v.code in INTEGRITY_FAILURE_CODES:
@@ -238,9 +250,18 @@ class PaperIntegrityResult:
                     or self.references_status == "complete"
                 ):
                     return True
+                continue
             if v.code in {IntegrityCode.MISSING_METADATA, IntegrityCode.MISSING_REFERENCES}:
                 if self.manifest_status in {"complete", "complete_with_no_tex"}:
                     return True
+                continue
+            if v.code == IntegrityCode.MISSING_PAPER_DIR:
+                continue
+
+            # Fail-closed fallback: Any unrecognized/unknown code or GENERIC violation
+            # with severity="error" MUST be treated as an integrity failure so that it cannot
+            # silently bypass integrity checks.
+            return True
         return False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -295,6 +316,25 @@ class CohortIntegrityReport:
 
 
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _inspect_path(path: Path) -> Tuple[bool, bool, bool]:
+    """Inspect path existence and type, strictly distinguishing FileNotFoundError from access/IO errors.
+
+    Returns:
+        (is_symlink, is_dir, is_file)
+
+    Raises:
+        FileNotFoundError: If the path does not exist.
+        PermissionError: If access is denied by filesystem permissions.
+        OSError: If a low-level filesystem or I/O error occurs.
+        RuntimeError: If path resolution or recursion fails.
+    """
+    st = os.lstat(path)
+    is_link = stat.S_ISLNK(st.st_mode)
+    is_d = stat.S_ISDIR(st.st_mode)
+    is_f = stat.S_ISREG(st.st_mode)
+    return is_link, is_d, is_f
 
 
 def _open_and_hash_source_file(
@@ -1441,7 +1481,9 @@ def audit_paper_integrity(
     paper_dir = store.root / folder_key
 
     # 1. Paper directory presence
-    if not paper_dir.exists():
+    try:
+        p_link, p_dir_is_d, _ = _inspect_path(paper_dir)
+    except FileNotFoundError:
         violations.append(
             IntegrityViolation(
                 arxiv_id=arxiv_id,
@@ -1460,8 +1502,85 @@ def audit_paper_integrity(
             is_m1_complete=False,
             violations=violations,
         )
+    except PermissionError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(paper_dir),
+                message=f"Permission denied accessing paper directory: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+        return PaperIntegrityResult(
+            arxiv_id=arxiv_id,
+            mssv=mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=violations,
+        )
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(paper_dir),
+                message=f"Filesystem error inspecting paper directory: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+        return PaperIntegrityResult(
+            arxiv_id=arxiv_id,
+            mssv=mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=violations,
+        )
 
     # 2. Path safety check (symlinks, junctions)
+    if p_link:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(paper_dir),
+                message="Paper directory is a symlink",
+                code=IntegrityCode.SYMLINK_PAPER_ENTRY,
+            )
+        )
+        return PaperIntegrityResult(
+            arxiv_id=arxiv_id,
+            mssv=mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=violations,
+        )
+    if not p_dir_is_d:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(paper_dir),
+                message="Paper directory is not a directory",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+        return PaperIntegrityResult(
+            arxiv_id=arxiv_id,
+            mssv=mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=violations,
+        )
+
     try:
         store._safe(paper_dir)
     except (StorageError, IntegrityError) as exc:
@@ -1494,7 +1613,9 @@ def audit_paper_integrity(
     references_path = paper_dir / "references.json"
 
     # Validate manifest.json
-    if not manifest_path.is_file():
+    try:
+        m_link, _, m_file = _inspect_path(manifest_path)
+    except FileNotFoundError:
         violations.append(
             IntegrityViolation(
                 arxiv_id=arxiv_id,
@@ -1505,46 +1626,93 @@ def audit_paper_integrity(
                 code=IntegrityCode.MISSING_MANIFEST,
             )
         )
-    else:
-        try:
-            manifest = store.read_manifest(mssv, arxiv_id)
-        except IntegrityError as exc:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="corrupted",
-                    severity="error",
-                    file_path=str(manifest_path),
-                    message=f"manifest.json corrupted or invalid checkpoint: {exc}",
-                    code=IntegrityCode.MANIFEST_CORRUPTED,
-                )
+    except PermissionError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(manifest_path),
+                message=f"Permission denied accessing manifest.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
             )
-        except StorageError as exc:
+        )
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(manifest_path),
+                message=f"Filesystem error inspecting manifest.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+    else:
+        if m_link or not m_file:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
                     category="invalid",
                     severity="error",
                     file_path=str(manifest_path),
-                    message=f"manifest.json schema violation: {exc}",
+                    message="manifest.json is a symlink or not a regular file",
                     code=IntegrityCode.MANIFEST_SCHEMA_VIOLATION,
                 )
             )
-        except Exception as exc:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="corrupted",
-                    severity="error",
-                    file_path=str(manifest_path),
-                    message=f"manifest.json unparseable JSON: {exc}",
-                    code=IntegrityCode.MANIFEST_UNPARSEABLE,
+        else:
+            try:
+                manifest = store.read_manifest(mssv, arxiv_id)
+            except IntegrityError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(manifest_path),
+                        message=f"manifest.json corrupted or invalid checkpoint: {exc}",
+                        code=IntegrityCode.MANIFEST_CORRUPTED,
+                    )
                 )
-            )
+            except StorageError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(manifest_path),
+                        message=f"manifest.json schema violation: {exc}",
+                        code=IntegrityCode.MANIFEST_SCHEMA_VIOLATION,
+                    )
+                )
+            except PermissionError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(manifest_path),
+                        message=f"Permission denied reading manifest.json: {exc}",
+                        code=IntegrityCode.FILESYSTEM_ERROR,
+                    )
+                )
+            except Exception as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(manifest_path),
+                        message=f"manifest.json unparseable JSON: {exc}",
+                        code=IntegrityCode.MANIFEST_UNPARSEABLE,
+                    )
+                )
 
     # Validate metadata.json
     disc_status = manifest.get("discovery_status") if manifest is not None else None
-    if not metadata_path.is_file():
+    try:
+        meta_link, _, meta_file = _inspect_path(metadata_path)
+    except FileNotFoundError:
         if disc_status != "not_found":
             violations.append(
                 IntegrityViolation(
@@ -1556,34 +1724,81 @@ def audit_paper_integrity(
                     code=IntegrityCode.MISSING_METADATA,
                 )
             )
+    except PermissionError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(metadata_path),
+                message=f"Permission denied accessing metadata.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(metadata_path),
+                message=f"Filesystem error inspecting metadata.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
     else:
-        try:
-            metadata = store.read_metadata(mssv, arxiv_id)
-        except (IntegrityError, StorageError) as exc:
+        if meta_link or not meta_file:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
                     category="invalid",
                     severity="error",
                     file_path=str(metadata_path),
-                    message=f"metadata.json validation failed: {exc}",
+                    message="metadata.json is a symlink or not a regular file",
                     code=IntegrityCode.METADATA_VALIDATION_FAILED,
                 )
             )
-        except Exception as exc:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="corrupted",
-                    severity="error",
-                    file_path=str(metadata_path),
-                    message=f"metadata.json unparseable JSON: {exc}",
-                    code=IntegrityCode.METADATA_UNPARSEABLE,
+        else:
+            try:
+                metadata = store.read_metadata(mssv, arxiv_id)
+            except (IntegrityError, StorageError) as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(metadata_path),
+                        message=f"metadata.json validation failed: {exc}",
+                        code=IntegrityCode.METADATA_VALIDATION_FAILED,
+                    )
                 )
-            )
+            except PermissionError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(metadata_path),
+                        message=f"Permission denied reading metadata.json: {exc}",
+                        code=IntegrityCode.FILESYSTEM_ERROR,
+                    )
+                )
+            except Exception as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(metadata_path),
+                        message=f"metadata.json unparseable JSON: {exc}",
+                        code=IntegrityCode.METADATA_UNPARSEABLE,
+                    )
+                )
 
     # Validate references.json
-    if not references_path.is_file():
+    try:
+        ref_link, _, ref_file = _inspect_path(references_path)
+    except FileNotFoundError:
         if disc_status != "not_found":
             violations.append(
                 IntegrityViolation(
@@ -1595,31 +1810,76 @@ def audit_paper_integrity(
                     code=IntegrityCode.MISSING_REFERENCES,
                 )
             )
+    except PermissionError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(references_path),
+                message=f"Permission denied accessing references.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(references_path),
+                message=f"Filesystem error inspecting references.json: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
     else:
-        try:
-            references = store.read_references(mssv, arxiv_id)
-        except (IntegrityError, StorageError) as exc:
+        if ref_link or not ref_file:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
                     category="invalid",
                     severity="error",
                     file_path=str(references_path),
-                    message=f"references.json validation failed: {exc}",
+                    message="references.json is a symlink or not a regular file",
                     code=IntegrityCode.REFERENCES_VALIDATION_FAILED,
                 )
             )
-        except Exception as exc:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="corrupted",
-                    severity="error",
-                    file_path=str(references_path),
-                    message=f"references.json unparseable JSON: {exc}",
-                    code=IntegrityCode.REFERENCES_UNPARSEABLE,
+        else:
+            try:
+                references = store.read_references(mssv, arxiv_id)
+            except (IntegrityError, StorageError) as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(references_path),
+                        message=f"references.json validation failed: {exc}",
+                        code=IntegrityCode.REFERENCES_VALIDATION_FAILED,
+                    )
                 )
-            )
+            except PermissionError as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        file_path=str(references_path),
+                        message=f"Permission denied reading references.json: {exc}",
+                        code=IntegrityCode.FILESYSTEM_ERROR,
+                    )
+                )
+            except Exception as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(references_path),
+                        message=f"references.json unparseable JSON: {exc}",
+                        code=IntegrityCode.REFERENCES_UNPARSEABLE,
+                    )
+                )
 
     # If manifest failed to load, determine initial failure status
     if manifest is None:
@@ -1820,31 +2080,58 @@ def audit_paper_integrity(
         if v_rec.get("status") == "success" or (v_rec.get("status") == "no_tex_source" and v_rec.get("files")):
             allowed_paper_entries.add(v_name)
 
-    for child in paper_dir.iterdir():
-        if child.is_symlink() or os.path.islink(child):
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="corrupted",
-                    severity="error",
-                    file_path=str(child),
-                    message=f"Symbolic link found in paper directory: {child.name}",
-                    code=IntegrityCode.SYMLINK_PAPER_ENTRY,
+    try:
+        for child in paper_dir.iterdir():
+            try:
+                c_link, _, _ = _inspect_path(child)
+            except (OSError, RuntimeError) as exc:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(child),
+                        message=f"Filesystem error inspecting paper entry: {exc}",
+                        code=IntegrityCode.FILESYSTEM_ERROR,
+                    )
                 )
-            )
-        elif child.name not in allowed_paper_entries:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="unmanaged",
-                    severity="error",
-                    file_path=str(child),
-                    expected="managed files or terminal version folders",
-                    actual=child.name,
-                    message=f"Unmanaged extraneous file or folder in paper directory: {child.name}",
-                    code=IntegrityCode.UNMANAGED_PAPER_ENTRY,
+                continue
+
+            if c_link:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(child),
+                        message=f"Symbolic link found in paper directory: {child.name}",
+                        code=IntegrityCode.SYMLINK_PAPER_ENTRY,
+                    )
                 )
+            elif child.name not in allowed_paper_entries:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="unmanaged",
+                        severity="error",
+                        file_path=str(child),
+                        expected="managed files or terminal version folders",
+                        actual=child.name,
+                        message=f"Unmanaged extraneous file or folder in paper directory: {child.name}",
+                        code=IntegrityCode.UNMANAGED_PAPER_ENTRY,
+                    )
+                )
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="corrupted",
+                severity="error",
+                file_path=str(paper_dir),
+                message=f"Filesystem error iterating paper directory: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
             )
+        )
 
     # 8. Compute completeness flags
     is_source_complete = (

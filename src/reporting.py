@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -26,6 +27,7 @@ from src.storage import (
 from src.storage_integrity import (
     IntegrityCode,
     IntegrityViolation,
+    _inspect_path,
     audit_paper_integrity,
     audit_version_integrity,
 )
@@ -113,20 +115,37 @@ def _perform_independent_reconciliation(
 
         paper_dir = store.root / folder_key
         try:
-            if paper_dir.is_symlink() or os.path.islink(paper_dir):
-                raw_other_unresolved_count += 1
-                continue
-
-            if not paper_dir.exists():
+            try:
+                p_link, p_is_d, _ = _inspect_path(paper_dir)
+            except FileNotFoundError:
                 raw_missing_manifest_count += 1
                 continue
+            except PermissionError as exc:
+                raw_other_unresolved_count += 1
+                discrepancies.append(
+                    f"Permission error inspecting paper directory {folder_key} ({arxiv_id}): {exc}"
+                )
+                continue
+            except (OSError, RuntimeError) as exc:
+                raw_other_unresolved_count += 1
+                discrepancies.append(
+                    f"Filesystem error inspecting paper directory {folder_key} ({arxiv_id}): {exc}"
+                )
+                continue
 
-            if not paper_dir.is_dir():
+            if p_link:
+                raw_other_unresolved_count += 1
+                discrepancies.append(f"Symlink found for paper directory {folder_key} ({arxiv_id})")
+                continue
+
+            if not p_is_d:
                 raw_invalid_manifest_count += 1
+                discrepancies.append(f"Paper directory is not a directory {folder_key} ({arxiv_id})")
                 continue
 
             if not paper_dir.resolve().is_relative_to(resolved_corpus_root):
                 raw_other_unresolved_count += 1
+                discrepancies.append(f"Paper directory resolves outside corpus root {folder_key} ({arxiv_id})")
                 continue
         except (OSError, RuntimeError) as exc:
             raw_other_unresolved_count += 1
@@ -137,18 +156,38 @@ def _perform_independent_reconciliation(
 
         manifest_path = paper_dir / "manifest.json"
         try:
-            if manifest_path.is_symlink() or os.path.islink(manifest_path):
-                raw_invalid_manifest_count += 1
+            try:
+                m_link, _, m_file = _inspect_path(manifest_path)
+            except FileNotFoundError:
+                raw_missing_manifest_count += 1
+                continue
+            except PermissionError as exc:
+                raw_other_unresolved_count += 1
+                discrepancies.append(
+                    f"Permission error inspecting manifest.json for {arxiv_id}: {exc}"
+                )
+                continue
+            except (OSError, RuntimeError) as exc:
+                raw_other_unresolved_count += 1
+                discrepancies.append(
+                    f"Filesystem error inspecting manifest.json for {arxiv_id}: {exc}"
+                )
                 continue
 
-            if not manifest_path.exists() or not manifest_path.is_file():
-                raw_missing_manifest_count += 1
+            if m_link:
+                raw_invalid_manifest_count += 1
+                discrepancies.append(f"manifest.json is a symlink for {arxiv_id}")
+                continue
+
+            if not m_file:
+                raw_invalid_manifest_count += 1
+                discrepancies.append(f"manifest.json is not a regular file for {arxiv_id}")
                 continue
 
             try:
                 raw_bytes = manifest_path.read_bytes()
-            except (OSError, RuntimeError) as exc:
-                raw_invalid_manifest_count += 1
+            except (PermissionError, OSError, RuntimeError) as exc:
+                raw_other_unresolved_count += 1
                 discrepancies.append(
                     f"Filesystem or access error reading manifest.json for {arxiv_id}: {type(exc).__name__}: {exc}"
                 )
@@ -164,7 +203,7 @@ def _perform_independent_reconciliation(
                 raw_invalid_manifest_count += 1
                 continue
         except (OSError, RuntimeError) as exc:
-            raw_invalid_manifest_count += 1
+            raw_other_unresolved_count += 1
             discrepancies.append(
                 f"Filesystem error inspecting manifest for {arxiv_id}: {type(exc).__name__}: {exc}"
             )
@@ -185,10 +224,16 @@ def _perform_independent_reconciliation(
             has_unmanaged = False
             try:
                 for child in paper_dir.iterdir():
-                    if child.is_symlink() or os.path.islink(child):
+                    try:
+                        c_link, c_is_d, _ = _inspect_path(child)
+                    except (OSError, RuntimeError) as exc:
+                        has_unmanaged = True
+                        discrepancies.append(f"Filesystem error checking child in not_found {folder_key}: {exc}")
+                        break
+                    if c_link:
                         has_unmanaged = True
                         break
-                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                    if c_is_d and re.fullmatch(r"v[1-9][0-9]*", child.name):
                         has_v_dirs = True
                         break
                     if child.name not in {"manifest.json", "metadata.json", "references.json"}:
@@ -228,10 +273,15 @@ def _perform_independent_reconciliation(
             try:
                 paper_disk_v_dirs: set[str] = set()
                 for child in paper_dir.iterdir():
-                    if child.is_symlink() or os.path.islink(child):
+                    try:
+                        c_link, c_is_d, _ = _inspect_path(child)
+                    except (OSError, RuntimeError) as exc:
+                        discrepancies.append(f"Filesystem error inspecting child in found {folder_key}: {exc}")
+                        continue
+                    if c_link:
                         discrepancies.append(f"Symlink found in found paper {folder_key}: {child.name}")
                         continue
-                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                    if c_is_d and re.fullmatch(r"v[1-9][0-9]*", child.name):
                         raw_version_dirs_count += 1
                         paper_disk_v_dirs.add(child.name)
                 # Check version directory mismatch: on-disk version directories must match declared directories
@@ -296,7 +346,8 @@ def _perform_independent_reconciliation(
             try:
                 folder_key = arxiv_id_to_folder_key(arxiv_id)
                 mpath = store.root / folder_key / "manifest.json"
-                if mpath.exists():
+                m_link, _, m_file = _inspect_path(mpath)
+                if not m_link and m_file:
                     mdata = json.loads(mpath.read_text(encoding="utf-8"))
                     if mdata.get("status") in {"complete", "complete_with_no_tex"}:
                         m1_complete_candidates.append((mssv, arxiv_id))
@@ -312,15 +363,27 @@ def _perform_independent_reconciliation(
         try:
             folder_key = arxiv_id_to_folder_key(arxiv_id)
             p_dir = store.root / folder_key
-            if p_dir.is_symlink() or os.path.islink(p_dir):
+            try:
+                p_link, p_is_d, _ = _inspect_path(p_dir)
+            except FileNotFoundError:
                 candidate_failed = True
-                reasons.append("Check 1 (safe path): paper directory is a symlink")
-            elif not p_dir.exists() or not p_dir.is_dir():
+                reasons.append("Check 1 (safe path): paper directory does not exist")
+            except PermissionError as exc:
                 candidate_failed = True
-                reasons.append("Check 1 (safe path): paper directory does not exist or is not a directory")
-            elif not p_dir.resolve().is_relative_to(resolved_corpus_root):
+                reasons.append(f"Check 1 (safe path): permission denied inspecting paper directory: {exc}")
+            except (OSError, RuntimeError) as exc:
                 candidate_failed = True
-                reasons.append("Check 1 (safe path): paper directory resolves outside corpus root")
+                reasons.append(f"Check 1 (safe path): filesystem error inspecting paper directory: {exc}")
+            else:
+                if p_link:
+                    candidate_failed = True
+                    reasons.append("Check 1 (safe path): paper directory is a symlink")
+                elif not p_is_d:
+                    candidate_failed = True
+                    reasons.append("Check 1 (safe path): paper directory is not a directory")
+                elif not p_dir.resolve().is_relative_to(resolved_corpus_root):
+                    candidate_failed = True
+                    reasons.append("Check 1 (safe path): paper directory resolves outside corpus root")
         except (OSError, RuntimeError) as exc:
             candidate_failed = True
             reasons.append(f"Check 1 (safe path): filesystem error: {exc}")
@@ -333,18 +396,38 @@ def _perform_independent_reconciliation(
         manifest = None
         man_path = p_dir / "manifest.json"
         try:
-            if man_path.is_symlink() or os.path.islink(man_path):
+            try:
+                m_link, _, m_file = _inspect_path(man_path)
+            except FileNotFoundError:
                 candidate_failed = True
-                reasons.append("Check 2 (raw manifest): manifest.json is a symlink")
-            elif not man_path.exists() or not man_path.is_file():
+                reasons.append("Check 2 (raw manifest): manifest.json missing")
+            except PermissionError as exc:
                 candidate_failed = True
-                reasons.append("Check 2 (raw manifest): manifest.json missing or not a regular file")
+                reasons.append(f"Check 2 (raw manifest): permission denied inspecting manifest.json: {exc}")
+            except (OSError, RuntimeError) as exc:
+                candidate_failed = True
+                reasons.append(f"Check 2 (raw manifest): filesystem error inspecting manifest.json: {exc}")
             else:
-                raw_b = man_path.read_bytes()
-                manifest = json.loads(raw_b.decode("utf-8"))
-                if not isinstance(manifest, dict):
+                if m_link:
                     candidate_failed = True
-                    reasons.append("Check 2 (raw manifest): manifest is not a JSON object")
+                    reasons.append("Check 2 (raw manifest): manifest.json is a symlink")
+                elif not m_file:
+                    candidate_failed = True
+                    reasons.append("Check 2 (raw manifest): manifest.json is not a regular file")
+                else:
+                    try:
+                        raw_b = man_path.read_bytes()
+                    except PermissionError as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 2 (raw manifest): permission denied reading manifest.json: {exc}")
+                    except (OSError, RuntimeError) as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 2 (raw manifest): filesystem error reading manifest.json: {exc}")
+                    else:
+                        manifest = json.loads(raw_b.decode("utf-8"))
+                        if not isinstance(manifest, dict):
+                            candidate_failed = True
+                            reasons.append("Check 2 (raw manifest): manifest is not a JSON object")
         except (OSError, RuntimeError, json.JSONDecodeError) as exc:
             candidate_failed = True
             reasons.append(f"Check 2 (raw manifest): read/parse error: {exc}")
@@ -416,23 +499,43 @@ def _perform_independent_reconciliation(
         meta_path = p_dir / "metadata.json"
         meta = None
         try:
-            if meta_path.is_symlink() or os.path.islink(meta_path):
+            try:
+                meta_link, _, meta_file = _inspect_path(meta_path)
+            except FileNotFoundError:
                 candidate_failed = True
-                reasons.append("Check 8 (read/validate metadata): metadata.json is a symlink")
-            elif not meta_path.exists() or not meta_path.is_file():
+                reasons.append("Check 8 (read/validate metadata): metadata.json missing")
+            except PermissionError as exc:
                 candidate_failed = True
-                reasons.append("Check 8 (read/validate metadata): metadata.json missing or not regular file")
+                reasons.append(f"Check 8 (read/validate metadata): permission denied inspecting metadata.json: {exc}")
+            except (OSError, RuntimeError) as exc:
+                candidate_failed = True
+                reasons.append(f"Check 8 (read/validate metadata): filesystem error inspecting metadata.json: {exc}")
             else:
-                raw_meta_b = meta_path.read_bytes()
-                meta = json.loads(raw_meta_b.decode("utf-8"))
-                if not isinstance(meta, dict):
+                if meta_link:
                     candidate_failed = True
-                    reasons.append("Check 8 (read/validate metadata): metadata is not a JSON object")
-                elif meta.get("status") != "complete":
+                    reasons.append("Check 8 (read/validate metadata): metadata.json is a symlink")
+                elif not meta_file:
                     candidate_failed = True
-                    reasons.append(f"Check 8 (read/validate metadata): metadata.status is '{meta.get('status')}'")
+                    reasons.append("Check 8 (read/validate metadata): metadata.json is not regular file")
                 else:
-                    store._metadata(meta, mssv, arxiv_id)
+                    try:
+                        raw_meta_b = meta_path.read_bytes()
+                    except PermissionError as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 8 (read/validate metadata): permission denied reading metadata.json: {exc}")
+                    except (OSError, RuntimeError) as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 8 (read/validate metadata): filesystem error reading metadata.json: {exc}")
+                    else:
+                        meta = json.loads(raw_meta_b.decode("utf-8"))
+                        if not isinstance(meta, dict):
+                            candidate_failed = True
+                            reasons.append("Check 8 (read/validate metadata): metadata is not a JSON object")
+                        elif meta.get("status") != "complete":
+                            candidate_failed = True
+                            reasons.append(f"Check 8 (read/validate metadata): metadata.status is '{meta.get('status')}'")
+                        else:
+                            store._metadata(meta, mssv, arxiv_id)
         except (StorageError, IntegrityError, json.JSONDecodeError, OSError, RuntimeError) as exc:
             candidate_failed = True
             reasons.append(f"Check 8 (read/validate metadata): validation error: {exc}")
@@ -461,23 +564,43 @@ def _perform_independent_reconciliation(
         ref_path = p_dir / "references.json"
         ref = None
         try:
-            if ref_path.is_symlink() or os.path.islink(ref_path):
+            try:
+                ref_link, _, ref_file = _inspect_path(ref_path)
+            except FileNotFoundError:
                 candidate_failed = True
-                reasons.append("Check 10 (read/validate references): references.json is a symlink")
-            elif not ref_path.exists() or not ref_path.is_file():
+                reasons.append("Check 10 (read/validate references): references.json missing")
+            except PermissionError as exc:
                 candidate_failed = True
-                reasons.append("Check 10 (read/validate references): references.json missing or not regular file")
+                reasons.append(f"Check 10 (read/validate references): permission denied inspecting references.json: {exc}")
+            except (OSError, RuntimeError) as exc:
+                candidate_failed = True
+                reasons.append(f"Check 10 (read/validate references): filesystem error inspecting references.json: {exc}")
             else:
-                raw_ref_b = ref_path.read_bytes()
-                ref = json.loads(raw_ref_b.decode("utf-8"))
-                if not isinstance(ref, dict):
+                if ref_link:
                     candidate_failed = True
-                    reasons.append("Check 10 (read/validate references): references is not a JSON object")
-                elif ref.get("status") != "complete":
+                    reasons.append("Check 10 (read/validate references): references.json is a symlink")
+                elif not ref_file:
                     candidate_failed = True
-                    reasons.append(f"Check 10 (read/validate references): references.status is '{ref.get('status')}'")
+                    reasons.append("Check 10 (read/validate references): references.json is not regular file")
                 else:
-                    store._references(ref, mssv, arxiv_id)
+                    try:
+                        raw_ref_b = ref_path.read_bytes()
+                    except PermissionError as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 10 (read/validate references): permission denied reading references.json: {exc}")
+                    except (OSError, RuntimeError) as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 10 (read/validate references): filesystem error reading references.json: {exc}")
+                    else:
+                        ref = json.loads(raw_ref_b.decode("utf-8"))
+                        if not isinstance(ref, dict):
+                            candidate_failed = True
+                            reasons.append("Check 10 (read/validate references): references is not a JSON object")
+                        elif ref.get("status") != "complete":
+                            candidate_failed = True
+                            reasons.append(f"Check 10 (read/validate references): references.status is '{ref.get('status')}'")
+                        else:
+                            store._references(ref, mssv, arxiv_id)
         except (StorageError, IntegrityError, json.JSONDecodeError, OSError, RuntimeError) as exc:
             candidate_failed = True
             reasons.append(f"Check 10 (read/validate references): validation error: {exc}")
@@ -511,17 +634,25 @@ def _perform_independent_reconciliation(
                         allowed_entries.add(v_name)
         try:
             for child in p_dir.iterdir():
-                if child.is_symlink() or os.path.islink(child):
+                try:
+                    c_link, c_is_d, _ = _inspect_path(child)
+                except (OSError, RuntimeError) as exc:
+                    candidate_failed = True
+                    reasons.append(f"Check 12 (unmanaged/symlink): filesystem error inspecting child {child.name}: {exc}")
+                    continue
+
+                if c_link:
                     candidate_failed = True
                     reasons.append(f"Check 12 (unmanaged/symlink): symlink found: {child.name}")
                 elif child.name not in allowed_entries:
                     candidate_failed = True
                     reasons.append(f"Check 12 (unmanaged/symlink): unmanaged file or folder: {child.name}")
-                elif child.is_dir() and not child.resolve().is_relative_to(p_dir.resolve()):
+                elif c_is_d and not child.resolve().is_relative_to(p_dir.resolve()):
                     candidate_failed = True
                     reasons.append(f"Check 12 (unmanaged/symlink): path traversal detected: {child.name}")
         except (OSError, RuntimeError) as exc:
             candidate_failed = True
+            reasons.append(f"Check 12 (unmanaged/symlink): filesystem error: {exc}")
             reasons.append(f"Check 12 (unmanaged/symlink): filesystem error: {exc}")
 
         if candidate_failed:
@@ -680,27 +811,61 @@ def compute_m1_statistics(
         paper_dir = store.root / folder_key
 
         # Check paper directory presence and path safety
-        if not paper_dir.exists():
+        try:
+            p_link, p_dir_is_d, _ = _inspect_path(paper_dir)
+        except FileNotFoundError:
             missing_manifests += 1
             continue
-
-        if paper_dir.is_symlink() or os.path.islink(paper_dir):
+        except PermissionError:
+            other_unresolved += 1
+            integrity_failed_papers += 1
+            continue
+        except (OSError, RuntimeError):
             other_unresolved += 1
             integrity_failed_papers += 1
             continue
 
-        manifest_path = paper_dir / "manifest.json"
-        if not manifest_path.exists():
-            missing_manifests += 1
+        if p_link:
+            other_unresolved += 1
+            integrity_failed_papers += 1
             continue
 
-        if manifest_path.is_symlink() or os.path.islink(manifest_path):
+        if not p_dir_is_d:
+            invalid_manifests += 1
+            integrity_failed_papers += 1
+            continue
+
+        manifest_path = paper_dir / "manifest.json"
+        try:
+            m_link, _, m_file = _inspect_path(manifest_path)
+        except FileNotFoundError:
+            missing_manifests += 1
+            continue
+        except PermissionError:
+            other_unresolved += 1
+            integrity_failed_papers += 1
+            continue
+        except (OSError, RuntimeError):
+            other_unresolved += 1
+            integrity_failed_papers += 1
+            continue
+
+        if m_link:
+            invalid_manifests += 1
+            integrity_failed_papers += 1
+            continue
+
+        if not m_file:
             invalid_manifests += 1
             integrity_failed_papers += 1
             continue
 
         try:
             manifest = store.read_manifest(mssv, arxiv_id)
+        except PermissionError:
+            other_unresolved += 1
+            integrity_failed_papers += 1
+            continue
         except (StorageError, IntegrityError, json.JSONDecodeError, OSError, Exception):
             invalid_manifests += 1
             integrity_failed_papers += 1
@@ -722,16 +887,21 @@ def compute_m1_statistics(
             has_unmanaged_entries = False
             try:
                 for child in paper_dir.iterdir():
-                    if child.is_symlink() or os.path.islink(child):
+                    try:
+                        c_link, c_is_d, _ = _inspect_path(child)
+                    except (OSError, RuntimeError):
                         has_unmanaged_entries = True
                         break
-                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                    if c_link:
+                        has_unmanaged_entries = True
+                        break
+                    if c_is_d and re.fullmatch(r"v[1-9][0-9]*", child.name):
                         has_version_dirs = True
                         break
                     if child.name not in {"manifest.json", "metadata.json", "references.json"}:
                         has_unmanaged_entries = True
                         break
-            except OSError:
+            except (OSError, RuntimeError):
                 has_unmanaged_entries = True
 
             if is_valid_manifest_not_found and not has_version_dirs and not has_unmanaged_entries:
@@ -771,7 +941,13 @@ def compute_m1_statistics(
             # Verify metadata file independently
             is_meta_complete = False
             meta_path = paper_dir / "metadata.json"
-            if meta_path.exists() and not meta_path.is_symlink() and not os.path.islink(meta_path):
+            try:
+                meta_link, _, meta_file = _inspect_path(meta_path)
+                has_meta_file = not meta_link and meta_file
+            except (OSError, RuntimeError):
+                has_meta_file = False
+
+            if has_meta_file:
                 try:
                     meta = store.read_metadata(mssv, arxiv_id)
                     if (
@@ -795,7 +971,13 @@ def compute_m1_statistics(
             # --- C. References Completion Check ---
             is_ref_complete = False
             ref_path = paper_dir / "references.json"
-            if ref_path.exists() and not ref_path.is_symlink() and not os.path.islink(ref_path):
+            try:
+                ref_link, _, ref_file = _inspect_path(ref_path)
+                has_ref_file = not ref_link and ref_file
+            except (OSError, RuntimeError):
+                has_ref_file = False
+
+            if has_ref_file:
                 try:
                     ref_data = store.read_references(mssv, arxiv_id)
                     ref_st = ref_data.get("status")

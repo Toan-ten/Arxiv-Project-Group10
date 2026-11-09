@@ -1162,6 +1162,96 @@ class TestStructuredIntegrityClassification(unittest.TestCase):
         )
         self.assertTrue(res.has_integrity_failure)
 
+    def test_generic_code_fails_closed_as_integrity_failure(self):
+        """Default GENERIC code with error severity must fail closed as an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    message="Unspecified or legacy violation without explicit code",
+                    code=IntegrityCode.GENERIC,
+                )
+            ],
+        )
+        self.assertTrue(
+            res.has_integrity_failure,
+            "GENERIC error violation must not silently bypass integrity classification",
+        )
+
+    def test_unknown_integrity_code_fails_closed_as_integrity_failure(self):
+        """Unrecognized/unknown code with error severity must fail closed as an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    message="New experimental violation code",
+                    code="FUTURE_UNKNOWN_FAILURE_CODE",
+                )
+            ],
+        )
+        self.assertTrue(
+            res.has_integrity_failure,
+            "Unknown code must fail closed and cannot bypass integrity classification",
+        )
+
+    def test_unknown_integrity_code_with_incomplete_category_fails_closed(self):
+        """Unrecognized code fails closed even if category is labeled incomplete."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="incomplete",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="incomplete",
+                    severity="error",
+                    message="Unrecognized incomplete code",
+                    code="UNRECOGNIZED_INCOMPLETE_CODE",
+                )
+            ],
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_missing_paper_dir_remains_non_integrity_failure(self):
+        """MISSING_PAPER_DIR represents a normal unattempted paper and is not an integrity failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="missing",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path="/corpus/24120010/2508.07872",
+                    message="Paper directory does not exist in corpus root",
+                    code=IntegrityCode.MISSING_PAPER_DIR,
+                )
+            ],
+        )
+        self.assertFalse(
+            res.has_integrity_failure,
+            "Missing uncreated paper directory must not be treated as an integrity failure",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

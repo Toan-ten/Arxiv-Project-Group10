@@ -1007,6 +1007,137 @@ class TestReportingReconciliationFailClosed(BaseReportingTest):
         )
         self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
 
+    def test_permission_error_during_manifest_stat_inspection(self):
+        """1. PermissionError during manifest stat inspection must not be classified as missing."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+        original_lstat = os.lstat
+
+        def broken_lstat(path, *args, **kwargs):
+            p = Path(path)
+            if p.name == "manifest.json":
+                raise PermissionError(f"[Errno 13] Permission denied: {path}")
+            return original_lstat(path, *args, **kwargs)
+
+        try:
+            os.lstat = broken_lstat
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            os.lstat = original_lstat
+
+        # Must NOT be classified as missing manifest
+        self.assertEqual(stats["missing_manifests"], 0)
+        self.assertEqual(stats["other_unresolved"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_other_unresolved_count"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Permission error inspecting manifest.json" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected permission error discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_generic_oserror_during_manifest_stat_inspection(self):
+        """2. Generic OSError during manifest stat inspection must not be classified as missing."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+        original_lstat = os.lstat
+
+        def broken_lstat(path, *args, **kwargs):
+            p = Path(path)
+            if p.name == "manifest.json":
+                raise OSError(f"[Errno 5] Input/output error inspecting: {path}")
+            return original_lstat(path, *args, **kwargs)
+
+        try:
+            os.lstat = broken_lstat
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            os.lstat = original_lstat
+
+        self.assertEqual(stats["missing_manifests"], 0)
+        self.assertEqual(stats["other_unresolved"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_other_unresolved_count"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("Filesystem error inspecting manifest.json" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected generic OSError discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_filesystem_inspection_failure_on_paper_directory(self):
+        """3. Filesystem inspection failure on paper directory must not be classified as missing."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+        folder_key = arxiv_id_to_folder_key(self.aid1)
+        original_lstat = os.lstat
+
+        def broken_lstat(path, *args, **kwargs):
+            p = Path(path)
+            if p.name == folder_key:
+                raise PermissionError(f"[Errno 13] Permission denied inspecting dir: {path}")
+            return original_lstat(path, *args, **kwargs)
+
+        try:
+            os.lstat = broken_lstat
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            os.lstat = original_lstat
+
+        self.assertEqual(stats["missing_manifests"], 0)
+        self.assertEqual(stats["other_unresolved"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_other_unresolved_count"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(
+            any("inspecting paper directory" in d for d in stats["reconciliation"]["discrepancies"]),
+            f"Expected paper directory discrepancy, got: {stats['reconciliation']['discrepancies']}",
+        )
+
+    def test_genuine_file_not_found_remains_classified_as_missing(self):
+        """4. Genuine FileNotFoundError remains classified as missing, not as arbitrary filesystem failure."""
+        pairs = [(self.mssv, self.aid1)]
+        stats = compute_m1_statistics(self.store, pairs)
+
+        self.assertEqual(stats["missing_manifests"], 1)
+        self.assertEqual(stats["other_unresolved"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_other_unresolved_count"], 0)
+        self.assertTrue(stats["is_reconciled"])
+        self.assertEqual(stats["reconciliation"]["discrepancies"], [])
+
+    def test_filesystem_error_cannot_produce_false_reconciliation_as_missing(self):
+        """5. Filesystem errors cannot result in is_reconciled=True merely because both passes could count as missing."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        pairs = [(self.mssv, self.aid1)]
+        original_lstat = os.lstat
+
+        def broken_lstat(path, *args, **kwargs):
+            p = Path(path)
+            if p.name == "manifest.json":
+                raise PermissionError("EACCES Access denied to manifest.json")
+            return original_lstat(path, *args, **kwargs)
+
+        try:
+            os.lstat = broken_lstat
+            stats = compute_m1_statistics(self.store, pairs)
+        finally:
+            os.lstat = original_lstat
+
+        # Crucial invariant: never silently treat inspection error as missing
+        self.assertNotEqual(stats["missing_manifests"], 1, "Must NOT count inaccessible manifest as missing")
+        self.assertEqual(stats["missing_manifests"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 0)
+        self.assertFalse(stats["is_reconciled"], "Must never produce false successful reconciliation")
+        self.assertGreater(len(stats["reconciliation"]["discrepancies"]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
