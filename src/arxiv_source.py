@@ -249,6 +249,42 @@ def download_source(
                 try:
                     with target:
                         size = _copy_limited(response, target, MAX_DOWNLOAD_BYTES)
+                    if (
+                        length is not None
+                        and 0 < size < int(length)
+                        and response.headers.get("Accept-Ranges", "").strip().lower() == "bytes"
+                    ):
+                        total_expected = int(length)
+                        response.close()
+                        range_failures = 0
+                        with payload.open("ab", buffering=0) as append_target:
+                            while size < total_expected and range_failures < 5:
+                                prev_size = size
+                                arxiv_client.time.sleep(arxiv_client.MIN_INTERVAL)
+                                range_req = arxiv_client.Request(
+                                    SOURCE_URL + quote(versioned_id, safe="/"),
+                                    headers={
+                                        "User-Agent": user_agent,
+                                        "Accept": "application/octet-stream",
+                                        "Range": f"bytes={size}-",
+                                        "Connection": "close",
+                                    },
+                                )
+                                try:
+                                    with arxiv_client._opener.open(range_req, timeout=timeout) as range_resp:
+                                        if range_resp.status != 206:
+                                            range_failures += 1
+                                            continue
+                                        _copy_limited(
+                                            range_resp, append_target, MAX_DOWNLOAD_BYTES - size
+                                        )
+                                except (arxiv_client.HTTPError, arxiv_client.URLError, OSError, arxiv_client.HTTPException) as exc:
+                                    if hasattr(exc, "close"):
+                                        exc.close()
+                                    range_failures += 1
+                                size = append_target.tell()
+                                if size > prev_size:
+                                    range_failures = 0
                 except SourceError as exc:
                     return {**details, "status": exc.status, "error": str(exc)}
                 if length is not None and size < int(length):

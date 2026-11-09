@@ -490,6 +490,19 @@ class SourceDownloadTests(unittest.TestCase):
         self.assertEqual(result["http_status"], 200)
         self.assertFalse(self.destination.exists())
 
+    def test_range_continuation_completes_truncated_large_archive(self):
+        full_body = tar_bytes([("main.tex", TEX), ("refs.bib", BIB)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part2 = FakeResponse(full_body[split_at:], content_type="application/gzip", length=len(full_body) - split_at)
+        part2.status = 206
+        self.outcomes = [part1, part2]
+        result = self.download(max_attempts=1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["downloaded_bytes"], len(full_body))
+        self.assertEqual((self.destination / "main.tex").read_bytes(), TEX)
+
     def test_failed_retry_does_not_reuse_headers_from_earlier_response(self):
         self.outcomes = [FakeResponse(TEX, length=len(TEX) + 10), self.error(503)]
         result = self.download(max_attempts=2)
