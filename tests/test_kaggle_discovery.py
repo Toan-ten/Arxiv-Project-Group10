@@ -131,6 +131,82 @@ class TestKaggleDiscovery(unittest.TestCase):
         self.assertEqual(meta2["versions"][1]["date"], "2025-08-03")
         self.assertEqual(meta2["versions"][1]["date_status"], "verified")
 
+    def test_build_discovery_snapshot_refuses_missing_or_non_contiguous_versions(self):
+        for bad_versions in ([], None, [{"version": "v2", "created": "2025-08-01"}],
+                             [{"version": "v1", "created": "2025-08-01"}, {"version": "v3", "created": "2025-08-02"}]):
+            with self.subTest(versions=bad_versions):
+                rec = {"id": "2508.07872", "title": "Paper", "authors": "Alice", "versions": bad_versions}
+                self.assertIsNone(build_discovery_snapshot("24120010", "2508.07872", rec))
+
+    def test_build_discovery_snapshot_never_shifts_revised_dates_or_fabricates_fields(self):
+        # Missing/invalid v2 date in a 3-version paper must set revised_dates=None (not shift v3 onto v2)
+        rec = {
+            "id": "2508.07872",
+            "title": "   ",
+            "authors": "",
+            "versions": [
+                {"version": "v1", "created": "2025-08-01"},
+                {"version": "v2", "created": "bad-date"},
+                {"version": "v3", "created": "2025-08-05"},
+            ],
+        }
+        snapshot = build_discovery_snapshot("24120010", "2508.07872", rec)
+        self.assertIsNotNone(snapshot)
+        self.assertIsNone(snapshot["revised_dates"])
+        self.assertIsNone(snapshot["title"])
+        self.assertEqual(snapshot["authors"], [])
+        self.assertIn("title", snapshot["missing_fields"])
+        self.assertIn("authors", snapshot["missing_fields"])
+        self.store.record_discovery(snapshot)
+        meta = self.store.read_metadata("24120010", "2508.07872")
+        self.assertIsNone(meta["revised_dates"])
+        self.assertEqual(meta["versions"][1]["date_status"], "unknown")
+        self.assertEqual(meta["versions"][2]["date_status"], "unknown")
+
+    def test_ingest_kaggle_snapshot_separates_not_found_and_preserves_target_count(self):
+        # Pre-populate one not_found paper and one found-but-unresolved paper
+        self.store.record_discovery({
+            "mssv": "24120010",
+            "arxiv_id": "2508.07873",
+            "status": "not_found",
+        })
+        self.store.record_discovery({
+            "mssv": "24120010",
+            "arxiv_id": "2508.07872",
+            "status": "found",
+            "version_status": "resolved",
+            "version_ids": ["2508.07872v1", "2508.07872v2"],
+            "latest_version_id": "2508.07872v2",
+            "title": "Pre-existing unresolved revision dates",
+            "authors": ["Alice"],
+            "published": "2025-08-01",
+            "updated": "2025-08-03",
+            "missing_fields": [],
+        })
+        snapshot_file = self.root / "arxiv-metadata-sample2.json"
+        snapshot_file.write_text(
+            json.dumps({
+                "id": "2508.07872",
+                "title": "Pre-existing unresolved revision dates",
+                "authors": "Alice",
+                "versions": [
+                    {"version": "v1", "created": "2025-08-01"},
+                    {"version": "v2", "created": "2025-08-03"},
+                ],
+            }) + "\n",
+            encoding="utf-8",
+        )
+        pairs = [("24120010", "2508.07873"), ("24120010", "2508.07872"), ("24120010", "2508.07874")]
+        summary = ingest_kaggle_snapshot(snapshot_file, self.store, pairs)
+        self.assertEqual(summary["target_papers"], 3)
+        self.assertEqual(summary["found_papers"], 1)
+        self.assertEqual(summary["not_found_papers"], 1)
+        self.assertEqual(summary["missing_papers"], ["2508.07874"])
+        meta = self.store.read_metadata("24120010", "2508.07872")
+        self.assertEqual(meta["revised_dates"], ["2025-08-03"])
+        self.assertEqual(meta["versions"][1]["date"], "2025-08-03")
+        self.assertEqual(meta["versions"][1]["date_status"], "verified")
+
 
 if __name__ == "__main__":
     unittest.main()

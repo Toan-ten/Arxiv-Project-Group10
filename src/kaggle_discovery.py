@@ -39,43 +39,54 @@ def _parse_iso_date(date_str: Optional[str]) -> Optional[str]:
 
 
 def _clean_authors(authors_val) -> List[str]:
-    """Convert raw authors text or list into a list of clean author strings."""
+    """Convert raw authors text or list into a list of clean author strings without fabricating placeholders."""
     if isinstance(authors_val, list):
-        cleaned = [str(a).strip() for a in authors_val if str(a).strip()]
-        return cleaned if cleaned else ["Unknown"]
+        return [str(a).strip() for a in authors_val if str(a).strip()]
     if isinstance(authors_val, str):
-        parts = [p.strip() for p in re.split(r",|\band\b", authors_val) if p.strip()]
-        return parts if parts else ["Unknown"]
-    return ["Unknown"]
+        return [p.strip() for p in re.split(r",|\band\b", authors_val) if p.strip()]
+    return []
 
 
-def build_discovery_snapshot(mssv: str, arxiv_id: str, kaggle_record: dict) -> dict:
-    """Build a valid CorpusStorage discovery snapshot from a Kaggle JSON record."""
-    versions_raw = kaggle_record.get("versions", [])
-    revised_dates: List[str] = []
-    if isinstance(versions_raw, list) and versions_raw:
-        num_versions = len(versions_raw)
-        v1_created = versions_raw[0].get("created") if isinstance(versions_raw[0], dict) else None
-        latest_created = versions_raw[-1].get("created") if isinstance(versions_raw[-1], dict) else None
-        for v in versions_raw[1:]:
-            if isinstance(v, dict) and v.get("created"):
-                iso_d = _parse_iso_date(v["created"])
-                if iso_d:
-                    revised_dates.append(iso_d)
-    else:
-        num_versions = 1
-        v1_created = kaggle_record.get("update_date")
-        latest_created = None
+def build_discovery_snapshot(mssv: str, arxiv_id: str, kaggle_record: dict) -> Optional[dict]:
+    """Build a valid CorpusStorage discovery snapshot from a Kaggle JSON record.
+
+    Returns None when version list is missing, empty, or not contiguous from v1,
+    so the pipeline falls back to live arXiv API discovery instead of fabricating v1.
+    """
+    versions_raw = kaggle_record.get("versions")
+    if not isinstance(versions_raw, list) or not versions_raw:
+        return None
+    if not all(isinstance(v, dict) for v in versions_raw):
+        return None
+    expected_names = [f"v{n}" for n in range(1, len(versions_raw) + 1)]
+    actual_names = [str(v.get("version", "")).strip() for v in versions_raw]
+    if actual_names != expected_names:
+        return None
+
+    num_versions = len(versions_raw)
+    v1_created = versions_raw[0].get("created")
+    latest_created = versions_raw[-1].get("created")
+    revised_dates: Optional[List[str]] = []
+    for v in versions_raw[1:]:
+        iso_d = _parse_iso_date(v.get("created"))
+        if not iso_d:
+            revised_dates = None
+            break
+        revised_dates.append(iso_d)
 
     version_ids = [f"{arxiv_id}v{n}" for n in range(1, num_versions + 1)]
-    published = _parse_iso_date(v1_created) or _parse_iso_date(kaggle_record.get("update_date"))
-    updated = _parse_iso_date(latest_created) if num_versions > 1 else None
+    published = _parse_iso_date(v1_created)
+    updated = _parse_iso_date(latest_created) if num_versions > 1 else published
 
-    title = str(kaggle_record.get("title", "")).strip().replace("\n", " ")
-    if not title:
-        title = f"arXiv:{arxiv_id}"
+    raw_title = kaggle_record.get("title")
+    title_clean = " ".join(str(raw_title).split()) if isinstance(raw_title, str) else ""
+    title: Optional[str] = title_clean if title_clean else None
 
     authors = _clean_authors(kaggle_record.get("authors"))
+    missing_fields: List[str] = []
+    for field_name, val in (("title", title), ("authors", authors), ("published", published), ("updated", updated)):
+        if not val:
+            missing_fields.append(field_name)
 
     return {
         "mssv": str(mssv),
@@ -89,8 +100,27 @@ def build_discovery_snapshot(mssv: str, arxiv_id: str, kaggle_record: dict) -> d
         "published": published if published and _valid_date(published) else None,
         "updated": updated if updated and _valid_date(updated) else None,
         "revised_dates": revised_dates,
-        "missing_fields": [],
+        "missing_fields": missing_fields,
     }
+
+
+def _is_fully_resolved_found(store: CorpusStorage, mssv: str, arxiv_id: str) -> Tuple[bool, int]:
+    """Check whether a paper with discovery_status=='found' already has complete version & date coverage."""
+    try:
+        meta = store.read_metadata(mssv, arxiv_id)
+        versions = meta.get("versions") or []
+        if (
+            meta.get("version_status") == "resolved"
+            and bool(versions)
+            and meta.get("submission_date") is not None
+            and meta.get("revised_dates") is not None
+            and len(meta["revised_dates"]) == len(versions) - 1
+            and all(v.get("date_status") == "verified" and _valid_date(v.get("date")) for v in versions)
+        ):
+            return True, len(versions)
+    except Exception:
+        pass
+    return False, 0
 
 
 def ingest_kaggle_snapshot(
@@ -102,36 +132,47 @@ def ingest_kaggle_snapshot(
 
     Returns summary metrics:
       - target_papers: total pairs requested
-      - found_papers: papers matched in Kaggle snapshot and recorded
-      - found_versions: total versions discovered
-      - missing_papers: list of arxiv_ids not found in snapshot
+      - found_papers: papers matched (in cache or Kaggle snapshot) with status=='found'
+      - not_found_papers: papers already recorded as 'not_found'
+      - found_versions: total versions discovered across found_papers
+      - missing_papers: list of arxiv_ids still needing live arXiv API discovery
     """
     snapshot_file = Path(snapshot_path)
     if not snapshot_file.exists():
         raise FileNotFoundError(f"Kaggle snapshot file not found: {snapshot_file}")
 
     from src.storage import arxiv_id_to_folder_key
+    pairs_list = [(str(m), str(a)) for m, a in pairs]
     target_map: Dict[str, str] = {}
-    already_cached = 0
-    for mssv, arxiv_id in pairs:
+    found_count = 0
+    not_found_count = 0
+    total_versions = 0
+
+    for mssv, arxiv_id in pairs_list:
         try:
-            manifest_file = store.root / arxiv_id_to_folder_key(str(arxiv_id)) / "manifest.json"
+            manifest_file = store.root / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
             if manifest_file.exists():
                 m = json.loads(manifest_file.read_text(encoding="utf-8"))
-                if m.get("discovery_status") in ("found", "not_found"):
-                    already_cached += 1
+                disc_status = m.get("discovery_status")
+                if disc_status == "not_found":
+                    not_found_count += 1
                     continue
+                if disc_status == "found":
+                    resolved, v_count = _is_fully_resolved_found(store, mssv, arxiv_id)
+                    if resolved:
+                        found_count += 1
+                        total_versions += v_count
+                        continue
         except Exception:
             pass
-        target_map[str(arxiv_id)] = str(mssv)
+        target_map[arxiv_id] = mssv
 
     remaining_ids: Set[str] = set(target_map.keys())
-    found_count = already_cached
-    total_versions = 0
     if not remaining_ids:
         return {
-            "target_papers": len(pairs),
+            "target_papers": len(pairs_list),
             "found_papers": found_count,
+            "not_found_papers": not_found_count,
             "found_versions": total_versions,
             "missing_papers": [],
         }
@@ -162,22 +203,30 @@ def ingest_kaggle_snapshot(
             if record_id in remaining_ids:
                 mssv = target_map[record_id]
                 snapshot = build_discovery_snapshot(mssv, record_id, record)
+                if snapshot is None:
+                    continue
                 store.record_discovery(snapshot)
-                if snapshot.get("revised_dates") is not None:
+                if (
+                    snapshot.get("published") is not None
+                    and snapshot.get("revised_dates") is not None
+                    and len(snapshot["revised_dates"]) == len(snapshot["version_ids"]) - 1
+                ):
                     meta = store.read_metadata(mssv, record_id)
-                    meta["revised_dates"] = snapshot["revised_dates"]
-                    for idx, rev_date in enumerate(snapshot["revised_dates"], start=1):
-                        if idx < len(meta.get("versions", [])) and _valid_date(rev_date):
-                            meta["versions"][idx]["date"] = rev_date
-                            meta["versions"][idx]["date_status"] = "verified"
-                    store.save_metadata(mssv, record_id, meta)
+                    if meta.get("status") != "complete":
+                        meta["revised_dates"] = list(snapshot["revised_dates"])
+                        for idx, rev_date in enumerate(snapshot["revised_dates"], start=1):
+                            if idx < len(meta.get("versions", [])) and _valid_date(rev_date):
+                                meta["versions"][idx]["date"] = rev_date
+                                meta["versions"][idx]["date_status"] = "verified"
+                        store.save_metadata(mssv, record_id, meta)
                 remaining_ids.remove(record_id)
                 found_count += 1
                 total_versions += len(snapshot["version_ids"])
 
     return {
-        "target_papers": len(target_map),
+        "target_papers": len(pairs_list),
         "found_papers": found_count,
+        "not_found_papers": not_found_count,
         "found_versions": total_versions,
         "missing_papers": sorted(remaining_ids),
     }
