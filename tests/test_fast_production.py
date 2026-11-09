@@ -10,6 +10,165 @@ from unittest.mock import patch
 
 from src.fast_production import FastProductionRunner, cohort_pairs
 
+FORBIDDEN_CREDENTIAL_PREFIXES = [
+    "K" + "GAT_",
+    "g" + "hp_",
+    "s" + "2k-",
+    "g" + "ho_",
+    "gl" + "pat-",
+]
+
+CREDENTIAL_ASSIGNMENT_PATTERNS = [
+    (
+        "direct",
+        re.compile(
+            r"""\b(KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]"""
+        ),
+    ),
+    (
+        "environ_index",
+        re.compile(
+            r"""\b(?:os\.)?environ\s*\[\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*\]\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]"""
+        ),
+    ),
+    (
+        "environ_setdefault",
+        re.compile(
+            r"""\b(?:os\.)?environ\.setdefault\s*\(\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*,\s*['"]([a-zA-Z0-9_\-]{16,})['"]\s*\)"""
+        ),
+    ),
+    (
+        "dict_literal",
+        re.compile(
+            r"""['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*:\s*['"]([a-zA-Z0-9_\-]{16,})['"]"""
+        ),
+    ),
+]
+
+ALLOWED_TEST_FIXTURE_ASSIGNMENTS = {
+    # Narrowly scoped allowlist: (relative_file_path, credential_key, exact_value)
+    ("tests/test_s2_integration.py", "SEMANTIC_SCHOLAR_API_KEY", "offline-response-secret-key"),
+}
+
+
+def scan_credential_text(text: str, rel_path: str = "") -> list[tuple[str, str, str]]:
+    """Shared credential scanner: detects forbidden prefixes and assignment patterns.
+
+    Returns a list of violations as (category, key_or_prefix, matched_value).
+    """
+    violations = []
+    for prefix in FORBIDDEN_CREDENTIAL_PREFIXES:
+        if prefix in text:
+            violations.append(("prefix", prefix, prefix))
+    for ptype, pat in CREDENTIAL_ASSIGNMENT_PATTERNS:
+        for match in pat.finditer(text):
+            key = match.group(1)
+            val = match.group(2)
+            if (rel_path, key, val) in ALLOWED_TEST_FIXTURE_ASSIGNMENTS:
+                continue
+            violations.append((ptype, key, val))
+    return violations
+
+
+DRIVE_DANGER_KEYWORDS = {"drive", "mydrive", "group10", "production"}
+
+
+class DestructiveCallVisitor(ast.NodeVisitor):
+    """Shared AST visitor detecting direct calls and simple local-alias destructive operations."""
+
+    def __init__(self, filename: str = "<test>"):
+        self.filename = filename
+        self.violations = []
+        self.tainted_vars = set()
+
+    def _has_drive_keyword(self, val: str) -> bool:
+        val_lower = val.lower()
+        return any(k in val_lower for k in DRIVE_DANGER_KEYWORDS)
+
+    def visit_Assign(self, node):
+        rhs_has_drive = False
+        for sub in ast.walk(node.value):
+            if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                if self._has_drive_keyword(sub.value):
+                    rhs_has_drive = True
+                    break
+        if rhs_has_drive:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    self.tainted_vars.add(target.id)
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        func_name = ""
+        called_on_var = None
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+            if isinstance(node.func.value, ast.Name):
+                called_on_var = node.func.value.id
+        elif isinstance(node.func, ast.Name):
+            func_name = node.func.id
+
+        if func_name in {"rmtree", "remove", "unlink", "rmdir"}:
+            for arg in ast.walk(node):
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    if self._has_drive_keyword(arg.value):
+                        self.violations.append((node.lineno, func_name, arg.value))
+            for arg in node.args:
+                if isinstance(arg, ast.Name) and arg.id in self.tainted_vars:
+                    self.violations.append((node.lineno, func_name, f"alias:{arg.id}"))
+            if called_on_var and called_on_var in self.tainted_vars:
+                self.violations.append((node.lineno, func_name, f"method_on:{called_on_var}"))
+
+        self.generic_visit(node)
+
+
+class TightenedSimulatedGitRunner:
+    """Stateful Git runner that verifies exact commands and rejects unexpected Git operations."""
+
+    def __init__(self, initial_head: str = "0" * 40, checkout_error=None, mismatch_head: str | None = None):
+        self.current_head = initial_head
+        self.checkout_error = checkout_error
+        self.mismatch_head = mismatch_head
+        self.run_calls = []
+        self.check_output_calls = []
+
+    def run(self, cmd, check=False, **kwargs):
+        self.run_calls.append({"cmd": list(cmd), "check": check})
+
+        if isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == "git":
+            if cmd == ["git", "fetch", "origin"]:
+                if not check:
+                    raise AssertionError("git fetch origin must be invoked with check=True")
+                return unittest.mock.MagicMock(returncode=0)
+
+            if len(cmd) == 4 and cmd[:3] == ["git", "checkout", "--detach"]:
+                if not check:
+                    raise AssertionError("git checkout --detach must be invoked with check=True")
+                if self.checkout_error:
+                    raise self.checkout_error
+                self.current_head = self.mismatch_head if self.mismatch_head is not None else cmd[3]
+                return unittest.mock.MagicMock(returncode=0)
+
+            raise AssertionError(f"Unexpected Git command executed: {cmd}")
+
+        # Allowed non-git command: pip install
+        if isinstance(cmd, list) and len(cmd) > 0 and "pip" in cmd:
+            return unittest.mock.MagicMock(returncode=0)
+
+        raise AssertionError(f"Unexpected non-Git command executed in cell: {cmd}")
+
+    def check_output(self, cmd, text=False, **kwargs):
+        self.check_output_calls.append({"cmd": list(cmd), "text": text})
+
+        if isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == "git":
+            if cmd == ["git", "rev-parse", "HEAD"]:
+                if not text:
+                    raise AssertionError("git rev-parse HEAD must be invoked with text=True")
+                return self.current_head + "\n"
+            raise AssertionError(f"Unexpected Git check_output command executed: {cmd}")
+
+        raise AssertionError(f"Unexpected check_output command: {cmd}")
+
 
 class TestFastProduction(unittest.TestCase):
     def setUp(self):
@@ -171,13 +330,12 @@ class TestFastProduction(unittest.TestCase):
 
     def test_notebooks_do_not_contain_hardcoded_credentials(self):
         repo_root = Path(__file__).resolve().parents[1]
-        forbidden_prefixes = ["K" + "GAT_", "g" + "hp_", "s" + "2k-", "g" + "ho_", "gl" + "pat-"]
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
             for cell in nb.get("cells", []):
                 src = "".join(cell.get("source", []))
-                for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, src, f"Hardcoded credential '{prefix}' found in {nb_path}")
+                hits = scan_credential_text(src, rel_path=nb_path.name)
+                self.assertEqual(hits, [], f"Hardcoded credential found in {nb_path.name}: {hits}")
 
     def test_restore_rejects_corrupted_backup_and_preserves_good_local_data(self):
         runner = FastProductionRunner(self.local_root, self.drive_root)
@@ -354,131 +512,94 @@ class TestFastProduction(unittest.TestCase):
 
 
     def test_notebooks_and_source_do_not_contain_hardcoded_credentials(self):
-        """Phase 0 / Step 0.3: No hardcoded credentials (Kaggle, S2, GitHub) in notebooks or source/test files.
-        
-        Scans:
-        1. Notebooks: source cells, cell outputs (text, stream, display, errors), cell metadata, notebook metadata.
-        2. Python files in src/, scripts/, and tests/.
-        """
+        """Phase 0 / Step 0.3: No hardcoded credentials in notebooks or source/test files (including tests/test_fast_production.py)."""
         repo_root = Path(__file__).resolve().parents[1]
-        forbidden_prefixes = ["K" + "GAT_", "g" + "hp_", "s" + "2k-", "g" + "ho_", "gl" + "pat-"]
-        credential_patterns = [
-            ("direct", re.compile(r"""\b(KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-            ("environ_index", re.compile(r"""\b(?:os\.)?environ\s*\[\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*\]\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-            ("environ_setdefault", re.compile(r"""\b(?:os\.)?environ\.setdefault\s*\(\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*,\s*['"]([a-zA-Z0-9_\-]{16,})['"]\s*\)""")),
-            ("dict_literal", re.compile(r"""['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*:\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-        ]
-        allowed_test_fixture_assignments = {
-            # Narrowly scoped allowlist: (relative_file_path, credential_key, exact_value)
-            ("tests/test_s2_integration.py", "SEMANTIC_SCHOLAR_API_KEY", "offline-response-secret-key"),
-        }
 
-        # Check all notebooks: source, outputs, and metadata
+        # 1. Check all notebooks: source, outputs, and metadata
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
-            
-            # Check notebook-level metadata
+            rel_path = str(nb_path.relative_to(repo_root))
+
             nb_meta_str = json.dumps(nb.get("metadata", {}))
-            for prefix in forbidden_prefixes:
-                self.assertNotIn(prefix, nb_meta_str, f"Credential prefix '{prefix}' found in notebook metadata of {nb_path.name}")
-            for ptype, pat in credential_patterns:
-                self.assertIsNone(pat.search(nb_meta_str), f"Credential pattern ({ptype}) found in notebook metadata of {nb_path.name}")
+            hits = scan_credential_text(nb_meta_str, rel_path=rel_path)
+            self.assertEqual(hits, [], f"Credential found in notebook metadata of {rel_path}: {hits}")
 
             for idx, cell in enumerate(nb.get("cells", [])):
-                # Check cell metadata
                 cell_meta_str = json.dumps(cell.get("metadata", {}))
-                for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, cell_meta_str, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} metadata")
-                for ptype, pat in credential_patterns:
-                    self.assertIsNone(pat.search(cell_meta_str), f"Credential pattern ({ptype}) in {nb_path.name} cell {idx} metadata")
+                hits = scan_credential_text(cell_meta_str, rel_path=rel_path)
+                self.assertEqual(hits, [], f"Credential in {rel_path} cell {idx} metadata: {hits}")
 
-                # Check cell source
                 src = "".join(cell.get("source", []))
-                for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, src, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} source")
-                for ptype, pat in credential_patterns:
-                    self.assertIsNone(pat.search(src), f"Credential assignment ({ptype}) in {nb_path.name} cell {idx} source")
+                hits = scan_credential_text(src, rel_path=rel_path)
+                self.assertEqual(hits, [], f"Credential in {rel_path} cell {idx} source: {hits}")
 
-                # Check cell outputs
                 for out_idx, out in enumerate(cell.get("outputs", [])):
                     out_str = json.dumps(out)
-                    for prefix in forbidden_prefixes:
-                        self.assertNotIn(prefix, out_str, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} output {out_idx}")
-                    for ptype, pat in credential_patterns:
-                        self.assertIsNone(pat.search(out_str), f"Credential assignment ({ptype}) in {nb_path.name} cell {idx} output {out_idx}")
+                    hits = scan_credential_text(out_str, rel_path=rel_path)
+                    self.assertEqual(hits, [], f"Credential in {rel_path} cell {idx} output {out_idx}: {hits}")
 
-        # Check all python files in src/, scripts/, and tests/
+        # 2. Check all python files in src/, scripts/, and tests/ (including this test file)
         for folder in ["src", "scripts", "tests"]:
             for py_path in (repo_root / folder).rglob("*.py"):
-                # Exclude this test file itself as it defines regex patterns and regression test fixtures
-                if py_path.resolve() == Path(__file__).resolve():
-                    continue
                 content = py_path.read_text(encoding="utf-8")
                 rel_path = str(py_path.relative_to(repo_root))
-                for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, content, f"Hardcoded credential '{prefix}...' found in {rel_path}")
-                for ptype, pat in credential_patterns:
-                    for match in pat.finditer(content):
-                        key = match.group(1)
-                        val = match.group(2)
-                        if (rel_path, key, val) in allowed_test_fixture_assignments:
-                            continue
-                        self.fail(f"Hardcoded credential assignment ({ptype}) found in {rel_path}: {key}='{val[:6]}...'")
+                hits = scan_credential_text(content, rel_path=rel_path)
+                self.assertEqual(hits, [], f"Hardcoded credential found in {rel_path}: {hits}")
 
     def test_credential_scanner_regression(self):
-        """Phase 0 / Regression: Verify credential scanner detects all 4 syntax forms and never exempts real-looking keys."""
-        scanner_patterns = [
-            ("direct", re.compile(r"""\b(KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-            ("environ_index", re.compile(r"""\b(?:os\.)?environ\s*\[\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*\]\s*=\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-            ("environ_setdefault", re.compile(r"""\b(?:os\.)?environ\.setdefault\s*\(\s*['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*,\s*['"]([a-zA-Z0-9_\-]{16,})['"]\s*\)""")),
-            ("dict_literal", re.compile(r"""['"](KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*:\s*['"]([a-zA-Z0-9_\-]{16,})['"]""")),
-        ]
-
-        def scan_text(text):
-            hits = []
-            for ptype, pat in scanner_patterns:
-                for m in pat.finditer(text):
-                    hits.append((ptype, m.group(1), m.group(2)))
-            return hits
+        """Phase 0 / Regression: Verify shared scan_credential_text detects all forms and never exempts real-looking keys."""
+        k_key = "KAGGLE" + "_API_TOKEN"
+        s_key = "S2" + "_API_KEY"
+        gh_key = "GITHUB" + "_TOKEN"
+        ss_key = "SEMANTIC_SCHOLAR" + "_API_KEY"
+        val_16 = "abcdef1234567890"
 
         # 1. Direct assignment
-        hits = scan_text('KAGGLE_API_TOKEN = "abcdef1234567890"')
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0], ("direct", "KAGGLE_API_TOKEN", "abcdef1234567890"))
+        hits = scan_credential_text(f'{k_key} = "{val_16}"', rel_path="mock.py")
+        self.assertEqual(hits, [("direct", k_key, val_16)])
 
         # 2. os.environ[...] index assignment
-        hits = scan_text('os.environ["S2_API_KEY"] = "abcdef1234567890"')
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0], ("environ_index", "S2_API_KEY", "abcdef1234567890"))
+        hits = scan_credential_text(f'os.environ["{s_key}"] = "{val_16}"', rel_path="mock.py")
+        self.assertEqual(hits, [("environ_index", s_key, val_16)])
 
         # 3. os.environ.setdefault(...) call
-        hits = scan_text('os.environ.setdefault("GITHUB_TOKEN", "abcdef1234567890")')
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0], ("environ_setdefault", "GITHUB_TOKEN", "abcdef1234567890"))
+        hits = scan_credential_text(f'os.environ.setdefault("{gh_key}", "{val_16}")', rel_path="mock.py")
+        self.assertEqual(hits, [("environ_setdefault", gh_key, val_16)])
 
         # 4. Dict literal
-        hits = scan_text('cfg = {"SEMANTIC_SCHOLAR_API_KEY": "abcdef1234567890"}')
-        self.assertEqual(len(hits), 1)
-        self.assertEqual(hits[0], ("dict_literal", "SEMANTIC_SCHOLAR_API_KEY", "abcdef1234567890"))
+        hits = scan_credential_text(f'cfg = {{"{ss_key}": "{val_16}"}}', rel_path="mock.py")
+        self.assertEqual(hits, [("dict_literal", ss_key, val_16)])
 
         # 5. Invalid syntax os.environ.setdefault(...) = ... is NOT matched as environ_setdefault
-        hits = scan_text('os.environ.setdefault("KAGGLE_API_TOKEN") = "abcdef1234567890"')
+        hits = scan_credential_text(f'os.environ.setdefault("{k_key}") = "{val_16}"', rel_path="mock.py")
         self.assertNotIn("environ_setdefault", [h[0] for h in hits])
 
         # 6. Real-looking credential containing words 'test', 'mock', 'sample' is NOT exempted
         bad_token = "K" + "GAT_test1234567890mock_sample"
-        hits = scan_text(f'KAGGLE_API_TOKEN = "{bad_token}"')
-        self.assertEqual(len(hits), 1)
-        allowed = {("tests/test_s2_integration.py", "SEMANTIC_SCHOLAR_API_KEY", "offline-response-secret-key")}
-        self.assertNotIn(("some/file.py", hits[0][1], hits[0][2]), allowed)
+        hits = scan_credential_text(f'{k_key} = "{bad_token}"', rel_path="mock.py")
+        hit_types = [h[0] for h in hits]
+        self.assertIn("prefix", hit_types)
+        self.assertIn("direct", hit_types)
+
+        # 7. Token prefix detection
+        prefix_sample = "s" + "2k-abcdef1234567890"
+        hits = scan_credential_text(f'key = "{prefix_sample}"', rel_path="mock.py")
+        self.assertEqual(hits, [("prefix", "s" + "2k-", "s" + "2k-")])
+
+        # 8. Allowed fixture in tests/test_s2_integration.py is permitted
+        allowed_hits = scan_credential_text(
+            f'patch.dict(os.environ, {{"{ss_key}": "offline-response-secret-key"}})',
+            rel_path="tests/test_s2_integration.py",
+        )
+        self.assertEqual(allowed_hits, [])
 
     def test_notebooks_do_not_contain_destructive_drive_cleanup(self):
         """Phase 0 / P0-01: No notebook may contain destructive deletion of drive/production data.
         
         Detection Heuristics:
         1. Regex scanning: detects rmtree, remove, unlink, and rm -rf targeting drive/production paths.
-        2. AST inspection: parses code cells into AST and tracks direct strings as well as local variable aliases
-           to detect rmtree, remove, unlink, or rmdir targeting drive/production paths.
+        2. Shared AST inspection (DestructiveCallVisitor): parses code cells into AST and tracks direct strings
+           as well as local variable aliases targeting drive/production paths.
         3. Strict policy: fast production notebook contains 0 calls to rmtree.
         
         Limitation Notice:
@@ -494,53 +615,6 @@ class TestFastProduction(unittest.TestCase):
             re.compile(r"""Path\s*\(\s*['"][^'"]*(?:drive|Drive|MyDrive|Group10|production)[^'"]*['"]\s*\)\s*\.unlink"""),
             re.compile(r"""(?:!|%|subprocess\.run\s*\(\s*\[\s*['"])rm\s+-[rR]f\s+.*(?:drive|Drive|MyDrive|Group10|production)"""),
         ]
-        drive_keywords = {"drive", "mydrive", "group10", "production"}
-
-        class DestructiveCallVisitor(ast.NodeVisitor):
-            def __init__(self, filename):
-                self.filename = filename
-                self.violations = []
-                self.tainted_vars = set()
-
-            def _has_drive_keyword(self, val: str) -> bool:
-                val_lower = val.lower()
-                return any(k in val_lower for k in drive_keywords)
-
-            def visit_Assign(self, node):
-                rhs_has_drive = False
-                for sub in ast.walk(node.value):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                        if self._has_drive_keyword(sub.value):
-                            rhs_has_drive = True
-                            break
-                if rhs_has_drive:
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            self.tainted_vars.add(target.id)
-                self.generic_visit(node)
-
-            def visit_Call(self, node):
-                func_name = ""
-                called_on_var = None
-                if isinstance(node.func, ast.Attribute):
-                    func_name = node.func.attr
-                    if isinstance(node.func.value, ast.Name):
-                        called_on_var = node.func.value.id
-                elif isinstance(node.func, ast.Name):
-                    func_name = node.func.id
-
-                if func_name in {"rmtree", "remove", "unlink", "rmdir"}:
-                    for arg in ast.walk(node):
-                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            if self._has_drive_keyword(arg.value):
-                                self.violations.append((node.lineno, func_name, arg.value))
-                    for arg in node.args:
-                        if isinstance(arg, ast.Name) and arg.id in self.tainted_vars:
-                            self.violations.append((node.lineno, func_name, f"alias:{arg.id}"))
-                    if called_on_var and called_on_var in self.tainted_vars:
-                        self.violations.append((node.lineno, func_name, f"method_on:{called_on_var}"))
-
-                self.generic_visit(node)
 
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
@@ -555,7 +629,7 @@ class TestFastProduction(unittest.TestCase):
                         f"Destructive drive cleanup operation matching {pattern.pattern} found in {nb_path.name} cell {idx}: {match.group(0) if match else ''}",
                     )
 
-                # 2. AST check (for code cells)
+                # 2. Shared AST check (for code cells)
                 if cell.get("cell_type") == "code":
                     filtered_lines = [line if not line.strip().startswith(("!", "%")) else f"# {line}" for line in src.splitlines()]
                     tree = ast.parse("\n".join(filtered_lines), filename=f"{nb_path.name}:{idx}")
@@ -570,55 +644,8 @@ class TestFastProduction(unittest.TestCase):
             self.assertNotIn("rmtree", src, f"Production notebook should not call rmtree in cell {idx}")
 
     def test_destructive_call_visitor_cases(self):
-        """Phase 0 / Unit Test: Verify DestructiveCallVisitor detects direct keywords and path aliases without false positives."""
-        drive_keywords = {"drive", "mydrive", "group10", "production"}
-
-        class DestructiveCallVisitor(ast.NodeVisitor):
-            def __init__(self):
-                self.violations = []
-                self.tainted_vars = set()
-
-            def _has_drive_keyword(self, val: str) -> bool:
-                val_lower = val.lower()
-                return any(k in val_lower for k in drive_keywords)
-
-            def visit_Assign(self, node):
-                rhs_has_drive = False
-                for sub in ast.walk(node.value):
-                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-                        if self._has_drive_keyword(sub.value):
-                            rhs_has_drive = True
-                            break
-                if rhs_has_drive:
-                    for target in node.targets:
-                        if isinstance(target, ast.Name):
-                            self.tainted_vars.add(target.id)
-                self.generic_visit(node)
-
-            def visit_Call(self, node):
-                func_name = ""
-                called_on_var = None
-                if isinstance(node.func, ast.Attribute):
-                    func_name = node.func.attr
-                    if isinstance(node.func.value, ast.Name):
-                        called_on_var = node.func.value.id
-                elif isinstance(node.func, ast.Name):
-                    func_name = node.func.id
-
-                if func_name in {"rmtree", "remove", "unlink", "rmdir"}:
-                    for arg in ast.walk(node):
-                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                            if self._has_drive_keyword(arg.value):
-                                self.violations.append((node.lineno, func_name, arg.value))
-                    for arg in node.args:
-                        if isinstance(arg, ast.Name) and arg.id in self.tainted_vars:
-                            self.violations.append((node.lineno, func_name, f"alias:{arg.id}"))
-                    if called_on_var and called_on_var in self.tainted_vars:
-                        self.violations.append((node.lineno, func_name, f"method_on:{called_on_var}"))
-
-                self.generic_visit(node)
-
-        # 1. Direct string paths targeting each keyword
+        """Phase 0 / Unit Test: Verify shared DestructiveCallVisitor detects direct keywords and aliases, and tests unsupported chained alias."""
+        # 1. Direct string paths targeting each supported keyword
         for kw in ["drive", "MyDrive", "Group10", "production"]:
             v = DestructiveCallVisitor()
             v.visit(ast.parse(f"shutil.rmtree('/content/{kw}/data')"))
@@ -660,6 +687,23 @@ os.remove('/tmp/local_temp_file.txt')
         v.visit(ast.parse(clean_code))
         self.assertEqual(v.violations, [], "Should have 0 violations on clean local scratch paths")
 
+        # 5. Unsupported chained alias case: target2 = target; shutil.rmtree(target2)
+        chained_code = """
+from pathlib import Path
+import shutil
+target = Path("/content/drive/MyDrive/production")
+target2 = target
+shutil.rmtree(target2)
+"""
+        v = DestructiveCallVisitor()
+        v.visit(ast.parse(chained_code))
+        # Prove that chained variable alias is unsupported and not detected by single-scope visitor
+        self.assertEqual(
+            v.violations,
+            [],
+            "Chained alias propagation (target2 = target) is an explicitly documented limitation and not detected.",
+        )
+
     def test_fast_production_notebook_safety_guards(self):
         """Phase 0 / P1-15: Fast production notebook enforces CPU-only and fail-closed CODE_COMMIT."""
         repo_root = Path(__file__).resolve().parents[1]
@@ -677,7 +721,7 @@ os.remove('/tmp/local_temp_file.txt')
         self.assertNotIn("sử dụng HEAD hiện tại của nhánh", all_src)
 
     def test_fast_production_notebook_fail_closed_execution(self):
-        """Phase 0 / P1-15: Directly execute the actual notebook Step 1 cell with stateful Git verification."""
+        """Phase 0 / P1-15: Directly execute actual notebook Step 1 cell with tightened stateful Git verification."""
         repo_root = Path(__file__).resolve().parents[1]
         nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
         nb = json.loads(nb_path.read_text(encoding="utf-8"))
@@ -690,37 +734,11 @@ os.remove('/tmp/local_temp_file.txt')
                 break
         self.assertIsNotNone(step1_src, "Step 1 checkout code cell must exist in m1_colab_fast_production.ipynb")
 
-        class SimulatedGitRunner:
-            def __init__(self, initial_head="0" * 40, checkout_error=None, mismatch_head=None):
-                self.current_head = initial_head
-                self.checkout_error = checkout_error
-                self.mismatch_head = mismatch_head
-                self.run_calls = []
-                self.check_output_calls = []
-
-            def run(self, cmd, check=False, **kwargs):
-                self.run_calls.append({"cmd": list(cmd), "check": check})
-                if cmd == ["git", "fetch", "origin"]:
-                    return unittest.mock.MagicMock(returncode=0)
-                if len(cmd) == 4 and cmd[:3] == ["git", "checkout", "--detach"]:
-                    if self.checkout_error:
-                        raise self.checkout_error
-                    # State transition: head is updated only if checkout succeeds
-                    self.current_head = self.mismatch_head if self.mismatch_head is not None else cmd[3]
-                    return unittest.mock.MagicMock(returncode=0)
-                return unittest.mock.MagicMock(returncode=0)
-
-            def check_output(self, cmd, text=False, **kwargs):
-                self.check_output_calls.append({"cmd": list(cmd), "text": text})
-                if cmd == ["git", "rev-parse", "HEAD"]:
-                    return self.current_head + "\n"
-                return ""
-
         def run_actual_cell(code_commit, checkout_error=None, mismatch_head=None):
             pattern = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
             modified_src = pattern.sub(f'CODE_COMMIT = {repr(code_commit)}', step1_src, count=1)
 
-            git_runner = SimulatedGitRunner(checkout_error=checkout_error, mismatch_head=mismatch_head)
+            git_runner = TightenedSimulatedGitRunner(checkout_error=checkout_error, mismatch_head=mismatch_head)
             mock_drive = unittest.mock.MagicMock()
             mock_colab = unittest.mock.MagicMock()
             mock_colab.drive = mock_drive
@@ -742,7 +760,7 @@ os.remove('/tmp/local_temp_file.txt')
                 run_actual_cell(bad_sha)
 
         # Sub-case B: Checkout failure propagates error and verifies exact sequence up to failure
-        spied_runner = SimulatedGitRunner(checkout_error=subprocess.CalledProcessError(1, "git checkout"))
+        spied_runner = TightenedSimulatedGitRunner(checkout_error=subprocess.CalledProcessError(1, "git checkout"))
         with patch.dict("sys.modules", {"google.colab": unittest.mock.MagicMock()}), \
              patch.dict("os.environ", {"COLAB_GPU": "0"}), \
              patch("os.chdir"), \
@@ -760,7 +778,7 @@ os.remove('/tmp/local_temp_file.txt')
 
         # Sub-case C: Post-checkout HEAD mismatch raises RuntimeError
         different_head = "b" * 40
-        spied_mismatch = SimulatedGitRunner(mismatch_head=different_head)
+        spied_mismatch = TightenedSimulatedGitRunner(mismatch_head=different_head)
         with patch.dict("sys.modules", {"google.colab": unittest.mock.MagicMock()}), \
              patch.dict("os.environ", {"COLAB_GPU": "0"}), \
              patch("os.chdir"), \
@@ -782,6 +800,13 @@ os.remove('/tmp/local_temp_file.txt')
         self.assertEqual(git_success.check_output_calls, [{"cmd": ["git", "rev-parse", "HEAD"], "text": True}])
         self.assertEqual(git_success.current_head, valid_sha)
 
-
-if __name__ == "__main__":
-    unittest.main()
+        # Sub-case E: Unexpected Git commands or non-check calls fail explicitly
+        runner = TightenedSimulatedGitRunner()
+        with self.assertRaises(AssertionError, msg="Unexpected Git command must fail explicitly"):
+            runner.run(["git", "pull"], check=True)
+        with self.assertRaises(AssertionError, msg="check=False on git fetch must fail explicitly"):
+            runner.run(["git", "fetch", "origin"], check=False)
+        with self.assertRaises(AssertionError, msg="check=False on git checkout must fail explicitly"):
+            runner.run(["git", "checkout", "--detach", valid_sha], check=False)
+        with self.assertRaises(AssertionError, msg="text=False on git rev-parse HEAD must fail explicitly"):
+            runner.check_output(["git", "rev-parse", "HEAD"], text=False)
