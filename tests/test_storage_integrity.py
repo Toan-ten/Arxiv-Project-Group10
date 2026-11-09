@@ -585,20 +585,32 @@ class TestStorageIntegrity(unittest.TestCase):
             "contract_version": 2,
             "arxiv_id": self.arxiv_id,
             "mssv": self.mssv,
+            "run_id": "test_run",
             "status": "complete_with_no_tex",
             "discovery_status": "found",
             "version_status": "resolved",
             "metadata_status": "complete",
             "references_status": "complete",
+            "updated_at": "2026-11-09T00:00:00Z",
             "versions": {
                 "v1": {
                     "versioned_id": f"{self.arxiv_id}v1",
                     "status": "no_tex_source",
                     "source_status": "no_tex_source",
+                    "http_status": 200,
+                    "content_type": "application/x-eprint",
+                    "source_url": f"https://export.arxiv.org/src/{self.arxiv_id}v1",
+                    "archive_bytes": None,
+                    "archive_sha256": None,
                     "files": [],
                     "file_checksums": {},
                     "kept_bytes": 0,
+                    "extracted_bytes": None,
+                    "removed_files": None,
+                    "attempts": 1,
+                    "run_id": "test_run",
                     "completed_at": "2026-11-09T00:00:00Z",
+                    "error": None,
                 }
             },
         }), encoding="utf-8")
@@ -850,6 +862,53 @@ class TestStorageIntegrity(unittest.TestCase):
             self.assertIsNotNone(fstat_res)
             self.assertEqual(sha, hashlib.sha256(content.encode("utf-8")).hexdigest())
             self.assertEqual(fstat_res.st_size, len(content.encode("utf-8")))
+
+    # ---------------------------------------------------------
+    # R12: Validate Version Name Format and Path Containment
+    # ---------------------------------------------------------
+    def test_audit_version_integrity_rejects_invalid_version_names(self):
+        """R12: Validate version name strictly with _version() before path creation or checks."""
+        # 1. version_name="../../missing" with empty no_tex_source must be rejected
+        outside_rec = {
+            "versioned_id": self.arxiv_id + "../../missing",
+            "status": "no_tex_source",
+            "source_status": "no_tex_source",
+            "files": [],
+            "file_checksums": {},
+            "kept_bytes": 0,
+            "completed_at": "2026-11-09T00:00:00Z",
+        }
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "../../missing", outside_rec)
+        self.assertTrue(any(v.category in {"invalid", "corrupted"} and "version name" in v.message.lower() for v in violations))
+
+        # 2. Absolute version name
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "/etc/passwd", outside_rec)
+        self.assertTrue(any(v.category == "invalid" and "version name" in v.message.lower() for v in violations))
+
+        # 3. v0 (forbidden: versions start at v1)
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v0", outside_rec)
+        self.assertTrue(any(v.category == "invalid" and "version name" in v.message.lower() for v in violations))
+
+        # 4. v01 (forbidden: no leading zeros)
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v01", outside_rec)
+        self.assertTrue(any(v.category == "invalid" and "version name" in v.message.lower() for v in violations))
+
+        # 5. ../v1 (forbidden: path traversal)
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "../v1", outside_rec)
+        self.assertTrue(any(v.category == "invalid" and "version name" in v.message.lower() for v in violations))
+
+        # 6. Valid version name passes
+        valid_rec = {
+            "versioned_id": self.arxiv_id + "v1",
+            "status": "no_tex_source",
+            "source_status": "no_tex_source",
+            "files": [],
+            "file_checksums": {},
+            "kept_bytes": 0,
+            "completed_at": "2026-11-09T00:00:00Z",
+        }
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", valid_rec)
+        self.assertEqual(len(violations), 0)
 
 
 if __name__ == "__main__":

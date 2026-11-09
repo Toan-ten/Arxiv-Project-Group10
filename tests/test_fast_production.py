@@ -529,20 +529,32 @@ class TestFastProduction(unittest.TestCase):
             "contract_version": 2,
             "arxiv_id": "2508.07872",
             "mssv": "24120010",
+            "run_id": "run_1",
             "status": "complete",
             "discovery_status": "found",
             "version_status": "resolved",
             "metadata_status": "complete",
             "references_status": "complete",
+            "updated_at": "2026-11-09T00:00:00Z",
             "versions": {
                 "v1": {
                     "versioned_id": "2508.07872v1",
                     "status": "success",
                     "source_status": "success",
+                    "http_status": 200,
+                    "content_type": "application/x-eprint",
+                    "source_url": "https://export.arxiv.org/src/2508.07872v1",
+                    "archive_bytes": None,
+                    "archive_sha256": None,
                     "files": ["main.tex"],
                     "file_checksums": {"main.tex": sha},
                     "kept_bytes": len(tex_content.encode("utf-8")),
+                    "extracted_bytes": None,
+                    "removed_files": None,
+                    "attempts": 1,
+                    "run_id": "run_1",
                     "completed_at": "2026-11-09T00:00:00Z",
+                    "error": None,
                 }
             },
         }), encoding="utf-8")
@@ -554,12 +566,34 @@ class TestFastProduction(unittest.TestCase):
             "contract_version": 2,
             "arxiv_id": "2508.07873",
             "mssv": "24120010",
+            "run_id": "run_2",
             "status": "failed",
             "discovery_status": "found",
             "version_status": "resolved",
             "metadata_status": "not_attempted",
             "references_status": "not_attempted",
-            "versions": {"v1": {"status": "unsafe_archive"}},
+            "updated_at": "2026-11-09T00:00:00Z",
+            "versions": {
+                "v1": {
+                    "versioned_id": "2508.07873v1",
+                    "status": "unsafe_archive",
+                    "source_status": "unsafe_archive",
+                    "http_status": 200,
+                    "content_type": "application/x-eprint",
+                    "source_url": "https://export.arxiv.org/src/2508.07873v1",
+                    "archive_bytes": None,
+                    "archive_sha256": None,
+                    "files": [],
+                    "file_checksums": {},
+                    "kept_bytes": None,
+                    "extracted_bytes": None,
+                    "removed_files": None,
+                    "attempts": 1,
+                    "run_id": "run_2",
+                    "completed_at": None,
+                    "error": {"stage": "source", "type": "unsafe_archive", "message": "Unsafe archive detected"},
+                }
+            },
         }), encoding="utf-8")
 
         # Paper 3: not_found (terminal negative)
@@ -569,11 +603,13 @@ class TestFastProduction(unittest.TestCase):
             "contract_version": 2,
             "arxiv_id": "2508.07874",
             "mssv": "24120010",
+            "run_id": "run_3",
             "status": "not_found",
             "discovery_status": "not_found",
             "version_status": "not_applicable",
             "metadata_status": "not_found",
             "references_status": "not_attempted",
+            "updated_at": "2026-11-09T00:00:00Z",
             "versions": {},
         }), encoding="utf-8")
 
@@ -1119,6 +1155,7 @@ shutil.rmtree(target2)
         # Valid negative discovery
         (paper_folder / "manifest.json").write_text(json.dumps({
             "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "run_id": "test_run", "updated_at": "2026-11-09T00:00:00Z",
             "status": "not_found", "discovery_status": "not_found", "version_status": "not_applicable",
             "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
         }), encoding="utf-8")
@@ -1127,6 +1164,7 @@ shutil.rmtree(target2)
         # Invalid: non-terminal manifest.status with discovery_status='not_found'
         (paper_folder / "manifest.json").write_text(json.dumps({
             "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "run_id": "test_run", "updated_at": "2026-11-09T00:00:00Z",
             "status": "in_progress", "discovery_status": "not_found", "version_status": "not_applicable",
             "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
         }), encoding="utf-8")
@@ -1135,8 +1173,99 @@ shutil.rmtree(target2)
         # Invalid: unexpected version directory exists on disk for not_found
         (paper_folder / "manifest.json").write_text(json.dumps({
             "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "run_id": "test_run", "updated_at": "2026-11-09T00:00:00Z",
             "status": "not_found", "discovery_status": "not_found", "version_status": "not_applicable",
             "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
         }), encoding="utf-8")
         (paper_folder / "v1").mkdir(parents=True, exist_ok=True)
         self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_rejects_missing_mandatory_manifest_fields(self):
+        """R13: Manifest missing any mandatory schema field is rejected by count_completed_papers."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        base_valid = {
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "run_id": "test_run", "status": "not_found", "discovery_status": "not_found",
+            "version_status": "not_applicable", "metadata_status": "not_found",
+            "references_status": "not_attempted", "versions": {}, "updated_at": "2026-11-09T00:00:00Z",
+        }
+
+        # Check each mandatory field being missing
+        mandatory_fields = [
+            "run_id", "updated_at", "version_status", "metadata_status",
+            "references_status", "versions", "discovery_status", "status",
+        ]
+        for field in mandatory_fields:
+            bad_manifest = dict(base_valid)
+            del bad_manifest[field]
+            (paper_folder / "manifest.json").write_text(json.dumps(bad_manifest), encoding="utf-8")
+            self.assertEqual(runner.count_completed_papers(1), 0, f"Must reject manifest missing '{field}'")
+
+    def test_count_completed_papers_not_found_requires_exact_empty_dict(self):
+        """R14: not_found branch requires versions to be an exact empty dict (reject list, None, string)."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        base_not_found = {
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "run_id": "test_run", "status": "not_found", "discovery_status": "not_found",
+            "version_status": "not_applicable", "metadata_status": "not_found",
+            "references_status": "not_attempted", "updated_at": "2026-11-09T00:00:00Z",
+        }
+
+        # 1. versions = [] (list instead of dict) -> must be rejected
+        bad_list = dict(base_not_found, versions=[])
+        (paper_folder / "manifest.json").write_text(json.dumps(bad_list), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 2. versions = None -> must be rejected
+        bad_none = dict(base_not_found, versions=None)
+        (paper_folder / "manifest.json").write_text(json.dumps(bad_none), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 3. versions = "" -> must be rejected
+        bad_str = dict(base_not_found, versions="")
+        (paper_folder / "manifest.json").write_text(json.dumps(bad_str), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 4. versions = {"v1": {...}} (non-empty) -> must be rejected for not_found
+        bad_nonempty = dict(base_not_found, versions={"v1": {}})
+        (paper_folder / "manifest.json").write_text(json.dumps(bad_nonempty), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 5. versions = {} (valid empty dict) -> must be accepted
+        good_dict = dict(base_not_found, versions={})
+        (paper_folder / "manifest.json").write_text(json.dumps(good_dict), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 1)
+
+    def test_count_completed_papers_rejects_path_traversal_version_names(self):
+        """R12: count_completed_papers rejects manifests containing invalid version names or path traversal."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        for bad_name in ["../../missing", "/etc/passwd", "v0", "v01", "../v1"]:
+            bad_manifest = {
+                "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+                "run_id": "test_run", "status": "complete_with_no_tex", "discovery_status": "found",
+                "version_status": "resolved", "metadata_status": "complete",
+                "references_status": "complete", "updated_at": "2026-11-09T00:00:00Z",
+                "versions": {
+                    bad_name: {
+                        "versioned_id": f"2508.07872{bad_name}", "status": "no_tex_source",
+                        "source_status": "no_tex_source", "http_status": 200,
+                        "content_type": "application/x-eprint",
+                        "source_url": f"https://export.arxiv.org/src/2508.07872{bad_name}",
+                        "archive_bytes": None, "archive_sha256": None, "files": [],
+                        "file_checksums": {}, "kept_bytes": 0, "extracted_bytes": None,
+                        "removed_files": None, "attempts": 1, "run_id": "test_run",
+                        "completed_at": "2026-11-09T00:00:00Z", "error": None,
+                    }
+                },
+            }
+            (paper_folder / "manifest.json").write_text(json.dumps(bad_manifest), encoding="utf-8")
+            self.assertEqual(runner.count_completed_papers(1), 0, f"Must reject bad version name '{bad_name}'")

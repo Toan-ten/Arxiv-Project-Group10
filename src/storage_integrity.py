@@ -199,6 +199,24 @@ def audit_version_integrity(
 ) -> List[IntegrityViolation]:
     """Verify filesystem source files, checksums, and invariants for a single version."""
     violations: List[IntegrityViolation] = []
+
+    # R12: Validate version name format strictly using _version() before creating or checking paths
+    try:
+        _version(version_name)
+    except (StorageError, Exception) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                version=str(version_name),
+                expected="valid version name matching v1, v2, ...",
+                actual=version_name,
+                message=f"Invalid version name format: {exc}",
+            )
+        )
+        return violations
+
     expected_versioned_id = arxiv_id + version_name
     actual_versioned_id = version_record.get("versioned_id")
 
@@ -232,22 +250,9 @@ def audit_version_integrity(
 
     version_dir = paper_dir / version_name
 
-    # Reject version_dir if it is a symlink or resolves outside paper directory (R5)
-    if version_dir.is_symlink() or os.path.islink(version_dir):
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="corrupted",
-                severity="error",
-                file_path=str(version_dir),
-                version=version_name,
-                message=f"Version directory {version_name} is a symbolic link",
-            )
-        )
-        return violations
-
+    # R12: Check containment unconditionally before path checks, regardless of existence on disk
     try:
-        if version_dir.exists() and not version_dir.resolve().is_relative_to(paper_dir.resolve()):
+        if not version_dir.resolve().is_relative_to(paper_dir.resolve()):
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
@@ -268,6 +273,20 @@ def audit_version_integrity(
                 file_path=str(version_dir),
                 version=version_name,
                 message=f"Filesystem error resolving version directory {version_name}: {exc}",
+            )
+        )
+        return violations
+
+    # Reject version_dir if it is a symlink (R5)
+    if version_dir.is_symlink() or os.path.islink(version_dir):
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="corrupted",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Version directory {version_name} is a symbolic link",
             )
         )
         return violations

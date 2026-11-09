@@ -308,6 +308,37 @@ class TestExportTables(unittest.TestCase):
         self.assertEqual(len(full_export), 1)
         self.assertEqual(full_export[0]["arxiv_id"], aid_full_m1)
 
+    def test_export_papers_require_m1_complete_with_verified_only_false_rejects_partial(self):
+        """R15: require_m1_complete=True must require actual metadata status=='complete' even if verified_only=False."""
+        import json
+        mssv = "24120010"
+        aid = "2508.07872"
+
+        self._setup_complete_paper(mssv, aid)
+
+        # Ensure manifest status is complete
+        man_file = self.store.root / "2508-07872" / "manifest.json"
+        man = json.loads(man_file.read_text(encoding="utf-8"))
+        man["status"] = "complete"
+        man["metadata_status"] = "complete"
+        man_file.write_text(json.dumps(man), encoding="utf-8")
+
+        # Demote metadata status to partial
+        meta_file = self.store.root / "2508-07872" / "metadata.json"
+        meta = json.loads(meta_file.read_text(encoding="utf-8"))
+        meta["status"] = "partial"
+        meta_file.write_text(json.dumps(meta), encoding="utf-8")
+
+        pairs = [(mssv, aid)]
+
+        # When require_m1_complete=True, metadata must be complete even if verified_only=False
+        rows_strict = export_papers_table(self.store, pairs, verified_only=False, require_m1_complete=True)
+        self.assertEqual(len(rows_strict), 0, "require_m1_complete=True must reject partial metadata even if verified_only=False")
+
+        # When require_m1_complete=False and verified_only=False, partial metadata is permitted (diagnostic mode)
+        rows_diag = export_papers_table(self.store, pairs, verified_only=False, require_m1_complete=False)
+        self.assertEqual(len(rows_diag), 1, "Diagnostic mode (verified_only=False, require_m1_complete=False) permits partial metadata")
+
 
 if __name__ == "__main__":
     unittest.main()

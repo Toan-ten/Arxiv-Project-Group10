@@ -107,9 +107,9 @@ Module [`src/storage_integrity.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-
 
 ---
 
-## 6. Khắc Phục Độc Lập Theo Yêu Cầu Audit (Phase 1 Remediation: R1 – R6)
+## 6. Khắc Phục Độc Lập Theo Yêu Cầu Audit (Phase 1 Remediation: R1 – R15)
 
-Căn cứ biên bản audit độc lập đối với commit `bf4e5ff`, hệ thống đã hoàn thiện triệt để 6 yêu cầu kỹ thuật:
+Căn cứ biên bản audit độc lập đối với commit `bf4e5ff` và các lần đánh giá tiếp theo, hệ thống đã hoàn thiện triệt để toàn bộ 15 yêu cầu kỹ thuật:
 
 ### R1. Bảo toàn ngữ nghĩa Null trong xuất dữ liệu (Preserve Null Semantics in Exports)
 - **Nguyên nhân gốc rễ:** Hàm `export_papers_table` và `export_references_table` áp dụng biểu thức gán mặc định `list(...) if ... else []`, vô tình chuẩn hóa giá trị `None` (chưa quan sát hoặc chưa thu thập) thành danh sách rỗng (`[]`). Đồng thời `validate_exported_tables` yêu cầu `authors` và `revised_dates` bắt buộc phải là kiểu `list`.
@@ -204,6 +204,30 @@ Căn cứ biên bản audit độc lập đối với commit `bf4e5ff`, hệ th�
   + **Hàm đếm tiến độ `count_completed_papers()`:** Đo lường chính xác số lượng bài báo trong cohort đã hoàn tất thu thập mã nguồn trên đĩa (hoặc phát hiện âm tính `not_found`), bảo đảm các điều kiện lưu trữ mã nguồn để phục vụ sao lưu và khôi phục.
   + **Báo cáo tổng hợp (`scripts/generate_m1_report.py`):** Phản ánh minh bạch cả hai chỉ số: tỷ lệ hoàn tất mã nguồn (`source_completion_rate`) và tỷ lệ hoàn tất trọn vẹn M1 (`m1_completion_rate`).
 
+### R12. Chuẩn hóa định dạng tên phiên bản và kiểm soát ranh giới đường dẫn (Version Name Format & Containment)
+- **Nguyên nhân gốc rễ:** Hàm `audit_version_integrity()` nhận `version_name` dưới dạng chuỗi và trực tiếp ghép đường dẫn `paper_dir / version_name`. Với các giá trị không hợp lệ hoặc chứa path traversal (như `../../missing`, `v0`, `/etc/passwd`), nếu thư mục chưa tồn tại trên đĩa thì việc kiểm tra `version_dir.exists()` trước đó có thể bỏ qua việc xác thực ranh giới hoặc phát sinh hành vi không xác định.
+- **Biện pháp xử lý:**
+  + Gọi trực tiếp hàm kiểm thực `_version(version_name)` ngay tại đầu vào của `audit_version_integrity()`, bảo đảm tên phiên bản phải khớp chuẩn `v[1-9][0-9]*`. Nếu sai định dạng, ghi nhận vi phạm `category="invalid"` và kết thúc kiểm toán phiên bản ngay lập tức.
+  + Kiểm tra tính chứa trong thư mục bài báo `(paper_dir / version_name).resolve().is_relative_to(paper_dir.resolve())` một cách vô điều kiện, bất kể thư mục có tồn tại trên đĩa hay không.
+
+### R13. Xác thực schema manifest toàn diện trong `count_completed_papers` (Full Manifest Schema Validation)
+- **Nguyên nhân gốc rễ:** `count_completed_papers()` trước đây chỉ kiểm tra một số trường riêng lẻ (`contract_version`, `arxiv_id`, `mssv`, các trường trạng thái) mà không gọi bộ xác thực schema chính quy `self.store._manifest(m, mssv, arxiv_id)`. Các manifest giả lập hoặc thiếu các trường bắt buộc (như `run_id`, `updated_at`, các trường chi tiết của version) có thể lọt qua bộ kiểm tra.
+- **Biện pháp xử lý:**
+  + Tích hợp trực tiếp lệnh gọi `self.store._manifest(m, mssv, arxiv_id)` trong `count_completed_papers()`.
+  + Mọi manifest không tuân thủ đầy đủ schema hợp đồng v2 hoặc chứa dữ liệu phiên bản sai quy cách sẽ bị bắt qua ngoại lệ và lập tức bị loại trừ khỏi danh sách hoàn tất (fail-closed).
+
+### R14. Bắt buộc từ điển rỗng đối với phát hiện âm tính (Strict Empty Dict for Negative Discovery)
+- **Nguyên nhân gốc rễ:** Biểu thức kiểm tra `if m.get("versions"): continue` dựa trên tính truthy của Python, vô tình chấp nhận các kiểu dữ liệu sai schema nhưng mang giá trị falsy (như danh sách rỗng `[]`, chuỗi rỗng `""`, hoặc `None`), vi phạm ràng buộc schema quy định trường `versions` bắt buộc phải là từ điển (`dict`).
+- **Biện pháp xử lý:**
+  + Trong nhánh `discovery_status == "not_found"`, kiểm tra nghiêm ngặt `isinstance(versions, dict) and not versions`.
+  + Chỉ duy nhất giá trị từ điển rỗng (`{}`) mới được chấp nhận; mọi kiểu dữ liệu khác đều bị loại bỏ ngay lập tức.
+
+### R15. Bất biến siêu dữ liệu hoàn tất khi bật `require_m1_complete` (Metadata Invariant for require_m1_complete)
+- **Nguyên nhân gốc rễ:** Trong hàm `export_papers_table()`, nếu gọi với `verified_only=False` nhưng `require_m1_complete=True`, khối điều kiện `if verified_only:` bị bỏ qua, dẫn đến việc bản ghi có `meta["status"] == "partial"` có thể lọt vào kết quả nếu manifest đạt trạng thái `complete`.
+- **Biện pháp xử lý:**
+  + Thiết lập bất biến `if require_m1_complete or verified_only: if status != "complete": continue`.
+  + Khi `require_m1_complete=True`, hệ thống luôn bắt buộc siêu dữ liệu phải đạt trạng thái `complete`, bất kể giá trị của cờ `verified_only`. Chế độ chẩn đoán (`verified_only=False`) chỉ cho phép dữ liệu `partial` khi cờ `require_m1_complete` nhận giá trị `False`.
+
 ---
 
 ## 7. Giới Hạn Kỹ Thuật Còn Lại (Remaining Limitations)
@@ -212,3 +236,5 @@ Căn cứ biên bản audit độc lập đối với commit `bf4e5ff`, hệ th�
    - Việc tính toán mã băm SHA-256 trực tiếp trên đĩa tại mỗi lần gọi `count_completed_papers` bảo đảm an toàn dữ liệu tuyệt đối nhưng tiêu tốn I/O. Đối với quy mô production Colab (1.200 bài báo), thời gian xác thực nằm trong khoảng 2-4 giây trên SSD cục bộ.
 2. **Ký hiệu commit lịch sử được bảo toàn:**
    - Biến `CODE_COMMIT = "489a82fd959ccc6cced7c59fc309255e4421bef2"` được giữ nguyên vẹn xuyên suốt Phase 1 theo đúng chỉ thị kiểm toán, bảo đảm tính hồi cứu nguồn gốc (provenance). Hằng số này sẽ chỉ được cập nhật trong bước nghiệm thu cuối cùng.
+3. **Ranh giới nền tảng và cơ chế chống TOCTOU:**
+   - Cơ chế phòng chống chạy đua TOCTOU qua bộ mô tả tệp (`os.O_NOFOLLOW | os.O_RDONLY` kèm `os.fstat`) đạt mức độ bảo vệ tối đa trên môi trường POSIX (Linux/macOS). Trên các nền tảng không hỗ trợ POSIX hoặc hệ thống tệp không hỗ trợ `st_nlink` / inode, cơ chế này tự động chuyển đổi sang kiểm tra ranh giới đường dẫn phân giải. Toàn bộ môi trường production chính thức trên Google Colab (Linux kernel 6.x) vận hành hoàn toàn trong ranh giới bảo vệ của chuẩn POSIX.

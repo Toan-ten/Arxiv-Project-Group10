@@ -242,27 +242,23 @@ class FastProductionRunner:
                     pass
                 continue
 
-            # 3. Validate manifest schema and arXiv identity before trusting any status field (R10)
+            # 3. Validate manifest schema and arXiv identity before trusting any status field (R10, R13)
             if not isinstance(m, dict):
                 continue
-            if m.get("contract_version") != CONTRACT_VERSION:
-                continue
-            if m.get("arxiv_id") != arxiv_id:
-                continue
-            if m.get("mssv") != mssv:
-                continue
-            status = m.get("status")
-            if status not in PAPER_STATES:
-                continue
-            disc = m.get("discovery_status")
-            if disc not in DISCOVERY_STATES:
+            try:
+                self.store._manifest(m, mssv, arxiv_id)
+            except Exception:
                 continue
 
-            # 4. Negative terminal discovery: not_found (R10)
+            status = m.get("status")
+            disc = m.get("discovery_status")
+
+            # 4. Negative terminal discovery: not_found (R10, R14)
             if disc == "not_found":
                 if status != "not_found":
                     continue
-                if m.get("versions"):
+                versions = m.get("versions")
+                if not isinstance(versions, dict) or versions:
                     continue
                 # Verify no version directories exist on disk
                 try:

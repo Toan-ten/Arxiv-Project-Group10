@@ -45,7 +45,8 @@ def export_papers_table(
             if not isinstance(meta, dict):
                 continue
             status = meta.get("status")
-            if verified_only:
+            # R15: require_m1_complete=True always requires actual metadata.status == "complete", regardless of verified_only
+            if require_m1_complete or verified_only:
                 if status != "complete":
                     continue
             elif status not in {"partial", "complete"}:
