@@ -189,7 +189,14 @@ class FastProductionRunner:
         from src.storage_integrity import audit_version_integrity
 
         done = 0
-        corpus_resolved = self.corpus_dir.resolve()
+        try:
+            if not self.corpus_dir.exists() or self.corpus_dir.is_symlink() or os.path.islink(self.corpus_dir):
+                return 0
+            corpus_resolved = self.corpus_dir.resolve()
+            if not corpus_resolved.is_dir():
+                return 0
+        except (OSError, RuntimeError):
+            return 0
 
         for mssv, arxiv_id in cohort_pairs(number):
             try:

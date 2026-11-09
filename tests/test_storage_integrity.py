@@ -549,6 +549,29 @@ class TestStorageIntegrity(unittest.TestCase):
         v_loop.unlink()
         v1_dir.unlink()
 
+    def test_audit_version_integrity_handles_resolve_exception(self):
+        """R12: If version_dir.resolve() raises RuntimeError or OSError, fail closed with corrupted violation."""
+        self._setup_valid_complete_paper()
+        rec = {
+            "versioned_id": f"{self.arxiv_id}v1",
+            "status": "success",
+            "source_status": "success",
+            "files": ["main.tex"],
+            "file_checksums": {"main.tex": "a" * 64},
+            "kept_bytes": 100,
+            "completed_at": "2026-11-09T00:00:00Z",
+        }
+
+        # 1. Simulate RuntimeError (e.g. symlink loop in ancestor path during resolve)
+        with unittest.mock.patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop inside resolve")):
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", rec)
+            self.assertTrue(any(v.category == "corrupted" and "Filesystem error resolving version directory" in v.message for v in violations))
+
+        # 2. Simulate OSError (e.g. I/O or permission error during resolve)
+        with unittest.mock.patch.object(Path, "resolve", side_effect=OSError("I/O error during resolve")):
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", rec)
+            self.assertTrue(any(v.category == "corrupted" and "Filesystem error resolving version directory" in v.message for v in violations))
+
     def test_audit_rejects_hardlink_file(self):
         """R5: Hardlinked file with st_nlink != 1 is rejected as corrupted."""
         self._setup_valid_complete_paper()

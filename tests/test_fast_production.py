@@ -1056,6 +1056,42 @@ shutil.rmtree(target2)
             symlink_paper.symlink_to(symlink_paper)
             self.assertEqual(runner.count_completed_papers(1), 0)
 
+    def test_count_completed_papers_fails_closed_when_corpus_dir_unresolvable(self):
+        """R12: count_completed_papers fails closed (returns 0) when corpus_dir cannot be resolved or is invalid."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+
+        # 1. corpus_dir is a symlink loop
+        import shutil
+        shutil.rmtree(runner.corpus_dir)
+        try:
+            runner.corpus_dir.symlink_to(runner.corpus_dir)
+            self.assertEqual(runner.count_completed_papers(1), 0)
+            runner.corpus_dir.unlink()
+        except OSError:
+            pass
+
+        # 2. corpus_dir does not exist
+        if runner.corpus_dir.exists() or runner.corpus_dir.is_symlink():
+            if runner.corpus_dir.is_dir():
+                shutil.rmtree(runner.corpus_dir)
+            else:
+                runner.corpus_dir.unlink()
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 3. corpus_dir is a regular file instead of a directory
+        runner.corpus_dir.write_text("regular file", encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+        runner.corpus_dir.unlink()
+
+        # 4. corpus_dir.resolve() raises RuntimeError (e.g. symlink loop in parent)
+        runner.corpus_dir.mkdir(parents=True, exist_ok=True)
+        with unittest.mock.patch.object(Path, "resolve", side_effect=RuntimeError("Corpus root symlink loop")):
+            self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 5. corpus_dir.resolve() raises OSError (e.g. permission or I/O error)
+        with unittest.mock.patch.object(Path, "resolve", side_effect=OSError("Corpus root I/O error")):
+            self.assertEqual(runner.count_completed_papers(1), 0)
+
     def test_count_completed_papers_rejects_symlinked_manifest(self):
         """R10: manifest.json that is a symlink or hardlink is rejected."""
         runner = FastProductionRunner(self.local_root, self.drive_root)
