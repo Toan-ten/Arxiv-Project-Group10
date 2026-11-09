@@ -236,6 +236,24 @@ class TestKaggleDiscovery(unittest.TestCase):
         self.assertEqual(row["arxiv_id"], "2508.07872")
         self.assertEqual(row["revised_dates"], ["2025-08-03"])
 
+    def test_ingest_kaggle_snapshot_provenance_and_interruption(self):
+        """Task 4.1 & 4.4: ingest_kaggle_snapshot captures provenance and handles interruption gracefully."""
+        snapshot_file = self.root / "prov_snapshot.json"
+        snapshot_file.write_text(json.dumps({
+            "id": "2508.07872",
+            "title": "Paper One",
+            "authors": "Alice",
+            "versions": [{"version": "v1", "created": "2025-08-01"}],
+        }) + "\n", encoding="utf-8")
+
+        summary = ingest_kaggle_snapshot(snapshot_file, self.store, [("24120010", "2508.07872")])
+        self.assertIn("snapshot_provenance", summary)
+        prov = summary["snapshot_provenance"]
+        self.assertEqual(prov["dataset"], "Cornell-University/arxiv")
+        self.assertGreater(prov["snapshot_size_bytes"], 0)
+        self.assertIn("ingested_at", prov)
+        self.assertFalse(summary["interrupted"])
+
 
 if __name__ == "__main__":
     unittest.main()

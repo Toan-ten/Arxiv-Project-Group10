@@ -168,6 +168,14 @@ def ingest_kaggle_snapshot(
             pass
         target_map[arxiv_id] = mssv
 
+    snapshot_size = snapshot_file.stat().st_size if snapshot_file.is_file() else 0
+    snapshot_provenance = {
+        "dataset": "Cornell-University/arxiv",
+        "snapshot_path": str(snapshot_file.resolve()),
+        "snapshot_size_bytes": snapshot_size,
+        "ingested_at": datetime.now(timezone.utc).isoformat(),
+    }
+
     remaining_ids: Set[str] = set(target_map.keys())
     if not remaining_ids:
         return {
@@ -176,6 +184,8 @@ def ingest_kaggle_snapshot(
             "not_found_papers": not_found_count,
             "found_versions": total_versions,
             "missing_papers": [],
+            "interrupted": False,
+            "snapshot_provenance": snapshot_provenance,
         }
 
     open_fn = gzip.open if snapshot_file.suffix == ".gz" else open
@@ -183,52 +193,56 @@ def ingest_kaggle_snapshot(
     prefixes = tuple({aid[:5] for aid in remaining_ids if len(aid) >= 5})
     single_prefix = prefixes[0] if len(prefixes) == 1 else None
 
-    with open_fn(snapshot_file, mode, encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            if not remaining_ids:
-                break
-            if single_prefix is not None:
-                if single_prefix not in line:
+    interrupted = False
+    try:
+        with open_fn(snapshot_file, mode, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if not remaining_ids:
+                    break
+                if single_prefix is not None:
+                    if single_prefix not in line:
+                        continue
+                elif prefixes and not any(p in line for p in prefixes):
                     continue
-            elif prefixes and not any(p in line for p in prefixes):
-                continue
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-            record_id = record.get("id")
-            if record_id in remaining_ids:
-                mssv = target_map[record_id]
-                snapshot = build_discovery_snapshot(mssv, record_id, record)
-                if snapshot is None:
-                    continue
-                store.record_discovery(snapshot)
-                if (
-                    snapshot.get("published") is not None
-                    and snapshot.get("revised_dates") is not None
-                    and len(snapshot["revised_dates"]) == len(snapshot["version_ids"]) - 1
-                ):
-                    meta = store.read_metadata(mssv, record_id)
-                    if meta.get("status") != "complete":
-                        meta["revised_dates"] = list(snapshot["revised_dates"])
-                        for idx, rev_date in enumerate(snapshot["revised_dates"], start=1):
-                            if idx < len(meta.get("versions", [])) and _valid_date(rev_date):
-                                meta["versions"][idx]["date"] = rev_date
-                                meta["versions"][idx]["date_status"] = "verified"
-                        meta["provenance"]["version_history"] = {
-                            "provider": "kaggle_snapshot",
-                            "query_identifier": record_id,
-                            "retrieved_at": datetime.now(timezone.utc).isoformat(),
-                            "snapshot": list(snapshot["revised_dates"]),
-                        }
-                        store.save_metadata(mssv, record_id, meta)
-                remaining_ids.remove(record_id)
-                found_count += 1
-                total_versions += len(snapshot["version_ids"])
+                record_id = record.get("id")
+                if record_id in remaining_ids:
+                    mssv = target_map[record_id]
+                    snapshot = build_discovery_snapshot(mssv, record_id, record)
+                    if snapshot is None:
+                        continue
+                    store.record_discovery(snapshot)
+                    if (
+                        snapshot.get("published") is not None
+                        and snapshot.get("revised_dates") is not None
+                        and len(snapshot["revised_dates"]) == len(snapshot["version_ids"]) - 1
+                    ):
+                        meta = store.read_metadata(mssv, record_id)
+                        if meta.get("status") != "complete":
+                            meta["revised_dates"] = list(snapshot["revised_dates"])
+                            for idx, rev_date in enumerate(snapshot["revised_dates"], start=1):
+                                if idx < len(meta.get("versions", [])) and _valid_date(rev_date):
+                                    meta["versions"][idx]["date"] = rev_date
+                                    meta["versions"][idx]["date_status"] = "verified"
+                            meta["provenance"]["version_history"] = {
+                                "provider": "kaggle_snapshot",
+                                "query_identifier": record_id,
+                                "retrieved_at": datetime.now(timezone.utc).isoformat(),
+                                "snapshot": list(snapshot["revised_dates"]),
+                            }
+                            store.save_metadata(mssv, record_id, meta)
+                    remaining_ids.remove(record_id)
+                    found_count += 1
+                    total_versions += len(snapshot["version_ids"])
+    except KeyboardInterrupt:
+        interrupted = True
 
     return {
         "target_papers": len(pairs_list),
@@ -236,4 +250,6 @@ def ingest_kaggle_snapshot(
         "not_found_papers": not_found_count,
         "found_versions": total_versions,
         "missing_papers": sorted(remaining_ids),
+        "interrupted": interrupted,
+        "snapshot_provenance": snapshot_provenance,
     }
