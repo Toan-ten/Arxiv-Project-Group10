@@ -690,6 +690,24 @@ class S2IntegrationTests(unittest.TestCase):
         self.assertEqual(value["papers"][0]["s2_metadata"]["attempts"], 2)
         self.assertEqual(len(self.s2_requests), 3)
 
+    def test_enrich_s2_batch_metadata_batches_multiple_papers(self):
+        from src.s2_integration import enrich_s2_batch_metadata
+        mock_client = Mock()
+        mock_client.fetch_metadata.return_value = {
+            "status": "success",
+            "papers": [
+                {"arxiv_id": "2508.07872", "paperId": "s2_id_1", "title": "Paper 1"},
+                {"arxiv_id": "2508.07873", "paperId": "s2_id_2", "title": "Paper 2"},
+            ]
+        }
+        papers = [
+            {"mssv": "24120010", "arxiv_id": "2508.07872", "discovery": {"status": "found"}},
+            {"mssv": "24120010", "arxiv_id": "2508.07873", "discovery": {"status": "found"}},
+        ]
+        results = enrich_s2_batch_metadata(self.store, papers, s2_config={}, client=mock_client)
+        self.assertEqual(mock_client.fetch_metadata.call_count, 1)
+        self.assertEqual(len(results), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

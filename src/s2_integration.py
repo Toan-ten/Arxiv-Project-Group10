@@ -223,3 +223,42 @@ def http_status(result, *, references=False):
         return (result.get("error") or {}).get("http_status")
     return result.get("http_status")
 
+
+def enrich_s2_batch_metadata(store, papers, s2_config=None, client=None, limiter=None):
+    """Enrich S2 metadata in batch mode (up to 100 papers per single API call)."""
+    if client is None:
+        from src import semantic_scholar as client
+    eligible = [
+        p for p in papers
+        if p.get("discovery", {}).get("status") == "found"
+        and not p.get("blocked")
+    ]
+    if not eligible:
+        return {}
+
+    id_to_paper = {p["arxiv_id"]: p for p in eligible}
+    id_list = list(id_to_paper.keys())
+
+    results_map = {}
+    options = dict(s2_config or {})
+    for i in range(0, len(id_list), 100):
+        chunk_ids = id_list[i:i + 100]
+        if limiter is not None:
+            options["limiter"] = limiter
+        res = client.fetch_metadata(chunk_ids, **options)
+        items = res.get("papers", []) if isinstance(res, dict) else res
+        for item in items:
+            aid = item.get("arxiv_id")
+            if aid in id_to_paper:
+                p = id_to_paper[aid]
+                mssv = p["mssv"]
+                if store is not None:
+                    try:
+                        meta = store.read_metadata(mssv, aid)
+                        updated = metadata_snapshot(meta, item)
+                        store.save_metadata(mssv, aid, updated)
+                    except Exception:
+                        pass
+                results_map[aid] = item
+    return results_map
+
