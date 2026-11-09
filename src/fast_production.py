@@ -143,7 +143,7 @@ class FastProductionRunner:
         reset_count = 0
         for mssv, arxiv_id in cohort_pairs(number):
             manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
-            if not manifest_path.exists():
+            if not manifest_path.is_file():
                 continue
             try:
                 manifest = self.store.read_manifest(mssv, arxiv_id)
@@ -160,66 +160,89 @@ class FastProductionRunner:
                     reset_count += 1
             except Exception:
                 pass
+        if reset_count > 0:
+            print(f"Lô {number}: Đã phục hồi {reset_count} phiên bản bị xung đột tệp không-TeX trước đó.")
         return reset_count
 
     def count_completed_papers(self, number: int) -> int:
-        """Count how many papers in the cohort have finished processing (no retryable versions left)."""
-        from src.storage import RETRYABLE, arxiv_id_to_folder_key
+        """Count how many papers in the cohort have verified terminal completion."""
+        from src.storage import TERMINAL, arxiv_id_to_folder_key
         done = 0
         for _, arxiv_id in cohort_pairs(number):
             manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
-            if manifest_path.exists():
+            if manifest_path.is_file():
                 try:
                     m = json.loads(manifest_path.read_text(encoding="utf-8"))
-                    versions = m.get("versions") or {}
-                    if m.get("discovery_status") == "not_found" or (
-                        versions and all(
-                            v.get("status") not in RETRYABLE and v.get("status") != "in_progress"
-                            for v in versions.values()
-                        )
-                    ):
+                    disc = m.get("discovery_status")
+                    if disc == "not_found":
                         done += 1
+                        continue
+                    versions = m.get("versions") or {}
+                    if disc == "found" and versions and m.get("version_status") == "resolved":
+                        if all(v.get("status") in TERMINAL for v in versions.values()):
+                            done += 1
                 except Exception:
                     pass
         return done
 
-    def _resolve_batch_id(self, number: int, max_attempts: int, revision_history: bool) -> Tuple[str, bool]:
+    def _resolve_batch_id(
+        self,
+        number: int,
+        max_attempts: int,
+        revision_history: bool,
+        timeout: Optional[float] = None,
+        s2_config: Optional[dict] = None,
+    ) -> Tuple[str, bool]:
         """Resolve a non-destructive batch_id and determine if it can safely resume."""
+        effective_timeout = timeout if timeout is not None else self.timeout
         base_id = f"fast-arxiv-{number:04d}"
         base_dir = self.logs_dir / base_id
         batch_json_path = base_dir / "batch.json"
-        if not batch_json_path.exists():
+        if not batch_json_path.is_file():
             return base_id, False
         try:
             saved_def = json.loads(batch_json_path.read_text(encoding="utf-8")).get("definition", {})
             if (
                 saved_def.get("max_attempts") == max_attempts
                 and saved_def.get("revision_history", False) == bool(revision_history)
+                and saved_def.get("timeout") == effective_timeout
             ):
                 return base_id, True
         except Exception:
             pass
-        variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}"
+        s2_flag = 1 if s2_config is not None else 0
+        variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}-s{s2_flag}"
         variant_dir = self.logs_dir / variant_id
         variant_json = variant_dir / "batch.json"
-        if variant_json.exists():
+        if variant_json.is_file():
             try:
                 saved_def = json.loads(variant_json.read_text(encoding="utf-8")).get("definition", {})
                 if (
                     saved_def.get("max_attempts") == max_attempts
                     and saved_def.get("revision_history", False) == bool(revision_history)
+                    and saved_def.get("timeout") == effective_timeout
                 ):
                     return variant_id, True
             except Exception:
                 pass
         return variant_id, False
 
-    def run_cohort(self, number: int, *, resume: bool = False, revision_history: bool = False) -> dict:
-        """Execute one cohort (100 papers) with SSD acceleration, exponential backoff retries and Drive sync."""
+    def run_cohort(
+        self,
+        number: int,
+        *,
+        resume: bool = True,
+        revision_history: bool = True,
+        s2_config: Optional[dict] = None,
+    ) -> dict:
+        """Execute one cohort (100 papers) with SSD acceleration, backoff retries, Drive sync, and revision history."""
         self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
         max_attempts = 6 if (self.retry_429 and self.retry_wait_budget > 0) else 1
-        batch_id, effective_resume = self._resolve_batch_id(number, max_attempts, revision_history)
+        batch_id, can_resume = self._resolve_batch_id(
+            number, max_attempts, revision_history, timeout=self.timeout, s2_config=s2_config
+        )
+        effective_resume = can_resume if resume else False
         experiment_id = f"exp-fast-{number:04d}-{int(time.time())}"
 
         already_done = self.count_completed_papers(number)
@@ -251,7 +274,7 @@ class FastProductionRunner:
                     max_attempts=max_attempts,
                     timeout=self.timeout,
                     disk_roots=[self.corpus_dir, self.scratch_dir],
-                    s2_config=None,
+                    s2_config=s2_config,
                     revision_history=revision_history,
                 )
         except KeyboardInterrupt:
@@ -268,7 +291,8 @@ class FastProductionRunner:
 
         elapsed = time.time() - started
         completed_final = self.count_completed_papers(number)
-        newly_done = max(1, completed_final - already_done)
+        newly_done = max(0, completed_final - already_done)
+        avg_seconds = (elapsed / newly_done) if newly_done > 0 else None
         batch_stopped = bool(
             interrupted
             or report.get("stopped")
@@ -281,8 +305,9 @@ class FastProductionRunner:
             "stopped": batch_stopped,
             "stop_reason": report.get("stop_reason"),
             "completed_papers": completed_final,
+            "newly_completed_papers": newly_done,
             "elapsed_seconds": elapsed,
-            "avg_seconds_per_paper": elapsed / newly_done,
+            "avg_seconds_per_paper": avg_seconds,
             "archive_path": str(archive_dest),
         }
         return report

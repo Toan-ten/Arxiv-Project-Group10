@@ -281,6 +281,64 @@ class TestFastProduction(unittest.TestCase):
         self.assertFalse(ok)
         self.assertFalse(target_paper.exists())
 
+    def test_count_completed_papers_terminal_only(self):
+        """Task 3.2: count_completed_papers only counts terminal verified papers, not failed/unsafe."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        # Paper 1: Terminal success
+        p1 = runner.corpus_dir / "2508-07872"
+        p1.mkdir(parents=True, exist_ok=True)
+        (p1 / "manifest.json").write_text(json.dumps({
+            "discovery_status": "found",
+            "version_status": "resolved",
+            "versions": {"v1": {"status": "success"}},
+        }), encoding="utf-8")
+
+        # Paper 2: unsafe_archive error (non-terminal)
+        p2 = runner.corpus_dir / "2508-07873"
+        p2.mkdir(parents=True, exist_ok=True)
+        (p2 / "manifest.json").write_text(json.dumps({
+            "discovery_status": "found",
+            "version_status": "resolved",
+            "versions": {"v1": {"status": "unsafe_archive"}},
+        }), encoding="utf-8")
+
+        # Paper 3: not_found (terminal negative)
+        p3 = runner.corpus_dir / "2508-07874"
+        p3.mkdir(parents=True, exist_ok=True)
+        (p3 / "manifest.json").write_text(json.dumps({
+            "discovery_status": "not_found",
+            "version_status": "none",
+        }), encoding="utf-8")
+
+        completed = runner.count_completed_papers(1)
+        # Only Paper 1 and Paper 3 should count, NOT Paper 2
+        self.assertEqual(completed, 2)
+
+    def test_run_cohort_defaults_to_revision_history_true(self):
+        """Task 3.1: FastProductionRunner.run_cohort has revision_history=True as default."""
+        import inspect
+        sig = inspect.signature(FastProductionRunner.run_cohort)
+        self.assertTrue(sig.parameters["revision_history"].default)
+
+    def test_resolve_batch_id_checks_timeout_fingerprint(self):
+        """Task 3.4: _resolve_batch_id checks timeout and prevents resuming if definition differs."""
+        runner = FastProductionRunner(self.local_root, self.drive_root, timeout=30.0)
+        base_dir = runner.logs_dir / "fast-arxiv-0001"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        (base_dir / "batch.json").write_text(json.dumps({
+            "definition": {"max_attempts": 6, "revision_history": True, "timeout": 30.0}
+        }), encoding="utf-8")
+
+        # Matching config returns base_id and True
+        batch_id, can_resume = runner._resolve_batch_id(1, max_attempts=6, revision_history=True, timeout=30.0)
+        self.assertEqual(batch_id, "fast-arxiv-0001")
+        self.assertTrue(can_resume)
+
+        # Mismatched timeout creates variant ID and does not resume base_id
+        batch_id_mismatch, can_resume_mismatch = runner._resolve_batch_id(1, max_attempts=6, revision_history=True, timeout=60.0)
+        self.assertNotEqual(batch_id_mismatch, "fast-arxiv-0001")
+        self.assertFalse(can_resume_mismatch)
+
 
 if __name__ == "__main__":
     unittest.main()
