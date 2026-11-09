@@ -167,44 +167,133 @@ class FastProductionRunner:
     def count_completed_papers(self, number: int) -> int:
         """Count how many papers in the cohort have verified terminal completion.
 
-        Enforces the Storage Contract by verifying:
-        - Negative terminal discovery (not_found)
-        - Resolved terminal versions (all versions in TERMINAL)
-        - Full cryptographic checksum and content validation for every successful or bib-only version
-        - Strict no_tex_source and filesystem link invariants
+        Enforces the Storage Contract by verifying (R10):
+        1. Reject any paper directory that is a symlink or resolves outside the corpus root.
+        2. Verify manifest.json is a regular file with st_nlink == 1 (safely opened with O_NOFOLLOW).
+        3. Validate manifest schema and arXiv identity before trusting any status field.
+        4. Negative terminal discovery (not_found): verifies manifest.status is terminal ('not_found'),
+           no versions recorded in manifest, and no version directories exist on disk.
+        5. Resolved terminal versions (found): all versions are terminal (TERMINAL = {'success', 'no_tex_source'})
+           and pass full cryptographic checksum and source audit via audit_version_integrity.
         """
-        from src.storage import TERMINAL, arxiv_id_to_folder_key
+        import os
+        import re
+        import stat
+        from src.storage import (
+            CONTRACT_VERSION,
+            DISCOVERY_STATES,
+            PAPER_STATES,
+            TERMINAL,
+            arxiv_id_to_folder_key,
+        )
         from src.storage_integrity import audit_version_integrity
 
         done = 0
-        for _, arxiv_id in cohort_pairs(number):
-            paper_dir = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id)
-            manifest_path = paper_dir / "manifest.json"
-            if not manifest_path.is_file():
-                continue
+        corpus_resolved = self.corpus_dir.resolve()
+
+        for mssv, arxiv_id in cohort_pairs(number):
             try:
-                m = json.loads(manifest_path.read_text(encoding="utf-8"))
-                disc = m.get("discovery_status")
-                if disc == "not_found":
-                    done += 1
-                    continue
-                versions = m.get("versions") or {}
-                if disc == "found" and versions and m.get("version_status") == "resolved":
-                    if not all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
-                        continue
-                    paper_ok = True
-                    for v_name, v_info in versions.items():
-                        if not isinstance(v_info, dict):
-                            paper_ok = False
-                            break
-                        v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
-                        if v_violations:
-                            paper_ok = False
-                            break
-                    if paper_ok:
-                        done += 1
+                folder_key = arxiv_id_to_folder_key(arxiv_id)
             except Exception:
                 continue
+
+            paper_dir = self.corpus_dir / folder_key
+            if not paper_dir.exists():
+                continue
+
+            # 1. Reject any paper directory that is a symlink or resolves outside corpus root (R10)
+            if paper_dir.is_symlink() or os.path.islink(paper_dir):
+                continue
+            try:
+                if not paper_dir.resolve().is_relative_to(corpus_resolved):
+                    continue
+            except OSError:
+                continue
+            if not paper_dir.is_dir():
+                continue
+
+            manifest_path = paper_dir / "manifest.json"
+            # 2. Verify manifest.json is a regular file with st_nlink == 1 (R10)
+            if manifest_path.is_symlink() or os.path.islink(manifest_path):
+                continue
+
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            if hasattr(os, "O_CLOEXEC"):
+                flags |= os.O_CLOEXEC
+
+            try:
+                fd = os.open(manifest_path, flags)
+            except OSError:
+                continue
+
+            try:
+                fstat_res = os.fstat(fd)
+                if not stat.S_ISREG(fstat_res.st_mode) or fstat_res.st_nlink != 1:
+                    os.close(fd)
+                    continue
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    m = json.load(stream)
+            except Exception:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                continue
+
+            # 3. Validate manifest schema and arXiv identity before trusting any status field (R10)
+            if not isinstance(m, dict):
+                continue
+            if m.get("contract_version") != CONTRACT_VERSION:
+                continue
+            if m.get("arxiv_id") != arxiv_id:
+                continue
+            if m.get("mssv") != mssv:
+                continue
+            status = m.get("status")
+            if status not in PAPER_STATES:
+                continue
+            disc = m.get("discovery_status")
+            if disc not in DISCOVERY_STATES:
+                continue
+
+            # 4. Negative terminal discovery: not_found (R10)
+            if disc == "not_found":
+                if status != "not_found":
+                    continue
+                if m.get("versions"):
+                    continue
+                # Verify no version directories exist on disk
+                try:
+                    has_version_dir = any(
+                        p.is_dir() and re.match(r"^v\d+$", p.name)
+                        for p in paper_dir.iterdir()
+                    )
+                    if has_version_dir:
+                        continue
+                except OSError:
+                    continue
+                done += 1
+                continue
+
+            # 5. Resolved terminal versions: found (R10)
+            versions = m.get("versions")
+            if disc == "found" and isinstance(versions, dict) and versions and m.get("version_status") == "resolved":
+                if not all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
+                    continue
+                paper_ok = True
+                for v_name, v_info in versions.items():
+                    if not isinstance(v_info, dict):
+                        paper_ok = False
+                        break
+                    v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
+                    if v_violations:
+                        paper_ok = False
+                        break
+                if paper_ok:
+                    done += 1
+
         return done
 
     def _resolve_batch_id(

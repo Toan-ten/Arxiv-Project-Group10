@@ -270,6 +270,44 @@ class TestExportTables(unittest.TestCase):
         export_to_parquet(records, out_path)
         self.assertTrue(out_path.exists() or out_path.with_suffix(".jsonl").exists())
 
+    def test_export_papers_require_m1_complete_contract(self):
+        """R11: Harmonize coverage accounting and export contracts.
+
+        - verified_only=True: official metadata catalog (metadata.status == 'complete').
+        - require_m1_complete=True: strict M1 end-to-end completion (manifest.status in complete states).
+        """
+        import json
+        mssv = "24120010"
+        aid_meta_only = "2508.07872"
+        aid_full_m1 = "2508.07873"
+
+        self._setup_complete_paper(mssv, aid_meta_only)
+        self._setup_complete_paper(mssv, aid_full_m1)
+
+        # Modify Paper 1 manifest to be partial (source incomplete)
+        man1_file = self.store.root / "2508-07872" / "manifest.json"
+        man1 = json.loads(man1_file.read_text(encoding="utf-8"))
+        man1["status"] = "partial"
+        man1_file.write_text(json.dumps(man1), encoding="utf-8")
+
+        # Set Paper 2 manifest to complete (full M1 milestone complete)
+        man2_file = self.store.root / "2508-07873" / "manifest.json"
+        man2 = json.loads(man2_file.read_text(encoding="utf-8"))
+        man2["status"] = "complete"
+        man2_file.write_text(json.dumps(man2), encoding="utf-8")
+
+        pairs = [(mssv, aid_meta_only), (mssv, aid_full_m1)]
+
+        # 1. Default verified_only=True: exports both papers with complete metadata
+        meta_export = export_papers_table(self.store, pairs, verified_only=True)
+        self.assertEqual(len(meta_export), 2)
+        self.assertEqual({r["arxiv_id"] for r in meta_export}, {aid_meta_only, aid_full_m1})
+
+        # 2. Strict require_m1_complete=True: exports only the paper with complete manifest
+        full_export = export_papers_table(self.store, pairs, verified_only=True, require_m1_complete=True)
+        self.assertEqual(len(full_export), 1)
+        self.assertEqual(full_export[0]["arxiv_id"], aid_full_m1)
+
 
 if __name__ == "__main__":
     unittest.main()

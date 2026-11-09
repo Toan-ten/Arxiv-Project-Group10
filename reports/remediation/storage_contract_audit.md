@@ -162,6 +162,48 @@ Căn cứ biên bản audit độc lập đối với commit `bf4e5ff`, hệ th�
   + Kiểm tra đầy đủ mã băm SHA-256 trên đĩa, định dạng metadata và quy chuẩn `no_tex_source`.
   + Nếu bất kỳ phiên bản nào phát sinh vi phạm tính toàn vẹn (ví dụ: nội dung tệp bị sửa đổi dù tên tệp giữ nguyên, thiếu mã băm, tồn tại symlink, hoặc sai cấu trúc `no_tex_source`), bài báo sẽ không được tính vào số lượng hoàn tất (`done`).
 
+### R7. Bắt buộc kiểm tra `kept_bytes` cho bản ghi nguồn kết thúc (Require kept_bytes for Terminal Source Records)
+- **Nguyên nhân gốc rễ:** Trường `kept_bytes` trong bản ghi phiên bản trước đây chưa kiểm tra chặt chẽ kiểu dữ liệu, dẫn đến trường hợp bản ghi hoàn tất (`success` hoặc `no_tex_source`) bị thiếu dung lượng hoặc dung lượng không khớp với tổng số byte của các tệp thực tế trên đĩa.
+- **Biện pháp xử lý:**
+  + Đối với phiên bản `status == "success"` và `status == "no_tex_source"` có tệp `.bib`:
+    * Bắt buộc tồn tại trường `kept_bytes` và không được mang giá trị `null` (nếu thiếu hoặc null, ghi nhận vi phạm `category="incomplete"`).
+    * Kiểm tra kiểu số nguyên chính xác `type(kept_bytes) is int` (loại trừ kiểu `bool`).
+    * Bắt buộc giá trị `kept_bytes >= 0` (nếu âm, ghi nhận vi phạm `category="invalid"`).
+    * So khớp chính xác tuyệt đối với tổng số byte thực tế của các tệp thông thường trên đĩa (`total_bytes`). Nếu sai lệch, ghi nhận vi phạm `category="corrupted"`.
+  + Đối với phiên bản rỗng `status == "no_tex_source"` (không có tệp):
+    * Bắt buộc trường `kept_bytes` phải tồn tại, không mang giá trị `null`, và nhận đúng giá trị số nguyên `0` theo hợp đồng lưu trữ chuẩn của storage writer.
+
+### R8. Đóng lỗi duyệt hệ thống tệp theo nguyên tắc fail-closed (Make Filesystem Traversal Errors Fail Closed)
+- **Nguyên nhân gốc rễ:** Lệnh `os.walk()` mặc định không truyền hàm xử lý `onerror`. Khi xảy ra lỗi phân quyền truy cập thư mục hoặc lỗi I/O gián đoạn, tiến trình duyệt bỏ qua lỗi và có thể báo cáo sai rằng thư mục không có vi phạm nào.
+- **Biện pháp xử lý:**
+  + Bổ sung tham số `onerror=walk_onerror` cho cả hai lệnh `os.walk()` trong `audit_version_integrity` (cho cả luồng `success` và luồng `no_tex_source`).
+  + Khi xuất hiện lỗi I/O hoặc quyền truy cập, hàm `walk_onerror` kích hoạt cờ `traversal_failed = True` và ghi nhận ngay vi phạm `category="corrupted"` kèm mã lỗi hệ thống.
+  + Sau vòng lặp duyệt, nếu cờ `traversal_failed` được bật, hệ thống ghi nhận thêm một vi phạm nghiêm trọng báo cáo việc duyệt cây thư mục không trọn vẹn, lập tức kết luận bài báo không hợp lệ (fail-closed).
+
+### R9. Xóa bỏ cửa sổ chạy đua TOCTOU khi kiểm tra liên kết tượng trưng (Close the Symlink TOCTOU Window)
+- **Nguyên nhân gốc rễ:** Trình tự kiểm tra symlink bằng `os.lstat()` rồi sau đó mở tệp bằng `open(path)` tạo ra một khoảng trống thời gian (Time-Of-Check to Time-Of-Use - TOCTOU) mà tại đó một tiến trình khác có thể thay thế tệp thông thường bằng symlink trước khi thao tác mở diễn ra.
+- **Biện pháp xử lý:**
+  + Xây dựng hàm `_open_and_hash_source_file(fpath)`: Mở tệp trực tiếp bằng bộ mô tả tệp (file descriptor) với cờ `os.O_NOFOLLOW | os.O_RDONLY` (và `os.O_CLOEXEC`).
+  + Xác thực bộ mô tả qua `os.fstat(fd)`: Kiểm tra `stat.S_ISREG` và bắt buộc `fstat_res.st_nlink == 1`.
+  + Đọc từng khối và băm SHA-256 trực tiếp từ bộ mô tả tệp mà không mở lại đường dẫn trên hệ thống tệp.
+  + Đóng triệt để khoảng trống TOCTOU trên các hệ điều hành hỗ trợ chuẩn POSIX `O_NOFOLLOW`.
+
+### R10. Thực thi kiểm soát ranh giới corpus và đọc an toàn manifest trong `count_completed_papers` (Enforce Corpus Containment and Safe Manifest Reads)
+- **Nguyên nhân gốc rễ:** Hàm `count_completed_papers()` trước đây không kiểm tra tính chứa trong thư mục gốc corpus (`corpus_dir`), có thể duyệt theo symlink trỏ ra ngoài; đồng thời đọc tệp `manifest.json` thô mà không kiểm tra symlink/hardlink và không xác thực schema trước khi đọc trường trạng thái.
+- **Biện pháp xử lý:**
+  + Từ chối ngay lập tức mọi thư mục bài báo là symlink hoặc giải quyết đường dẫn ra ngoài thư mục `corpus_dir` (`is_relative_to`).
+  + Mở tệp `manifest.json` an toàn bằng cờ `os.O_NOFOLLOW`, kiểm tra `stat.S_ISREG` và `st_nlink == 1`.
+  + Xác thực toàn diện schema và định danh bài báo (`contract_version == 2`, `arxiv_id`, `mssv`, `status in PAPER_STATES`, `discovery_status in DISCOVERY_STATES`) trước khi tin cậy bất kỳ trường trạng thái nào.
+  + Đối với phát hiện âm tính `discovery_status == "not_found"`: Bắt buộc `manifest.status == "not_found"`, danh sách `versions` rỗng và không tồn tại bất kỳ thư mục phiên bản `vN/` nào trên đĩa.
+  + Đối với phát hiện dương tính `discovery_status == "found"`: Bắt buộc toàn bộ phiên bản phải đạt trạng thái kết thúc (`TERMINAL`) và vượt qua đầy đủ kiểm toán `audit_version_integrity()`.
+
+### R11. Đồng bộ hóa giữa kế toán độ bao phủ và xuất bản bảng papers chính thức (Harmonize Coverage Accounting and Official Papers Export)
+- **Nguyên tắc phân định ranh giới hợp đồng (Contract Boundaries):**
+  + **Bảng xuất bản chính thức `papers.parquet` (`export_papers_table`):** Đóng vai trò là danh mục siêu dữ liệu bài báo (Paper Metadata Catalog). Với chế độ mặc định `verified_only=True`, bảng xuất bao gồm tất cả các bài báo có siêu dữ liệu được xác thực hoàn tất (`metadata.status == "complete"`).
+  + **Chế độ kiểm soát toàn diện Milestone 1 (`require_m1_complete=True`):** Cung cấp thêm cờ `require_m1_complete` trong `export_papers_table`. Khi cờ này được bật, hệ thống chỉ xuất các bài báo đạt trạng thái hoàn tất trọn vẹn toàn bộ vòng đời M1 (`manifest.status in {"complete", "complete_with_no_tex"}` và `manifest.metadata_status == "complete"`).
+  + **Hàm đếm tiến độ `count_completed_papers()`:** Đo lường chính xác số lượng bài báo trong cohort đã hoàn tất thu thập mã nguồn trên đĩa (hoặc phát hiện âm tính `not_found`), bảo đảm các điều kiện lưu trữ mã nguồn để phục vụ sao lưu và khôi phục.
+  + **Báo cáo tổng hợp (`scripts/generate_m1_report.py`):** Phản ánh minh bạch cả hai chỉ số: tỷ lệ hoàn tất mã nguồn (`source_completion_rate`) và tỷ lệ hoàn tất trọn vẹn M1 (`m1_completion_rate`).
+
 ---
 
 ## 7. Giới Hạn Kỹ Thuật Còn Lại (Remaining Limitations)

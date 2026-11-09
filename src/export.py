@@ -13,6 +13,7 @@ def export_papers_table(
     pairs: Iterable[Tuple[str, str]],
     *,
     verified_only: bool = True,
+    require_m1_complete: bool = False,
 ) -> List[Dict]:
     """Export the official M1 `papers` table matching crawling.md schema.
 
@@ -24,12 +25,22 @@ def export_papers_table(
       - revised_dates (list[str], nullable: None when unobserved, [] when confirmed no revisions)
       - venue (str, nullable)
 
-    Default verified_only=True: restricts output strictly to verified M1 complete papers (status == "complete").
-    Incomplete or partial records are excluded from official production exports.
+    Contracts:
+      - Default verified_only=True: restricts output strictly to verified M1 complete metadata (status == "complete").
+        Incomplete or partial records are excluded from official production exports.
+      - require_m1_complete=True: further restricts output strictly to papers that achieved full Milestone 1 completion
+        (manifest.status in {"complete", "complete_with_no_tex"} and manifest.metadata_status == "complete").
     """
     rows = []
     for mssv, arxiv_id in pairs:
         try:
+            if require_m1_complete:
+                manifest = store.read_manifest(mssv, arxiv_id)
+                if manifest.get("status") not in {"complete", "complete_with_no_tex"}:
+                    continue
+                if manifest.get("metadata_status") != "complete":
+                    continue
+
             meta = store.read_metadata(mssv, arxiv_id)
             if not isinstance(meta, dict):
                 continue
@@ -67,7 +78,7 @@ def export_diagnostic_papers_table(
     Separated from the official `export_papers_table`: allows intermediate records
     (status in {'partial', 'complete'}) when include_partial=True.
     """
-    return export_papers_table(store, pairs, verified_only=not include_partial)
+    return export_papers_table(store, pairs, verified_only=not include_partial, require_m1_complete=False)
 
 
 def export_references_table(

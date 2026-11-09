@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
+import errno
 import hashlib
 import json
 import os
@@ -123,12 +124,71 @@ class CohortIntegrityReport:
 SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _compute_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with open(path, "rb") as stream:
-        for chunk in iter(lambda: stream.read(65536), b""):
+def _open_and_hash_source_file(
+    fpath: Path,
+) -> Tuple[Optional[str], Optional[os.stat_result], Optional[str]]:
+    """Open a source file safely with O_NOFOLLOW, validate descriptor with fstat, and hash directly.
+
+    Closes the symlink TOCTOU replacement window (R9) by ensuring the file object
+    is validated and hashed from the single opened descriptor, without reopening the path.
+
+    Returns:
+        (sha256_hex, fstat_result, error_message)
+    """
+    flags = os.O_RDONLY
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
+    if has_nofollow:
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    try:
+        fd = os.open(fpath, flags)
+    except OSError as exc:
+        if exc.errno in (getattr(errno, "ELOOP", 40), getattr(errno, "EMLINK", 31)) or os.path.islink(fpath):
+            return None, None, f"Source file is a symbolic link: {exc}"
+        return None, None, f"Cannot open file with O_NOFOLLOW: {exc}"
+
+    try:
+        fstat_res = os.fstat(fd)
+        if stat.S_ISLNK(fstat_res.st_mode):
+            return None, None, "File descriptor points to a symbolic link"
+        if not stat.S_ISREG(fstat_res.st_mode):
+            return None, None, "File descriptor is not a regular file"
+        if fstat_res.st_nlink != 1:
+            return None, None, f"Source file has multiple hard links ({fstat_res.st_nlink})"
+
+        # Fallback check for platforms without O_NOFOLLOW
+        if not has_nofollow:
+            try:
+                lstat_res = os.lstat(fpath)
+                if stat.S_ISLNK(lstat_res.st_mode) or fstat_res.st_ino != lstat_res.st_ino or fstat_res.st_dev != lstat_res.st_dev:
+                    return None, None, "File replaced with symlink or different inode (fallback check)"
+            except OSError as exc:
+                return None, None, f"Fallback lstat check failed: {exc}"
+
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
             digest.update(chunk)
-    return digest.hexdigest()
+        return digest.hexdigest(), fstat_res, None
+    except OSError as exc:
+        return None, None, f"I/O error reading descriptor: {exc}"
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+def _compute_sha256(path: Path) -> str:
+    """Descriptor-based fallback for computing SHA-256."""
+    sha, _, err = _open_and_hash_source_file(path)
+    if err or sha is None:
+        raise OSError(err or "Failed to compute sha256 via descriptor")
+    return sha
 
 
 def audit_version_integrity(
@@ -338,10 +398,25 @@ def audit_version_integrity(
         actual_checksums = {}
         total_bytes = 0
         has_tex = False
+        traversal_failed = False
 
-        # Non-following directory traversal (R5)
+        def walk_onerror(err: OSError):
+            nonlocal traversal_failed
+            traversal_failed = True
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(getattr(err, "filename", version_dir)),
+                    version=version_name,
+                    message=f"Filesystem traversal error: {err}",
+                )
+            )
+
+        # Non-following directory traversal with fail-closed onerror (R5, R8)
         try:
-            for root, dirs, files in os.walk(version_dir, followlinks=False):
+            for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror):
                 root_path = Path(root)
                 if root_path.is_symlink() or os.path.islink(root_path):
                     violations.append(
@@ -389,23 +464,8 @@ def audit_version_integrity(
                         )
                         continue
 
-                    try:
-                        lstat_res = os.lstat(fpath)
-                    except OSError as exc:
-                        violations.append(
-                            IntegrityViolation(
-                                arxiv_id=arxiv_id,
-                                category="corrupted",
-                                severity="error",
-                                file_path=str(fpath),
-                                version=version_name,
-                                message=f"Filesystem error inspecting {rel_posix}: {exc}",
-                            )
-                        )
-                        continue
-
-                    # Reject symlink files immediately (do not open or hash) (R5)
-                    if stat.S_ISLNK(lstat_res.st_mode) or fpath.is_symlink() or os.path.islink(fpath):
+                    # Reject symlink files immediately (do not follow or open) (R5)
+                    if fpath.is_symlink() or os.path.islink(fpath):
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
@@ -418,33 +478,6 @@ def audit_version_integrity(
                         )
                         actual_files.add(rel_posix)
                         continue
-
-                    if not stat.S_ISREG(lstat_res.st_mode):
-                        violations.append(
-                            IntegrityViolation(
-                                arxiv_id=arxiv_id,
-                                category="corrupted",
-                                severity="error",
-                                file_path=str(fpath),
-                                version=version_name,
-                                message=f"Source file {rel_posix} is not a regular file",
-                            )
-                        )
-                        actual_files.add(rel_posix)
-                        continue
-
-                    # Reject multi-link hardlinks (R5)
-                    if lstat_res.st_nlink != 1:
-                        violations.append(
-                            IntegrityViolation(
-                                arxiv_id=arxiv_id,
-                                category="corrupted",
-                                severity="error",
-                                file_path=str(fpath),
-                                version=version_name,
-                                message=f"Source file {rel_posix} has multiple hard links ({lstat_res.st_nlink})",
-                            )
-                        )
 
                     # Containment check within version_dir (R5)
                     try:
@@ -491,9 +524,9 @@ def audit_version_integrity(
                     if suffix == ".tex":
                         has_tex = True
 
-                    try:
-                        sha = _compute_sha256(fpath)
-                    except OSError as exc:
+                    # Descriptor-based safe open and hashing (R9)
+                    sha, fstat_res, err_msg = _open_and_hash_source_file(fpath)
+                    if err_msg or fstat_res is None or sha is None:
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
@@ -501,7 +534,7 @@ def audit_version_integrity(
                                 severity="error",
                                 file_path=str(fpath),
                                 version=version_name,
-                                message=f"Filesystem error reading/hashing {rel_posix}: {exc}",
+                                message=f"Source file {rel_posix} validation failed: {err_msg}",
                             )
                         )
                         actual_files.add(rel_posix)
@@ -509,7 +542,7 @@ def audit_version_integrity(
 
                     actual_files.add(rel_posix)
                     actual_checksums[rel_posix] = sha
-                    total_bytes += lstat_res.st_size
+                    total_bytes += fstat_res.st_size
         except OSError as exc:
             violations.append(
                 IntegrityViolation(
@@ -519,6 +552,18 @@ def audit_version_integrity(
                     file_path=str(version_dir),
                     version=version_name,
                     message=f"Filesystem error traversing {version_name}/: {exc}",
+                )
+            )
+
+        if traversal_failed:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(version_dir),
+                    version=version_name,
+                    message=f"Filesystem traversal failed to inspect full subtree of {version_name}/",
                 )
             )
 
@@ -584,20 +629,57 @@ def audit_version_integrity(
                         )
                     )
 
-        # Check kept_bytes (R3)
-        exp_kept = version_record.get("kept_bytes")
-        if exp_kept is not None and exp_kept != total_bytes:
+        # Check kept_bytes (R7)
+        if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
-                    category="corrupted",
+                    category="incomplete",
                     severity="error",
                     version=version_name,
-                    expected=exp_kept,
-                    actual=total_bytes,
-                    message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                    expected="non-null integer",
+                    actual=None,
+                    message=f"Missing or null kept_bytes for terminal version {version_name}",
                 )
             )
+        else:
+            exp_kept = version_record["kept_bytes"]
+            if type(exp_kept) is not int or isinstance(exp_kept, bool):
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        expected="exact integer type (reject bool)",
+                        actual=type(exp_kept).__name__,
+                        message=f"kept_bytes must be exact integer (got {type(exp_kept).__name__}: {exp_kept!r})",
+                    )
+                )
+            elif exp_kept < 0:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        version=version_name,
+                        expected="non-negative integer",
+                        actual=exp_kept,
+                        message=f"kept_bytes cannot be negative (got {exp_kept})",
+                    )
+                )
+            elif exp_kept != total_bytes:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        version=version_name,
+                        expected=exp_kept,
+                        actual=total_bytes,
+                        message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                    )
+                )
 
         if not version_record.get("completed_at"):
             violations.append(
@@ -613,7 +695,7 @@ def audit_version_integrity(
             )
 
     elif st == "no_tex_source":
-        # Fully validate no_tex_source (R4)
+        # Fully validate no_tex_source (R4, R7, R8, R9)
         raw_files = version_record.get("files") or []
         expected_files = set(raw_files)
 
@@ -643,17 +725,33 @@ def audit_version_integrity(
                         message="Empty no_tex_source must not have file_checksums",
                     )
                 )
-            exp_kept = version_record.get("kept_bytes")
-            if exp_kept not in (0, None):
+            # R7: Enforce exact integer 0 for empty no_tex_source
+            if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
-                        category="invalid",
+                        category="incomplete",
                         severity="error",
                         version=version_name,
-                        message=f"Empty no_tex_source must have kept_bytes=0, got {exp_kept}",
+                        expected=0,
+                        actual=None,
+                        message=f"Missing or null kept_bytes for empty no_tex_source in {version_name}",
                     )
                 )
+            else:
+                exp_kept = version_record["kept_bytes"]
+                if type(exp_kept) is not int or isinstance(exp_kept, bool) or exp_kept != 0:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            version=version_name,
+                            expected=0,
+                            actual=exp_kept,
+                            message=f"Empty no_tex_source must have exact integer kept_bytes=0, got {exp_kept!r}",
+                        )
+                    )
         else:
             # Non-empty no_tex_source (bib-only): version directory must exist and be a directory
             if not version_dir.exists():
@@ -759,10 +857,25 @@ def audit_version_integrity(
             actual_files = set()
             actual_checksums = {}
             total_bytes = 0
+            traversal_failed = False
 
-            # Non-following traversal of version_dir (R4, R5)
+            def walk_onerror_bib(err: OSError):
+                nonlocal traversal_failed
+                traversal_failed = True
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(getattr(err, "filename", version_dir)),
+                        version=version_name,
+                        message=f"Filesystem traversal error: {err}",
+                    )
+                )
+
+            # Non-following traversal of version_dir with fail-closed onerror (R4, R5, R8)
             try:
-                for root, dirs, files in os.walk(version_dir, followlinks=False):
+                for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror_bib):
                     root_path = Path(root)
                     if root_path.is_symlink() or os.path.islink(root_path):
                         violations.append(
@@ -809,22 +922,8 @@ def audit_version_integrity(
                             )
                             continue
 
-                        try:
-                            lstat_res = os.lstat(fpath)
-                        except OSError as exc:
-                            violations.append(
-                                IntegrityViolation(
-                                    arxiv_id=arxiv_id,
-                                    category="corrupted",
-                                    severity="error",
-                                    file_path=str(fpath),
-                                    version=version_name,
-                                    message=f"Filesystem error inspecting {rel_posix}: {exc}",
-                                )
-                            )
-                            continue
-
-                        if stat.S_ISLNK(lstat_res.st_mode) or fpath.is_symlink() or os.path.islink(fpath):
+                        # Reject symlink files immediately (do not follow or open) (R5)
+                        if fpath.is_symlink() or os.path.islink(fpath):
                             violations.append(
                                 IntegrityViolation(
                                     arxiv_id=arxiv_id,
@@ -837,32 +936,6 @@ def audit_version_integrity(
                             )
                             actual_files.add(rel_posix)
                             continue
-
-                        if not stat.S_ISREG(lstat_res.st_mode):
-                            violations.append(
-                                IntegrityViolation(
-                                    arxiv_id=arxiv_id,
-                                    category="corrupted",
-                                    severity="error",
-                                    file_path=str(fpath),
-                                    version=version_name,
-                                    message=f"Source file {rel_posix} is not a regular file",
-                                )
-                            )
-                            actual_files.add(rel_posix)
-                            continue
-
-                        if lstat_res.st_nlink != 1:
-                            violations.append(
-                                IntegrityViolation(
-                                    arxiv_id=arxiv_id,
-                                    category="corrupted",
-                                    severity="error",
-                                    file_path=str(fpath),
-                                    version=version_name,
-                                    message=f"Source file {rel_posix} has multiple hard links ({lstat_res.st_nlink})",
-                                )
-                            )
 
                         try:
                             if not fpath.resolve().is_relative_to(version_dir.resolve()):
@@ -905,9 +978,9 @@ def audit_version_integrity(
                                 )
                             )
 
-                        try:
-                            sha = _compute_sha256(fpath)
-                        except OSError as exc:
+                        # Descriptor-based safe open and hashing (R9)
+                        sha, fstat_res, err_msg = _open_and_hash_source_file(fpath)
+                        if err_msg or fstat_res is None or sha is None:
                             violations.append(
                                 IntegrityViolation(
                                     arxiv_id=arxiv_id,
@@ -915,7 +988,7 @@ def audit_version_integrity(
                                     severity="error",
                                     file_path=str(fpath),
                                     version=version_name,
-                                    message=f"Filesystem error reading/hashing {rel_posix}: {exc}",
+                                    message=f"Source file {rel_posix} validation failed: {err_msg}",
                                 )
                             )
                             actual_files.add(rel_posix)
@@ -923,7 +996,7 @@ def audit_version_integrity(
 
                         actual_files.add(rel_posix)
                         actual_checksums[rel_posix] = sha
-                        total_bytes += lstat_res.st_size
+                        total_bytes += fstat_res.st_size
             except OSError as exc:
                 violations.append(
                     IntegrityViolation(
@@ -933,6 +1006,18 @@ def audit_version_integrity(
                         file_path=str(version_dir),
                         version=version_name,
                         message=f"Filesystem error traversing {version_name}/: {exc}",
+                    )
+                )
+
+            if traversal_failed:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="corrupted",
+                        severity="error",
+                        file_path=str(version_dir),
+                        version=version_name,
+                        message=f"Filesystem traversal failed to inspect full subtree of {version_name}/",
                     )
                 )
 
@@ -982,19 +1067,57 @@ def audit_version_integrity(
                             )
                         )
 
-            exp_kept = version_record.get("kept_bytes")
-            if exp_kept is not None and exp_kept != total_bytes:
+            # Check kept_bytes (R7)
+            if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
-                        category="corrupted",
+                        category="incomplete",
                         severity="error",
                         version=version_name,
-                        expected=exp_kept,
-                        actual=total_bytes,
-                        message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                        expected="non-null integer",
+                        actual=None,
+                        message=f"Missing or null kept_bytes for bib-only no_tex_source in {version_name}",
                     )
                 )
+            else:
+                exp_kept = version_record["kept_bytes"]
+                if type(exp_kept) is not int or isinstance(exp_kept, bool):
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            version=version_name,
+                            expected="exact integer type (reject bool)",
+                            actual=type(exp_kept).__name__,
+                            message=f"kept_bytes must be exact integer (got {type(exp_kept).__name__}: {exp_kept!r})",
+                        )
+                    )
+                elif exp_kept < 0:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            version=version_name,
+                            expected="non-negative integer",
+                            actual=exp_kept,
+                            message=f"kept_bytes cannot be negative (got {exp_kept})",
+                        )
+                    )
+                elif exp_kept != total_bytes:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            version=version_name,
+                            expected=exp_kept,
+                            actual=total_bytes,
+                            message=f"Kept bytes mismatch for {version_name}: expected {exp_kept}, got {total_bytes}",
+                        )
+                    )
 
             if not version_record.get("completed_at"):
                 violations.append(

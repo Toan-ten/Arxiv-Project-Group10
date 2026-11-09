@@ -526,8 +526,14 @@ class TestFastProduction(unittest.TestCase):
         tex_path.write_text(tex_content, encoding="utf-8")
         sha = hashlib.sha256(tex_content.encode("utf-8")).hexdigest()
         (p1 / "manifest.json").write_text(json.dumps({
+            "contract_version": 2,
+            "arxiv_id": "2508.07872",
+            "mssv": "24120010",
+            "status": "complete",
             "discovery_status": "found",
             "version_status": "resolved",
+            "metadata_status": "complete",
+            "references_status": "complete",
             "versions": {
                 "v1": {
                     "versioned_id": "2508.07872v1",
@@ -545,8 +551,14 @@ class TestFastProduction(unittest.TestCase):
         p2 = runner.corpus_dir / "2508-07873"
         p2.mkdir(parents=True, exist_ok=True)
         (p2 / "manifest.json").write_text(json.dumps({
+            "contract_version": 2,
+            "arxiv_id": "2508.07873",
+            "mssv": "24120010",
+            "status": "failed",
             "discovery_status": "found",
             "version_status": "resolved",
+            "metadata_status": "not_attempted",
+            "references_status": "not_attempted",
             "versions": {"v1": {"status": "unsafe_archive"}},
         }), encoding="utf-8")
 
@@ -554,8 +566,15 @@ class TestFastProduction(unittest.TestCase):
         p3 = runner.corpus_dir / "2508-07874"
         p3.mkdir(parents=True, exist_ok=True)
         (p3 / "manifest.json").write_text(json.dumps({
+            "contract_version": 2,
+            "arxiv_id": "2508.07874",
+            "mssv": "24120010",
+            "status": "not_found",
             "discovery_status": "not_found",
-            "version_status": "none",
+            "version_status": "not_applicable",
+            "metadata_status": "not_found",
+            "references_status": "not_attempted",
+            "versions": {},
         }), encoding="utf-8")
 
         completed = runner.count_completed_papers(1)
@@ -967,3 +986,157 @@ shutil.rmtree(target2)
             runner.run(["git", "checkout", "--detach", valid_sha], check=False)
         with self.assertRaises(AssertionError, msg="text=False on git rev-parse HEAD must fail explicitly"):
             runner.check_output(["git", "rev-parse", "HEAD"], text=False)
+
+    # ---------------------------------------------------------
+    # R10: Adversarial count_completed_papers Containment & Safety Tests
+    # ---------------------------------------------------------
+    def test_count_completed_papers_rejects_symlinked_paper_directory(self):
+        """R10: Paper directory that is a symlink or escapes corpus root is rejected."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        with tempfile.TemporaryDirectory() as outside_td:
+            outside_paper = Path(outside_td) / "fake_paper"
+            outside_paper.mkdir(parents=True, exist_ok=True)
+            (outside_paper / "manifest.json").write_text(json.dumps({
+                "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+                "status": "complete", "discovery_status": "found", "version_status": "resolved",
+                "metadata_status": "complete", "references_status": "complete",
+                "versions": {
+                    "v1": {
+                        "versioned_id": "2508.07872v1", "status": "no_tex_source",
+                        "source_status": "no_tex_source", "files": [], "file_checksums": {},
+                        "kept_bytes": 0, "completed_at": "2026-11-09T00:00:00Z",
+                    }
+                },
+            }), encoding="utf-8")
+
+            # Symlink paper folder pointing outside corpus
+            symlink_paper = runner.corpus_dir / "2508-07872"
+            symlink_paper.symlink_to(outside_paper)
+
+            self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_rejects_symlinked_manifest(self):
+        """R10: manifest.json that is a symlink or hardlink is rejected."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as outside_td:
+            outside_manifest = Path(outside_td) / "outside_manifest.json"
+            outside_manifest.write_text(json.dumps({
+                "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+                "status": "complete", "discovery_status": "found", "version_status": "resolved",
+                "metadata_status": "complete", "references_status": "complete",
+                "versions": {
+                    "v1": {
+                        "versioned_id": "2508.07872v1", "status": "no_tex_source",
+                        "source_status": "no_tex_source", "files": [], "file_checksums": {},
+                        "kept_bytes": 0, "completed_at": "2026-11-09T00:00:00Z",
+                    }
+                },
+            }), encoding="utf-8")
+
+            # Symlink manifest.json
+            (paper_folder / "manifest.json").symlink_to(outside_manifest)
+            self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_rejects_malformed_manifest_with_terminal_status(self):
+        """R10: Manifest with terminal status but malformed schema is rejected."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        # 1. Missing contract_version
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "arxiv_id": "2508.07872", "mssv": "24120010", "status": "complete",
+            "discovery_status": "found", "version_status": "resolved", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 2. Wrong contract_version
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 999, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "complete", "discovery_status": "found", "version_status": "resolved", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 3. Invalid status string
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "invalid_status_xyz", "discovery_status": "found", "version_status": "resolved", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # 4. Invalid discovery_status
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "complete", "discovery_status": "unknown_discovery", "version_status": "resolved", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_rejects_wrong_identity_manifest(self):
+        """R10: Manifest with mismatched arxiv_id or mssv is rejected."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        # Wrong arxiv_id
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.99999", "mssv": "24120010",
+            "status": "complete", "discovery_status": "found", "version_status": "resolved",
+            "metadata_status": "complete", "references_status": "complete",
+            "versions": {
+                "v1": {
+                    "versioned_id": "2508.99999v1", "status": "no_tex_source",
+                    "source_status": "no_tex_source", "files": [], "file_checksums": {},
+                    "kept_bytes": 0, "completed_at": "2026-11-09T00:00:00Z",
+                }
+            },
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # Wrong mssv
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "99999999",
+            "status": "complete", "discovery_status": "found", "version_status": "resolved",
+            "metadata_status": "complete", "references_status": "complete",
+            "versions": {
+                "v1": {
+                    "versioned_id": "2508.07872v1", "status": "no_tex_source",
+                    "source_status": "no_tex_source", "files": [], "file_checksums": {},
+                    "kept_bytes": 0, "completed_at": "2026-11-09T00:00:00Z",
+                }
+            },
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+    def test_count_completed_papers_negative_discovery_valid_and_invalid(self):
+        """R10: Negative discovery (not_found) requires valid terminal status and no version dirs on disk."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_folder = runner.corpus_dir / "2508-07872"
+        paper_folder.mkdir(parents=True, exist_ok=True)
+
+        # Valid negative discovery
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "not_found", "discovery_status": "not_found", "version_status": "not_applicable",
+            "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 1)
+
+        # Invalid: non-terminal manifest.status with discovery_status='not_found'
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "in_progress", "discovery_status": "not_found", "version_status": "not_applicable",
+            "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
+        }), encoding="utf-8")
+        self.assertEqual(runner.count_completed_papers(1), 0)
+
+        # Invalid: unexpected version directory exists on disk for not_found
+        (paper_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2, "arxiv_id": "2508.07872", "mssv": "24120010",
+            "status": "not_found", "discovery_status": "not_found", "version_status": "not_applicable",
+            "metadata_status": "not_found", "references_status": "not_attempted", "versions": {},
+        }), encoding="utf-8")
+        (paper_folder / "v1").mkdir(parents=True, exist_ok=True)
+        self.assertEqual(runner.count_completed_papers(1), 0)

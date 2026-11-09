@@ -7,14 +7,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from src.export import export_papers_table, export_references_table
 from src.fast_production import FastProductionRunner
 from src.storage import CorpusStorage, arxiv_id_to_folder_key
 from src.storage_integrity import (
+    _open_and_hash_source_file,
     audit_cohort_integrity,
     audit_paper_integrity,
     audit_version_integrity,
@@ -579,8 +582,14 @@ class TestStorageIntegrity(unittest.TestCase):
         p_folder = runner.corpus_dir / self.folder_key
         p_folder.mkdir(parents=True, exist_ok=True)
         (p_folder / "manifest.json").write_text(json.dumps({
+            "contract_version": 2,
+            "arxiv_id": self.arxiv_id,
+            "mssv": self.mssv,
+            "status": "complete_with_no_tex",
             "discovery_status": "found",
             "version_status": "resolved",
+            "metadata_status": "complete",
+            "references_status": "complete",
             "versions": {
                 "v1": {
                     "versioned_id": f"{self.arxiv_id}v1",
@@ -600,6 +609,247 @@ class TestStorageIntegrity(unittest.TestCase):
         # Invalid layout: unexpected v1 directory on disk for empty no_tex_source
         (p_folder / "v1").mkdir(parents=True, exist_ok=True)
         self.assertEqual(runner.count_completed_papers(1), 0)
+
+    # ---------------------------------------------------------
+    # R7: Require kept_bytes for Terminal Source Records Tests
+    # ---------------------------------------------------------
+    def test_audit_kept_bytes_contract_success_cases(self):
+        """R7: For status == 'success', kept_bytes is required, exact int >= 0, and matches disk bytes."""
+        self._setup_valid_complete_paper()
+        man_path = self.paper_dir / "manifest.json"
+        base_man = json.loads(man_path.read_text(encoding="utf-8"))
+        tex_bytes = len((self.paper_dir / "v1" / "main.tex").read_bytes())
+
+        # 1. Missing kept_bytes
+        man = json.loads(json.dumps(base_man))
+        del man["versions"]["v1"]["kept_bytes"]
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        # Direct audit_version_integrity catches missing kept_bytes
+        v_violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "incomplete" and "missing or null kept_bytes" in v.message.lower() for v in v_violations))
+        # Paper audit catches manifest violation
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+
+        # 2. Null kept_bytes
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = None
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "incomplete" and "missing or null kept_bytes" in v.message.lower() for v in res.violations))
+
+        # 3. Negative kept_bytes
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = -1
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "cannot be negative" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+
+        # 4. Bool kept_bytes (reject bool as non-int)
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = True
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "exact integer" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+
+        # 5. Incorrect/mismatched kept_bytes
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = tex_bytes + 100
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "corrupted" and "kept bytes mismatch" in v.message.lower() for v in res.violations))
+
+        # 6. Correct kept_bytes passes cleanly
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = tex_bytes
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, self.arxiv_id)
+        self.assertTrue(res.is_valid)
+
+    def test_audit_kept_bytes_contract_no_tex_source_cases(self):
+        """R7: For status == 'no_tex_source', kept_bytes is strictly validated for empty and bib-only."""
+        # --- Case A: Empty no_tex_source ---
+        empty_aid = "2508.07873"
+        self.store.record_discovery({
+            "mssv": self.mssv, "arxiv_id": empty_aid, "status": "found",
+            "version_status": "resolved", "version_ids": [f"{empty_aid}v1"],
+            "latest_version_id": f"{empty_aid}v1", "title": "Empty No TeX Paper",
+            "authors": ["Author"], "published": "2025-08-01",
+            "updated": "2025-08-01", "missing_fields": [],
+        })
+        self.store.begin_version(self.mssv, empty_aid, "v1")
+        self.store.record_source_result({
+            "mssv": self.mssv, "arxiv_id": empty_aid, "versioned_id": f"{empty_aid}v1",
+            "status": "no_tex_source", "files": [], "error": None,
+        })
+        empty_folder = self.corpus_dir / arxiv_id_to_folder_key(empty_aid)
+        man_path = empty_folder / "manifest.json"
+        base_man = json.loads(man_path.read_text(encoding="utf-8"))
+
+        # Missing kept_bytes
+        man = json.loads(json.dumps(base_man))
+        del man["versions"]["v1"]["kept_bytes"]
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(empty_folder, empty_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "incomplete" and "missing or null kept_bytes" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, empty_aid)
+        self.assertFalse(res.is_valid)
+
+        # Null kept_bytes
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = None
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, empty_aid)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "incomplete" and "missing or null kept_bytes" in v.message.lower() for v in res.violations))
+
+        # Non-zero int for empty no_tex_source
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = 10
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(empty_folder, empty_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "kept_bytes=0" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, empty_aid)
+        self.assertFalse(res.is_valid)
+
+        # Bool for empty no_tex_source
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = False
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(empty_folder, empty_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "kept_bytes=0" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, empty_aid)
+        self.assertFalse(res.is_valid)
+
+        # Exact integer 0 passes
+        man = json.loads(json.dumps(base_man))
+        man["versions"]["v1"]["kept_bytes"] = 0
+        man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, empty_aid)
+        self.assertTrue(res.is_valid)
+
+        # --- Case B: Bib-only no_tex_source ---
+        bib_aid = "2508.07874"
+        self.store.record_discovery({
+            "mssv": self.mssv, "arxiv_id": bib_aid, "status": "found",
+            "version_status": "resolved", "version_ids": [f"{bib_aid}v1"],
+            "latest_version_id": f"{bib_aid}v1", "title": "Bib Paper",
+            "authors": ["Author"], "published": "2025-08-01",
+            "updated": "2025-08-01", "missing_fields": [],
+        })
+        dest = self.store.begin_version(self.mssv, bib_aid, "v1")
+        dest.mkdir(parents=True, exist_ok=True)
+        bib_content = "@article{test, title={Test Paper}}"
+        (dest / "refs.bib").write_text(bib_content, encoding="utf-8")
+        self.store.record_source_result({
+            "mssv": self.mssv, "arxiv_id": bib_aid, "versioned_id": f"{bib_aid}v1",
+            "status": "no_tex_source", "files": ["refs.bib"], "error": None,
+        })
+        bib_folder = self.corpus_dir / arxiv_id_to_folder_key(bib_aid)
+        bib_man_path = bib_folder / "manifest.json"
+        base_bib_man = json.loads(bib_man_path.read_text(encoding="utf-8"))
+        actual_bib_bytes = len(bib_content.encode("utf-8"))
+
+        # Missing kept_bytes
+        man = json.loads(json.dumps(base_bib_man))
+        del man["versions"]["v1"]["kept_bytes"]
+        bib_man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(bib_folder, bib_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "incomplete" and "missing or null kept_bytes" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, bib_aid)
+        self.assertFalse(res.is_valid)
+
+        # Negative kept_bytes
+        man = json.loads(json.dumps(base_bib_man))
+        man["versions"]["v1"]["kept_bytes"] = -5
+        bib_man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(bib_folder, bib_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "cannot be negative" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, bib_aid)
+        self.assertFalse(res.is_valid)
+
+        # Bool kept_bytes
+        man = json.loads(json.dumps(base_bib_man))
+        man["versions"]["v1"]["kept_bytes"] = True
+        bib_man_path.write_text(json.dumps(man), encoding="utf-8")
+        v_violations = audit_version_integrity(bib_folder, bib_aid, "v1", man["versions"]["v1"])
+        self.assertTrue(any(v.category == "invalid" and "exact integer" in v.message.lower() for v in v_violations))
+        res = audit_paper_integrity(self.store, self.mssv, bib_aid)
+        self.assertFalse(res.is_valid)
+
+        # Mismatched kept_bytes
+        man = json.loads(json.dumps(base_bib_man))
+        man["versions"]["v1"]["kept_bytes"] = actual_bib_bytes + 999
+        bib_man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, bib_aid)
+        self.assertFalse(res.is_valid)
+        self.assertTrue(any(v.category == "corrupted" and "kept bytes mismatch" in v.message.lower() for v in res.violations))
+
+        # Correct kept_bytes passes
+        man = json.loads(json.dumps(base_bib_man))
+        man["versions"]["v1"]["kept_bytes"] = actual_bib_bytes
+        bib_man_path.write_text(json.dumps(man), encoding="utf-8")
+        res = audit_paper_integrity(self.store, self.mssv, bib_aid)
+        self.assertTrue(res.is_valid)
+
+    # ---------------------------------------------------------
+    # R8: Fail-Closed Filesystem Traversal Tests
+    # ---------------------------------------------------------
+    def test_audit_traversal_error_fail_closed(self):
+        """R8: Filesystem traversal errors invoke onerror and cause audit to fail closed."""
+        self._setup_valid_complete_paper()
+        man = json.loads((self.paper_dir / "manifest.json").read_text(encoding="utf-8"))
+        v1_record = man["versions"]["v1"]
+
+        real_walk = os.walk
+
+        def failing_walk(top, **kwargs):
+            onerror = kwargs.get("onerror")
+            if onerror:
+                onerror(PermissionError(f"Simulated permission denied on {top}/subdir"))
+            # Yield top without entering subdirs
+            yield top, [], ["main.tex"]
+
+        with patch("os.walk", side_effect=failing_walk):
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", v1_record)
+            self.assertTrue(any(v.category == "corrupted" and "traversal error" in v.message.lower() for v in violations))
+            self.assertTrue(any(v.category == "corrupted" and "failed to inspect full subtree" in v.message.lower() for v in violations))
+
+    # ---------------------------------------------------------
+    # R9: TOCTOU and Descriptor Hashing Tests
+    # ---------------------------------------------------------
+    def test_audit_descriptor_open_and_hash_symlink_rejection(self):
+        """R9: _open_and_hash_source_file opens with O_NOFOLLOW and rejects symlinks directly via descriptor."""
+        with tempfile.TemporaryDirectory() as outside_td:
+            outside_file = Path(outside_td) / "target.tex"
+            outside_file.write_text("OUTSIDE_SOURCE", encoding="utf-8")
+
+            link_file = Path(self.td.name) / "test_link.tex"
+            link_file.symlink_to(outside_file)
+
+            sha, fstat_res, err = _open_and_hash_source_file(link_file)
+            self.assertIsNone(sha)
+            self.assertIsNone(fstat_res)
+            self.assertIsNotNone(err)
+            self.assertIn("symbolic link", err.lower())
+
+            # Regular file hashes correctly without error
+            regular_file = Path(self.td.name) / "regular.tex"
+            content = "REGULAR_SOURCE_CONTENT"
+            regular_file.write_text(content, encoding="utf-8")
+
+            sha, fstat_res, err = _open_and_hash_source_file(regular_file)
+            self.assertIsNone(err)
+            self.assertIsNotNone(sha)
+            self.assertIsNotNone(fstat_res)
+            self.assertEqual(sha, hashlib.sha256(content.encode("utf-8")).hexdigest())
+            self.assertEqual(fstat_res.st_size, len(content.encode("utf-8")))
 
 
 if __name__ == "__main__":
