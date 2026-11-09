@@ -85,10 +85,46 @@ class PaperIntegrityResult:
             if v.category in {"corrupted", "unmanaged"}:
                 return True
             if v.category == "invalid":
-                return True
+                msg = v.message.lower()
+                # 1. Checksum, SHA-256 or byte metric failures
+                if "checksum" in msg or "sha" in msg or "kept_bytes" in msg or "byte" in msg:
+                    return True
+                # 2. Path safety, symlinks, containment failures
+                if "symlink" in msg or "symbolic link" in msg or "path safety" in msg or "resolves outside" in msg:
+                    return True
+                # 3. Source file validity failures (e.g. non-tex, missing tex in success version)
+                if ".tex" in msg or ".bib" in msg or "files list" in msg:
+                    return True
+                # 4. Schema and parse validation failures on existing files
+                if "schema violation" in msg or "validation failed" in msg or "unparseable" in msg:
+                    return True
+                # 5. Negative discovery structural violations (version dir exists on disk for not_found)
+                if "not_found" in msg and "version" in msg:
+                    return True
+                # 6. Version structure errors
+                if "version name format" in msg or "version id mismatch" in msg or "unknown version status" in msg:
+                    return True
+                # 7. Cross-file consistency:
+                # Disagreement between manifest and stage files when a stage or paper is declared complete
+                if "disagrees with" in msg or "do not match" in msg:
+                    if (
+                        self.manifest_status in {"complete", "complete_with_no_tex"}
+                        or self.metadata_status == "complete"
+                        or self.references_status == "complete"
+                    ):
+                        return True
+                # 8. References completeness claims:
+                if "marked 'complete' but" in msg:
+                    return True
             if v.category == "missing":
                 msg = v.message.lower()
+                # Missing declared source file or version directory for a success version
                 if "source directory" in msg or "expected files missing" in msg or "manifest.json" in msg:
+                    return True
+                # Missing metadata or references when manifest explicitly claimed it was complete
+                if "metadata.json" in msg and self.manifest_status in {"complete", "complete_with_no_tex"}:
+                    return True
+                if "references.json" in msg and self.manifest_status in {"complete", "complete_with_no_tex"}:
                     return True
         return False
 

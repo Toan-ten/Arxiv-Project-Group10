@@ -536,6 +536,283 @@ class TestPhase2RemediationAudit(BaseReportingTest):
         self.assertFalse(res["is_reconciled"])
         self.assertTrue(any("Found papers mismatch" in d for d in res["discrepancies"]))
 
+    def test_find_rep_d_m1_complete_metadata_corrupted_between_passes_fails_reconciliation(self):
+        """FIND-REP-D-1: M1-complete paper with metadata corrupted between passes fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+
+        def corrupt_meta():
+            (p_dir / "metadata.json").write_text("{NOT_VALID_JSON", encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=corrupt_meta,
+        )
+
+        # Pass 1 classified it as m1_complete
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        # Pass 2 caught the discrepancy and failed reconciliation closed
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Check 8" in d or "metadata" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+
+    def test_find_rep_d_m1_complete_references_incomplete_between_passes_fails_reconciliation(self):
+        """FIND-REP-D-2: M1-complete paper with references coverage made incomplete between passes fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+
+        def make_refs_incomplete():
+            ref_path = p_dir / "references.json"
+            rdata = json.loads(ref_path.read_text(encoding="utf-8"))
+            rdata["coverage"]["complete"] = False
+            ref_path.write_text(json.dumps(rdata), encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=make_refs_incomplete,
+        )
+
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Check 11" in d or "coverage" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+
+    def test_find_rep_d_m1_complete_source_checksum_tampered_between_passes_fails_reconciliation(self):
+        """FIND-REP-D-3: M1-complete paper with modified TeX checksum between passes fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+
+        def tamper_checksum():
+            (p_dir / "v1" / "main.tex").write_text("TAMPERED_TEX_SOURCE_BETWEEN_PASSES", encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=tamper_checksum,
+        )
+
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Check 7" in d or "checksum" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+
+    def test_find_rep_d_m1_complete_manifest_status_changed_between_passes_fails_reconciliation(self):
+        """FIND-REP-D-4: M1-complete paper with manifest status downgraded between passes fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+
+        def downgrade_manifest():
+            m_path = p_dir / "manifest.json"
+            mdata = json.loads(m_path.read_text(encoding="utf-8"))
+            mdata["status"] = "partial"
+            m_path.write_text(json.dumps(mdata), encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=downgrade_manifest,
+        )
+
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Check 5" in d or "terminal manifest status" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+
+    def test_find_rep_d_m1_complete_version_directory_or_source_file_removed_between_passes_fails_reconciliation(self):
+        """FIND-REP-D-5: M1-complete paper with source file deleted between passes fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+
+        def delete_source_file():
+            (p_dir / "v1" / "main.tex").unlink()
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1)],
+            _between_passes_hook=delete_source_file,
+        )
+
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Check 7" in d or "missing" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+
+    def test_find_rep_d_m1_complete_io_error_during_reconciliation_fails_reconciliation(self):
+        """FIND-REP-D-6: Filesystem error during reconciliation pass fails closed."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        patcher = None
+
+        def hook():
+            nonlocal patcher
+            patcher = unittest.mock.patch(
+                "src.reporting.audit_version_integrity",
+                side_effect=OSError("Disk read I/O error"),
+            )
+            patcher.start()
+
+        try:
+            stats = compute_m1_statistics(
+                self.store,
+                [(self.mssv, self.aid1)],
+                _between_passes_hook=hook,
+            )
+            self.assertEqual(stats["m1_complete_papers"], 1)
+            self.assertFalse(stats["is_reconciled"])
+            self.assertTrue(any("Check 7" in d or "disk read i/o error" in d.lower() for d in stats["reconciliation"]["discrepancies"]))
+            self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 0)
+        finally:
+            if patcher is not None:
+                patcher.stop()
+
+    def test_find_rep_d_valid_m1_complete_paper_passes_both_passes(self):
+        """FIND-REP-D-7: Fully valid M1-complete paper passes both classification and independent reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        stats = compute_m1_statistics(self.store, [(self.mssv, self.aid1)])
+        self.assertEqual(stats["m1_complete_papers"], 1)
+        self.assertTrue(stats["is_reconciled"])
+        self.assertEqual(stats["reconciliation"]["discrepancies"], [])
+        self.assertEqual(stats["reconciliation"]["verified_m1_complete_count"], 1)
+
+    def test_find_rep_d_version_directory_on_disk_mismatch_fails_reconciliation(self):
+        """FIND-REP-D-8: Extraneous or missing version directory on disk fails reconciliation."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_metadata(self.aid1)
+        self._complete_references(self.aid1, [])
+
+        # Create extraneous version directory on disk not declared in manifest
+        p_dir = self.store.paper_path(self.mssv, self.aid1)
+        (p_dir / "v2").mkdir(parents=True, exist_ok=True)
+
+        stats = compute_m1_statistics(self.store, [(self.mssv, self.aid1)])
+        self.assertFalse(stats["is_reconciled"])
+        self.assertTrue(any("Version directory on disk mismatch" in d or "Check 12" in d for d in stats["reconciliation"]["discrepancies"]))
+
+    def test_has_integrity_failure_semantic_boundaries(self):
+        """FIND-REP-B Boundaries: Incomplete lifecycle stages are NOT integrity failures; corruptions are."""
+        from src.storage_integrity import IntegrityViolation, PaperIntegrityResult
+
+        # 1. Normal unattempted stage: missing metadata or references is NOT an integrity failure
+        normal_incomplete = PaperIntegrityResult(
+            arxiv_id=self.aid1,
+            mssv=self.mssv,
+            status="incomplete",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.aid1,
+                    category="missing",
+                    severity="error",
+                    message="metadata.json not yet written",
+                )
+            ],
+            manifest_status="not_attempted",
+        )
+        self.assertFalse(normal_incomplete.has_integrity_failure)
+
+        # 2. Genuine corruption (checksum mismatch)
+        checksum_failure = PaperIntegrityResult(
+            arxiv_id=self.aid1,
+            mssv=self.mssv,
+            status="corrupted",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.aid1,
+                    category="invalid",
+                    severity="error",
+                    message="SHA-256 checksum mismatch for v1/main.tex",
+                )
+            ],
+        )
+        self.assertTrue(checksum_failure.has_integrity_failure)
+
+        # 3. Genuine corruption (kept_bytes failure)
+        bytes_failure = PaperIntegrityResult(
+            arxiv_id=self.aid1,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.aid1,
+                    category="invalid",
+                    severity="error",
+                    message="Kept bytes mismatch for v1",
+                )
+            ],
+        )
+        self.assertTrue(bytes_failure.has_integrity_failure)
+
+        # 4. Genuine corruption (symlink traversal)
+        symlink_failure = PaperIntegrityResult(
+            arxiv_id=self.aid1,
+            mssv=self.mssv,
+            status="corrupted",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.aid1,
+                    category="invalid",
+                    severity="error",
+                    message="Version directory v1 is a symbolic link",
+                )
+            ],
+        )
+        self.assertTrue(symlink_failure.has_integrity_failure)
+
+        # 5. Negative discovery structural violation (version dir on disk)
+        not_found_anomaly = PaperIntegrityResult(
+            arxiv_id=self.aid1,
+            mssv=self.mssv,
+            status="invalid",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.aid1,
+                    category="invalid",
+                    severity="error",
+                    message="Version directory v1 exists on disk for not_found paper",
+                )
+            ],
+        )
+        self.assertTrue(not_found_anomaly.has_integrity_failure)
+
     def test_source_integrity_failed_versions_counter(self):
         """source_integrity_failed_versions tracks versions failing integrity audit."""
         self._setup_found_paper(self.aid1, ["v1", "v2"])

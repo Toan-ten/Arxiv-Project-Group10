@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from src.id_ranges import ConfigError, arxiv_id_to_folder_key
 from src.storage import (
@@ -23,7 +23,11 @@ from src.storage import (
     StorageError,
     TERMINAL,
 )
-from src.storage_integrity import audit_paper_integrity, audit_version_integrity
+from src.storage_integrity import (
+    IntegrityViolation,
+    audit_paper_integrity,
+    audit_version_integrity,
+)
 
 METRIC_DEFINITION_VERSION = "2.1.0"
 REPORT_SCHEMA_VERSION = "2.1.0"
@@ -68,11 +72,13 @@ def _perform_independent_reconciliation(
     store: CorpusStorage,
     pairs_list: List[Tuple[str, str]],
     stats: Dict[str, Any],
+    m1_complete_candidates: Optional[List[Tuple[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Perform a second-pass independent reconciliation audit across disk and candidate records.
 
     Verifies the accuracy of first-pass classifications against raw filesystem structures,
-    raw manifest checkpoints, and full integrity re-evaluations (FIND-REP-D).
+    raw manifest checkpoints, version directory consistency, and full 12-point M1 integrity
+    re-evaluations (FIND-REP-D).
     """
     total_candidates = len(pairs_list)
     raw_found_count = 0
@@ -89,37 +95,60 @@ def _perform_independent_reconciliation(
 
     discrepancies: List[str] = []
 
+    try:
+        resolved_corpus_root = store.root.resolve()
+    except (OSError, RuntimeError) as exc:
+        resolved_corpus_root = store.root
+        discrepancies.append(f"Corpus root unresolvable during reconciliation: {exc}")
+
+    # Pass 2A: Iterate all pairs to compute raw discovery, manifest, and version structures
     for mssv, arxiv_id in pairs_list:
         try:
             folder_key = arxiv_id_to_folder_key(arxiv_id)
-        except Exception:
+        except Exception as exc:
             raw_other_unresolved_count += 1
+            discrepancies.append(f"Invalid folder key for {arxiv_id}: {exc}")
             continue
 
         paper_dir = store.root / folder_key
-        if not paper_dir.exists():
-            raw_missing_manifest_count += 1
-            continue
+        try:
+            if paper_dir.is_symlink() or os.path.islink(paper_dir):
+                raw_other_unresolved_count += 1
+                continue
 
-        if paper_dir.is_symlink() or os.path.islink(paper_dir):
+            if not paper_dir.exists():
+                raw_missing_manifest_count += 1
+                continue
+
+            if not paper_dir.is_dir():
+                raw_invalid_manifest_count += 1
+                continue
+
+            if not paper_dir.resolve().is_relative_to(resolved_corpus_root):
+                raw_other_unresolved_count += 1
+                continue
+        except (OSError, RuntimeError):
             raw_other_unresolved_count += 1
             continue
 
         manifest_path = paper_dir / "manifest.json"
-        if not manifest_path.exists():
-            raw_missing_manifest_count += 1
-            continue
-
-        if manifest_path.is_symlink() or os.path.islink(manifest_path):
-            raw_invalid_manifest_count += 1
-            continue
-
         try:
+            if manifest_path.is_symlink() or os.path.islink(manifest_path):
+                raw_invalid_manifest_count += 1
+                continue
+
+            if not manifest_path.exists() or not manifest_path.is_file():
+                raw_missing_manifest_count += 1
+                continue
+
             raw_bytes = manifest_path.read_bytes()
             raw_man = json.loads(raw_bytes.decode("utf-8"))
             if not isinstance(raw_man, dict):
                 raw_invalid_manifest_count += 1
                 continue
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            raw_invalid_manifest_count += 1
+            continue
         except Exception:
             raw_invalid_manifest_count += 1
             continue
@@ -142,8 +171,9 @@ def _perform_independent_reconciliation(
                     if child.name not in {"manifest.json", "metadata.json", "references.json"}:
                         has_unmanaged = True
                         break
-            except OSError:
+            except (OSError, RuntimeError) as exc:
                 has_unmanaged = True
+                discrepancies.append(f"Filesystem error checking not_found paper {folder_key}: {exc}")
 
             if (
                 man_st == "not_found"
@@ -162,17 +192,32 @@ def _perform_independent_reconciliation(
             raw_discovery_failed_count += 1
         elif disc == "found":
             raw_found_count += 1
+            paper_declared_v_dirs: set[str] = set()
             if isinstance(raw_vers, dict):
                 raw_total_versions += len(raw_vers)
-                for v_info in raw_vers.values():
-                    if isinstance(v_info, dict) and v_info.get("status") in TERMINAL:
-                        raw_terminal_versions += 1
+                for v_name, v_info in raw_vers.items():
+                    if isinstance(v_info, dict):
+                        st = v_info.get("status")
+                        if st in TERMINAL:
+                            raw_terminal_versions += 1
+                        if st == "success" or (st == "no_tex_source" and v_info.get("files")):
+                            paper_declared_v_dirs.add(v_name)
             try:
+                paper_disk_v_dirs: set[str] = set()
                 for child in paper_dir.iterdir():
+                    if child.is_symlink() or os.path.islink(child):
+                        discrepancies.append(f"Symlink found in found paper {folder_key}: {child.name}")
+                        continue
                     if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
                         raw_version_dirs_count += 1
-            except OSError:
-                pass
+                        paper_disk_v_dirs.add(child.name)
+                # Check version directory mismatch: on-disk version directories must match declared directories
+                if paper_disk_v_dirs != paper_declared_v_dirs:
+                    discrepancies.append(
+                        f"Version directory on disk mismatch for {arxiv_id}: disk={sorted(paper_disk_v_dirs)} vs declared={sorted(paper_declared_v_dirs)}"
+                    )
+            except (OSError, RuntimeError) as exc:
+                discrepancies.append(f"Filesystem error scanning version dirs for {folder_key}: {exc}")
         else:
             raw_other_unresolved_count += 1
 
@@ -212,6 +257,258 @@ def _perform_independent_reconciliation(
     if raw_terminal_versions != stats["terminal_versions"]:
         discrepancies.append(
             f"Terminal versions mismatch: classified {stats['terminal_versions']} vs independent {raw_terminal_versions}"
+        )
+
+    # Reconcile on-disk version directories with declared versions (FIND-REP-D, Step 3)
+    if raw_version_dirs_count > raw_total_versions:
+        discrepancies.append(
+            f"On-disk version directories ({raw_version_dirs_count}) exceed total declared versions ({raw_total_versions})"
+        )
+
+    # Pass 2B: Independent Revalidation of M1-complete candidates (FIND-REP-D 12 checks)
+    if m1_complete_candidates is None:
+        # Fall back to finding pairs declaring terminal complete status in manifest
+        m1_complete_candidates = []
+        for mssv, arxiv_id in pairs_list:
+            try:
+                folder_key = arxiv_id_to_folder_key(arxiv_id)
+                mpath = store.root / folder_key / "manifest.json"
+                if mpath.exists():
+                    mdata = json.loads(mpath.read_text(encoding="utf-8"))
+                    if mdata.get("status") in {"complete", "complete_with_no_tex"}:
+                        m1_complete_candidates.append((mssv, arxiv_id))
+            except Exception:
+                pass
+
+    verified_m1_complete_count = 0
+    for mssv, arxiv_id in m1_complete_candidates:
+        candidate_failed = False
+        reasons: List[str] = []
+
+        # Check 1: Safe path & containment
+        try:
+            folder_key = arxiv_id_to_folder_key(arxiv_id)
+            p_dir = store.root / folder_key
+            if p_dir.is_symlink() or os.path.islink(p_dir):
+                candidate_failed = True
+                reasons.append("Check 1 (safe path): paper directory is a symlink")
+            elif not p_dir.exists() or not p_dir.is_dir():
+                candidate_failed = True
+                reasons.append("Check 1 (safe path): paper directory does not exist or is not a directory")
+            elif not p_dir.resolve().is_relative_to(resolved_corpus_root):
+                candidate_failed = True
+                reasons.append("Check 1 (safe path): paper directory resolves outside corpus root")
+        except (OSError, RuntimeError) as exc:
+            candidate_failed = True
+            reasons.append(f"Check 1 (safe path): filesystem error: {exc}")
+
+        if candidate_failed:
+            discrepancies.append(f"Paper {arxiv_id} failed M1 independent revalidation: {'; '.join(reasons)}")
+            continue
+
+        # Check 2: Raw manifest
+        manifest = None
+        man_path = p_dir / "manifest.json"
+        try:
+            if man_path.is_symlink() or os.path.islink(man_path):
+                candidate_failed = True
+                reasons.append("Check 2 (raw manifest): manifest.json is a symlink")
+            elif not man_path.exists() or not man_path.is_file():
+                candidate_failed = True
+                reasons.append("Check 2 (raw manifest): manifest.json missing or not a regular file")
+            else:
+                raw_b = man_path.read_bytes()
+                manifest = json.loads(raw_b.decode("utf-8"))
+                if not isinstance(manifest, dict):
+                    candidate_failed = True
+                    reasons.append("Check 2 (raw manifest): manifest is not a JSON object")
+        except (OSError, RuntimeError, json.JSONDecodeError) as exc:
+            candidate_failed = True
+            reasons.append(f"Check 2 (raw manifest): read/parse error: {exc}")
+
+        if candidate_failed or manifest is None:
+            discrepancies.append(f"Paper {arxiv_id} failed M1 independent revalidation: {'; '.join(reasons)}")
+            continue
+
+        # Check 3: Identity & contract_version=2
+        contract_v = manifest.get("contract_version", manifest.get("storage_contract_version"))
+        if contract_v != CONTRACT_VERSION or type(contract_v) is not int or isinstance(contract_v, bool):
+            candidate_failed = True
+            reasons.append(f"Check 3 (identity): invalid contract_version {contract_v}")
+        if manifest.get("arxiv_id") != arxiv_id:
+            candidate_failed = True
+            reasons.append(f"Check 3 (identity): arxiv_id mismatch: {manifest.get('arxiv_id')} != {arxiv_id}")
+        if manifest.get("mssv") != mssv:
+            candidate_failed = True
+            reasons.append(f"Check 3 (identity): mssv mismatch: {manifest.get('mssv')} != {mssv}")
+
+        # Check 4: Discovery=found
+        if manifest.get("discovery_status") != "found":
+            candidate_failed = True
+            reasons.append(f"Check 4 (discovery): discovery_status is {manifest.get('discovery_status')}, expected 'found'")
+
+        # Check 5: Terminal manifest status
+        if manifest.get("status") not in {"complete", "complete_with_no_tex"}:
+            candidate_failed = True
+            reasons.append(f"Check 5 (terminal manifest status): manifest status is {manifest.get('status')}")
+        ver_st = manifest.get("version_status", manifest.get("version_resolution_status"))
+        if ver_st != "resolved":
+            candidate_failed = True
+            reasons.append(f"Check 5 (terminal manifest status): version_status is {ver_st}")
+        if manifest.get("metadata_status") != "complete":
+            candidate_failed = True
+            reasons.append(f"Check 5 (terminal manifest status): manifest.metadata_status is {manifest.get('metadata_status')}")
+        if manifest.get("references_status") != "complete":
+            candidate_failed = True
+            reasons.append(f"Check 5 (terminal manifest status): manifest.references_status is {manifest.get('references_status')}")
+
+        # Check 6: Terminal versions
+        versions = manifest.get("versions")
+        if not isinstance(versions, dict) or len(versions) == 0:
+            candidate_failed = True
+            reasons.append("Check 6 (terminal versions): manifest versions is empty or not a dict")
+        else:
+            for v_name, v_info in versions.items():
+                if not re.fullmatch(r"v[1-9][0-9]*", v_name):
+                    candidate_failed = True
+                    reasons.append(f"Check 6 (terminal versions): invalid version name format '{v_name}'")
+                if not isinstance(v_info, dict) or v_info.get("status") not in TERMINAL:
+                    candidate_failed = True
+                    reasons.append(f"Check 6 (terminal versions): version {v_name} status '{v_info.get('status') if isinstance(v_info, dict) else None}' not in TERMINAL")
+
+        # Check 7: Audit source files & SHA-256
+        if isinstance(versions, dict):
+            for v_name, v_info in versions.items():
+                if isinstance(v_info, dict):
+                    try:
+                        v_violations = audit_version_integrity(p_dir, arxiv_id, v_name, v_info)
+                        if v_violations:
+                            candidate_failed = True
+                            reasons.append(f"Check 7 (source files & SHA-256): {v_name} has violations: {[v.message for v in v_violations]}")
+                    except Exception as exc:
+                        candidate_failed = True
+                        reasons.append(f"Check 7 (source files & SHA-256): {v_name} audit failed with error: {exc}")
+
+        # Check 8: Read & validate metadata
+        meta_path = p_dir / "metadata.json"
+        meta = None
+        try:
+            if meta_path.is_symlink() or os.path.islink(meta_path):
+                candidate_failed = True
+                reasons.append("Check 8 (read/validate metadata): metadata.json is a symlink")
+            elif not meta_path.exists() or not meta_path.is_file():
+                candidate_failed = True
+                reasons.append("Check 8 (read/validate metadata): metadata.json missing or not regular file")
+            else:
+                raw_meta_b = meta_path.read_bytes()
+                meta = json.loads(raw_meta_b.decode("utf-8"))
+                if not isinstance(meta, dict):
+                    candidate_failed = True
+                    reasons.append("Check 8 (read/validate metadata): metadata is not a JSON object")
+                elif meta.get("status") != "complete":
+                    candidate_failed = True
+                    reasons.append(f"Check 8 (read/validate metadata): metadata.status is '{meta.get('status')}'")
+                else:
+                    store._metadata(meta, mssv, arxiv_id)
+        except (StorageError, IntegrityError, json.JSONDecodeError, OSError, RuntimeError) as exc:
+            candidate_failed = True
+            reasons.append(f"Check 8 (read/validate metadata): validation error: {exc}")
+        except Exception as exc:
+            candidate_failed = True
+            reasons.append(f"Check 8 (read/validate metadata): unexpected error: {exc}")
+
+        # Check 9: Metadata consistency
+        if meta is not None and isinstance(meta, dict) and isinstance(versions, dict):
+            if meta.get("arxiv_id") != arxiv_id:
+                candidate_failed = True
+                reasons.append(f"Check 9 (metadata consistency): arxiv_id mismatch ({meta.get('arxiv_id')} != {arxiv_id})")
+            meta_cv = meta.get("contract_version", meta.get("storage_contract_version"))
+            if meta_cv != CONTRACT_VERSION:
+                candidate_failed = True
+                reasons.append(f"Check 9 (metadata consistency): contract_version mismatch ({meta_cv})")
+            meta_v_names = [v.get("version") if isinstance(v, dict) else v for v in meta.get("versions", [])]
+            if sorted(versions.keys()) != sorted(meta_v_names):
+                candidate_failed = True
+                reasons.append(f"Check 9 (metadata consistency): versions mismatch ({sorted(versions.keys())} != {sorted(meta_v_names)})")
+            if not meta.get("title") or not meta.get("authors"):
+                candidate_failed = True
+                reasons.append("Check 9 (metadata consistency): missing title or authors")
+
+        # Check 10: Read & validate references
+        ref_path = p_dir / "references.json"
+        ref = None
+        try:
+            if ref_path.is_symlink() or os.path.islink(ref_path):
+                candidate_failed = True
+                reasons.append("Check 10 (read/validate references): references.json is a symlink")
+            elif not ref_path.exists() or not ref_path.is_file():
+                candidate_failed = True
+                reasons.append("Check 10 (read/validate references): references.json missing or not regular file")
+            else:
+                raw_ref_b = ref_path.read_bytes()
+                ref = json.loads(raw_ref_b.decode("utf-8"))
+                if not isinstance(ref, dict):
+                    candidate_failed = True
+                    reasons.append("Check 10 (read/validate references): references is not a JSON object")
+                elif ref.get("status") != "complete":
+                    candidate_failed = True
+                    reasons.append(f"Check 10 (read/validate references): references.status is '{ref.get('status')}'")
+                else:
+                    store._references(ref, mssv, arxiv_id)
+        except (StorageError, IntegrityError, json.JSONDecodeError, OSError, RuntimeError) as exc:
+            candidate_failed = True
+            reasons.append(f"Check 10 (read/validate references): validation error: {exc}")
+        except Exception as exc:
+            candidate_failed = True
+            reasons.append(f"Check 10 (read/validate references): unexpected error: {exc}")
+
+        # Check 11: Reference coverage complete & continuation=None
+        if ref is not None and isinstance(ref, dict):
+            cov = ref.get("coverage")
+            if not isinstance(cov, dict):
+                candidate_failed = True
+                reasons.append("Check 11 (references coverage): missing coverage dictionary")
+            else:
+                if cov.get("complete") is not True:
+                    candidate_failed = True
+                    reasons.append("Check 11 (references coverage): coverage.complete is not True")
+                if cov.get("continuation") is not None:
+                    candidate_failed = True
+                    reasons.append("Check 11 (references coverage): coverage.continuation is not None")
+            if not isinstance(ref.get("items"), list):
+                candidate_failed = True
+                reasons.append("Check 11 (references coverage): items is not a list")
+
+        # Check 12: No unmanaged/symlink violations in paper_dir
+        allowed_entries = {"manifest.json", "metadata.json", "references.json"}
+        if isinstance(versions, dict):
+            for v_name, v_info in versions.items():
+                if isinstance(v_info, dict):
+                    if v_info.get("status") == "success" or (v_info.get("status") == "no_tex_source" and v_info.get("files")):
+                        allowed_entries.add(v_name)
+        try:
+            for child in p_dir.iterdir():
+                if child.is_symlink() or os.path.islink(child):
+                    candidate_failed = True
+                    reasons.append(f"Check 12 (unmanaged/symlink): symlink found: {child.name}")
+                elif child.name not in allowed_entries:
+                    candidate_failed = True
+                    reasons.append(f"Check 12 (unmanaged/symlink): unmanaged file or folder: {child.name}")
+                elif child.is_dir() and not child.resolve().is_relative_to(p_dir.resolve()):
+                    candidate_failed = True
+                    reasons.append(f"Check 12 (unmanaged/symlink): path traversal detected: {child.name}")
+        except (OSError, RuntimeError) as exc:
+            candidate_failed = True
+            reasons.append(f"Check 12 (unmanaged/symlink): filesystem error: {exc}")
+
+        if candidate_failed:
+            discrepancies.append(f"Paper {arxiv_id} failed M1 independent revalidation: {'; '.join(reasons)}")
+        else:
+            verified_m1_complete_count += 1
+
+    if verified_m1_complete_count != stats["m1_complete_papers"]:
+        discrepancies.append(
+            f"M1-complete count mismatch: classified {stats['m1_complete_papers']} vs independently verified {verified_m1_complete_count}"
         )
 
     # Verification of arithmetic invariants
@@ -262,6 +559,7 @@ def _perform_independent_reconciliation(
     return {
         "is_reconciled": len(discrepancies) == 0,
         "discrepancies": discrepancies,
+        "verified_m1_complete_count": verified_m1_complete_count,
         "independent_audit": {
             "raw_found_count": raw_found_count,
             "raw_confirmed_not_found_count": raw_confirmed_not_found_count,
@@ -294,6 +592,7 @@ def compute_m1_statistics(
     *,
     repository_commit: Optional[str] = None,
     report_scope: Optional[str] = None,
+    _between_passes_hook: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Compute all canonical Milestone 1 crawling, extraction, metadata, and reference metrics.
 
@@ -320,6 +619,7 @@ def compute_m1_statistics(
     metadata_complete_papers = 0
     references_complete_papers = 0
     m1_complete_papers = 0
+    m1_complete_candidates: List[Tuple[str, str]] = []
 
     # 3. Found Papers Lifecycle Counters (Mutually Exclusive Partition of found_papers)
     partial_papers = 0
@@ -517,6 +817,7 @@ def compute_m1_statistics(
             # Strict: source complete and metadata complete and references complete and no violations
             if audit_res.is_m1_complete and is_meta_complete and is_ref_complete:
                 m1_complete_papers += 1
+                m1_complete_candidates.append((mssv, arxiv_id))
 
             # --- E. Found Papers Lifecycle Classification (Mutually Exclusive) ---
             man_status = manifest.get("status")
@@ -551,7 +852,10 @@ def compute_m1_statistics(
                     invalid_versions += 1
 
                 # Check version source integrity violations
-                v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
+                try:
+                    v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
+                except Exception:
+                    v_violations = [IntegrityViolation(arxiv_id=arxiv_id, category="corrupted", severity="error", message="Filesystem error auditing version")]
                 if v_violations:
                     source_integrity_failed_versions += 1
 
@@ -633,7 +937,15 @@ def compute_m1_statistics(
         "interrupted_papers": interrupted_papers,
         "unresolved_found_papers": unresolved_found_papers,
     }
-    reconciliation_result = _perform_independent_reconciliation(store, pairs_list, stats_draft)
+    if _between_passes_hook is not None:
+        _between_passes_hook()
+
+    reconciliation_result = _perform_independent_reconciliation(
+        store,
+        pairs_list,
+        stats_draft,
+        m1_complete_candidates=m1_complete_candidates,
+    )
     is_reconciled = reconciliation_result["is_reconciled"]
 
     commit_sha = repository_commit or _get_git_commit(store.root)

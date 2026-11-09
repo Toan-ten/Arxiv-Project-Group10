@@ -52,9 +52,9 @@ Hệ thống tính toán chỉ số và sinh báo cáo kiểm toán Milestone 1 
 | ID | Mức độ | Khiếm khuyết thẩm định | Giải pháp kỹ thuật đã triển khai | Ca kiểm thử bảo vệ |
 |---|---|---|---|---|
 | **FIND-REP-A** | Critical | `source_complete` phụ thuộc vào `metadata` và `references` | Tách biệt hoàn toàn việc thẩm định source: `audit_paper_integrity()` và `compute_m1_statistics()` không thoát sớm hay đánh rớt `is_source_complete` khi metadata hoặc references bị hỏng/thiếu. | `test_find_rep_a_source_complete_independent_of_broken_metadata_and_references` |
-| **FIND-REP-B** | Critical | `integrity_failed_papers` đếm nhầm trạng thái incomplete thông thường | Định nghĩa lại `has_integrity_failure`: chỉ đếm các vi phạm toàn vẹn thực tế (tệp hỏng, sai SHA-256, unmanaged files, symlink, version dir trên not_found). Các giai đoạn chưa thực hiện (`not_attempted`, `in_progress`) không bị tính là lỗi toàn vẹn. | `test_find_rep_b_integrity_failed_papers_distinguishes_incomplete_from_corruption` |
+| **FIND-REP-B** | Critical | `integrity_failed_papers` đếm nhầm trạng thái incomplete thông thường | Định nghĩa lại `has_integrity_failure` với ngữ nghĩa tường minh: chỉ đếm các vi phạm toàn vẹn thực tế (tệp hỏng `corrupted`, tệp ngoại lai `unmanaged`, sai SHA-256, sai `kept_bytes`, vi phạm symlink, lỗi schema trên tệp tồn tại, hoặc thư mục `vN/` tồn tại khi manifest ghi `not_found`). Các trạng thái dữ liệu chưa thu thập thông thường (`not_attempted`, `in_progress`) và các tệp metadata/references chưa sinh không bị tính là lỗi toàn vẹn. | `test_find_rep_b_integrity_failed_papers_distinguishes_incomplete_from_corruption`, `test_has_integrity_failure_semantic_boundaries` |
 | **FIND-REP-C** | High | `confirmed_not_found` chưa kiểm tra hệ thống tệp | Bổ sung kiểm tra thực tế: bài báo `not_found` bắt buộc không có bất kỳ thư mục `vN/` hay tệp unmanaged nào trên đĩa. Nếu phát hiện thư mục version, bài báo bị chuyển sang `invalid_manifests` và tăng `integrity_failed_papers`. | `test_find_rep_c_not_found_with_filesystem_version_dir_rejected_from_confirmed_not_found` |
-| **FIND-REP-D** | High | Reconciliation chưa được kiểm chứng độc lập | Triển khai `_perform_independent_reconciliation`: lượt quét độc lập thứ hai đọc trực tiếp đĩa và JSON thô, đối chiếu chéo 1:1 với kết quả bộ phân loại. Nếu có bất kỳ sai lệch nào, `is_reconciled` bị đánh dấu `False` kèm danh sách sai lệch. | `test_find_rep_d_independent_reconciliation_detects_spoofed_or_discrepant_counts` |
+| **FIND-REP-D** | High | Reconciliation chưa được kiểm chứng độc lập bài báo M1-complete | Triển khai `_perform_independent_reconciliation` gồm 2 pha kiểm toán độc lập hoàn chỉnh: (1) Quét đĩa thô và đối chiếu phân hoạch ứng viên kèm đối chiếu thư mục phiên bản fail-closed (`raw_version_dirs_count <= raw_total_versions`); (2) Tái thẩm định độc lập toàn diện 12 tiêu chí chất lượng cho 100% bài báo `m1_complete` từ dữ liệu đĩa thô mà không tái sử dụng biến boolean của lượt 1. Bất kỳ sai lệch hoặc lỗi I/O nào đều kích hoạt fail-closed (`is_reconciled = False`). Hỗ trợ hook `_between_passes_hook` để kiểm thử đột biến có kiểm soát. | `test_find_rep_d_independent_reconciliation_detects_spoofed_or_discrepant_counts`, `test_find_rep_d_m1_complete_metadata_corrupted_between_passes_fails_reconciliation`, `test_find_rep_d_m1_complete_references_incomplete_between_passes_fails_reconciliation`, `test_find_rep_d_m1_complete_source_checksum_tampered_between_passes_fails_reconciliation`, `test_find_rep_d_m1_complete_manifest_status_changed_between_passes_fails_reconciliation`, `test_find_rep_d_m1_complete_version_directory_or_source_file_removed_between_passes_fails_reconciliation`, `test_find_rep_d_m1_complete_io_error_during_reconciliation_fails_reconciliation`, `test_find_rep_d_valid_m1_complete_paper_passes_both_passes`, `test_find_rep_d_version_directory_on_disk_mismatch_fails_reconciliation` |
 | **SEC3-01** | Medium | `except Exception: pass` khi đọc metadata | Bắt ngoại lệ cụ thể (`StorageError`, `IntegrityError`, `JSONDecodeError`, `OSError`) và ghi nhận trạng thái lỗi rõ ràng. | Toàn bộ suite |
 | **SEC3-02** | Medium | Bổ sung và đồng bộ metrics phiên bản | Xuất `source_integrity_failed_versions` và đồng bộ `unresolved_versions` trong kết quả và đặc tả. | `test_source_integrity_failed_versions_counter` |
 | **SEC3-03** | Medium | Ưu tiên repository chứa source code trong `_get_git_commit` | `_get_git_commit` tìm kiếm `PROJECT_ROOT` trước, sau đó mới dùng `cwd` làm fallback. | `test_git_commit_prioritizes_project_root_over_cwd` |
@@ -80,15 +80,15 @@ Toàn bộ các phép tính thống kê đều được kiểm chứng độc l�
 ## 5. Bằng Chứng Kiểm Thử Đầy Đủ (Verification Evidence)
 
 ### 5.1. Kiểm thử chuyên biệt Phase 2
-- `tests/test_reporting_correctness.py`: **22/22 tests passed** (Bao phủ paper-level, version-level, metadata, references, reconciliation, zero-denominator, git commit, JSON export, fault injection, và 6 tests remediation FIND-REP-A đến FIND-REP-D).
+- `tests/test_reporting_correctness.py`: **31/31 tests passed** (Bao phủ paper-level, version-level, metadata, references, reconciliation, zero-denominator, git commit, JSON export, fault injection, và 15 tests remediation FIND-REP-A đến FIND-REP-D, bao gồm 8 test hook đột biến kiểm toán độc lập hai lượt).
 - `tests/test_generate_m1_report.py`: **8/8 tests passed** (Bảo đảm tính tương thích ngược hoàn hảo).
 
 ### 5.2. Kiểm thử hồi quy hệ thống
 - `tests/test_storage_integrity.py`: **35/35 tests passed**.
 - `tests/test_fast_production.py`: **31/31 tests passed**.
 - `tests/test_export.py`: **8/8 tests passed**.
-- **Toàn bộ Test Suite:** **980 passed, 960 subtests passed** trong 26.86 giây.
-- **AST compile check:** 56 tệp Python hợp lệ cú pháp (100%).
+- **Toàn bộ Test Suite:** **995 passed** trong 22.21 giây.
+- **AST compile check:** 57 tệp Python hợp lệ cú pháp (100%).
 - **Jupyter Notebook validation:** 4 sổ tay hợp lệ cấu trúc JSON (100%).
 - **Định dạng code:** `git diff --check` sạch, không có lỗi khoảng trắng thừa.
 - **Bảo toàn hằng số lịch sử:** `CODE_COMMIT = "489a82fd959ccc6cced7c59fc309255e4421bef2"` được giữ nguyên vẹn.
@@ -102,7 +102,7 @@ Toàn bộ các phép tính thống kê đều được kiểm chứng độc l�
 2. **Authoritative arXiv Discovery Reconciliation:** Phase 2 chỉ thống kê và kiểm toán những gì đã được ghi nhận trong corpus hiện tại; việc đối chiếu toàn bộ dải ID phân bổ bằng truy vấn trực tiếp đến arXiv API thuộc về một phase nghiệp vụ riêng biệt.
 
 ### 6.2. Khuyến nghị nghiệm thu (Acceptance Recommendation)
-Căn cứ kết quả kiểm toán, đối chiếu bất biến và bằng chứng kiểm thử 980/980 tests xanh tuyệt đối:
+Căn cứ kết quả kiểm toán, đối chiếu bất biến và bằng chứng kiểm thử 995/995 tests xanh tuyệt đối:
 
 **Khuyến nghị: PASS** (Sẵn sàng nghiệm thu và đóng chính thức Phase 2 — Reporting Correctness).
 Tuyệt đối không tự ý chuyển sang Phase 3 (Final Dataset Export) trước khi có chỉ thị nghiệm thu độc lập.

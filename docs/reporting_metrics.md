@@ -182,10 +182,28 @@ $$\text{m1\_complete\_papers} \le \min(\text{source\_complete\_papers}, \text{me
 
 ### 6.4. Cơ chế đối chiếu độc lập hai lượt (Two-Pass Independent Reconciliation - FIND-REP-D)
 Hệ thống báo cáo không chỉ cộng dồn các biến số từ một vòng lặp phân loại duy nhất. Mô-đun báo cáo kích hoạt một lượt kiểm toán độc lập (`_perform_independent_reconciliation`):
-1. Quét độc lập hệ thống tệp và cấu trúc JSON thô từ đĩa, tách biệt hoàn toàn khỏi logic bộ phân loại ban đầu.
-2. Tổng hợp các biến đếm thực tế thô (`raw_found_count`, `raw_confirmed_not_found_count`, `raw_total_versions`, `raw_terminal_versions`,...).
-3. Đối chiếu chéo 1:1 giữa số liệu phân loại của báo cáo và số liệu đếm thô từ đĩa. Nếu phát hiện bất kỳ sự sai lệch nào, `is_reconciled` bị đánh dấu `False` và danh sách chi tiết sai lệch được ghi nhận vào `reconciliation["discrepancies"]`.
-4. Toàn bộ bài báo được tuyên bố `m1_complete_papers` được tái thẩm định độc lập để bảo đảm không có lỗi lọt lưới.
+1. **Lượt 2A — Quét đĩa và JSON thô độc lập:**
+   - Quét độc lập hệ thống tệp và cấu trúc JSON thô từ đĩa, tách biệt hoàn toàn khỏi logic bộ phân loại ban đầu.
+   - Tổng hợp các biến đếm thực tế thô (`raw_found_count`, `raw_confirmed_not_found_count`, `raw_unprocessed_count`, `raw_discovery_failed_count`, `raw_missing_manifest_count`, `raw_invalid_manifest_count`, `raw_other_unresolved_count`, `raw_total_versions`, `raw_terminal_versions`, `raw_version_dirs_count`).
+   - Đối chiếu chéo 1:1 giữa số liệu phân loại của báo cáo và số liệu đếm thô từ đĩa. Nếu phát hiện bất kỳ sự sai lệch nào, `is_reconciled` bị đánh dấu `False` và danh sách chi tiết sai lệch được ghi nhận vào `reconciliation["discrepancies"]`.
+   - **Đối chiếu thư mục phiên bản trên đĩa (Fail-Closed Version Directory Reconciliation):** Quét toàn bộ thư mục `vN/` thực tế trên đĩa của các bài báo tìm thấy; bắt buộc thư mục phiên bản trên đĩa phải khớp 1:1 với các phiên bản có tệp được khai báo trong manifest (`raw_version_dirs_count <= raw_total_versions`). Mọi thư mục phiên bản ngoại lai hoặc mất mát đều làm thất bại đối chiếu (`is_reconciled = False`).
+
+2. **Lượt 2B — Tái thẩm định độc lập 12 tiêu chí cho các bài báo hoàn tất M1 (Independent 12-Check M1 Revalidation):**
+   Mọi bài báo được phân loại là `m1_complete` trong lượt 1 đều bắt buộc phải trải qua lượt tái thẩm định độc lập từ đĩa mà không tái sử dụng bất kỳ biến boolean nào từ lượt 1:
+   - **Tiêu chí 1 (Safe path & containment):** Đường dẫn thư mục bài báo tồn tại, không phải symlink, và nằm trọn vẹn bên trong `store.root`.
+   - **Tiêu chí 2 (Raw manifest):** Tệp `manifest.json` tồn tại, là tệp thông thường (không phải symlink), giải mã JSON thành công thành một đối tượng từ điển.
+   - **Tiêu chí 3 (Identity & contract_version=2):** `contract_version == 2` (nguyên số nguyên, loại trừ boolean), `arxiv_id` và `mssv` khớp với định danh ứng viên.
+   - **Tiêu chí 4 (Discovery=found):** Trường `discovery_status == "found"`.
+   - **Tiêu chí 5 (Terminal manifest status):** `status in {"complete", "complete_with_no_tex"}`, `version_status == "resolved"`, `metadata_status == "complete"`, và `references_status == "complete"`.
+   - **Tiêu chí 6 (Terminal versions):** Từ điển `versions` không rỗng; mọi phiên bản đều có tên chuẩn `v[1-9][0-9]*` và trạng thái thuộc `TERMINAL = {"success", "no_tex_source"}`.
+   - **Tiêu chí 7 (Audit source files & SHA-256):** Kiểm toán toàn diện qua `audit_version_integrity()`: tệp nguồn tồn tại trên đĩa, mã băm SHA-256 khớp 100%, dung lượng khớp `kept_bytes`, không có symlink/hardlink.
+   - **Tiêu chí 8 (Read & validate metadata):** Tệp `metadata.json` tồn tại, không phải symlink, hợp lệ schema `store._metadata()`, và có `status == "complete"`.
+   - **Tiêu chí 9 (Metadata consistency):** Khớp `arxiv_id`, `contract_version == 2`, danh sách phiên bản trong metadata khớp danh sách phiên bản trong manifest, và có đầy đủ `title`, `authors`.
+   - **Tiêu chí 10 (Read & validate references):** Tệp `references.json` tồn tại, không phải symlink, hợp lệ schema `store._references()`, và có `status == "complete"`.
+   - **Tiêu chí 11 (Reference coverage complete & continuation=None):** Khối `coverage` có `complete is True`, `continuation is None`, và `items` là danh sách.
+   - **Tiêu chí 12 (No unmanaged or symlink violations):** Quét thư mục bài báo trên đĩa bảo đảm không có bất kỳ symlink nào, không có tệp/thư mục ngoại lai ngoài danh mục cho phép (`manifest.json`, `metadata.json`, `references.json`, và các thư mục phiên bản hợp lệ).
+
+   Nếu bất kỳ bài báo nào thất bại ở bất kỳ tiêu chí nào, hoặc nếu số lượng bài báo vượt qua kiểm toán độc lập `verified_m1_complete_count != stats["m1_complete_papers"]`, hệ thống lập tức ghi nhận chi tiết sai lệch và đánh dấu `is_reconciled = False` (fail-closed). Mọi lỗi I/O hoặc ngoại lệ hệ thống tệp phát sinh trong quá trình đối chiếu đều fail-closed.
 
 ---
 
