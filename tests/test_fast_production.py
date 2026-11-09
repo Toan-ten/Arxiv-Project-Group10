@@ -203,6 +203,84 @@ class TestFastProduction(unittest.TestCase):
         self.assertEqual((paper_dir / "v1" / "main.tex").read_text(), "GOOD_LOCAL_BYTES")
         self.assertFalse((runner.corpus_dir / "2508-07873").exists())
 
+    def test_restore_rejects_checksum_mismatched_archive(self):
+        """Task 2.4: restore_cohort rejects archive if its .sha256 digest does not match."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_dir = runner.corpus_dir / "2508-07872"
+        paper_dir.mkdir(parents=True, exist_ok=True)
+        (paper_dir / "manifest.json").write_text('{"status": "complete"}', encoding="utf-8")
+
+        archive_dest = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+        runner._archive_cohort(1, archive_dest)
+        self.assertTrue(archive_dest.exists())
+        sha_file = archive_dest.with_name(archive_dest.name + ".sha256")
+        self.assertTrue(sha_file.exists())
+
+        # Tamper with the sha256 file
+        sha_file.write_text("0000000000000000000000000000000000000000000000000000000000000000  cohort_0001_corpus.tar.gz\n")
+
+        with self.assertRaises(ValueError) as ctx:
+            runner.restore_cohort(1)
+        self.assertIn("checksum mismatch", str(ctx.exception).lower())
+
+    def test_restore_ignores_foreign_papers_not_in_cohort(self):
+        """Task 2.4: restore_cohort ignores foreign papers in archive that do not belong to the cohort."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        archive_path = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+
+        # Construct archive containing valid cohort 1 paper and a foreign paper (from cohort 200)
+        import io
+        import tarfile
+        with tarfile.open(archive_path, "w:gz") as tar:
+            # Valid paper 2508-07872 (in cohort 1)
+            t1 = tarfile.TarInfo("2508-07872/manifest.json")
+            data1 = b'{"status": "complete", "arxiv_id": "2508.07872"}'
+            t1.size = len(data1)
+            tar.addfile(t1, io.BytesIO(data1))
+
+            # Foreign paper 2501-07641 (belongs to student 24120260 in cohort 200)
+            t2 = tarfile.TarInfo("2501-07641/manifest.json")
+            data2 = b'{"status": "complete", "arxiv_id": "2501.07641"}'
+            t2.size = len(data2)
+            tar.addfile(t2, io.BytesIO(data2))
+
+        # Update matching sha256
+        sha_file = archive_path.with_name(archive_path.name + ".sha256")
+        sha_file.write_text(f"{runner._compute_sha256(archive_path)}  {archive_path.name}\n")
+
+        restored = runner.restore_cohort(1)
+        self.assertEqual(restored, 1)
+        self.assertTrue((runner.corpus_dir / "2508-07872").exists())
+        self.assertFalse((runner.corpus_dir / "2501-07641").exists())
+
+    def test_safe_replace_paper_verifies_file_checksums(self):
+        """Task 2.4: _safe_replace_paper rejects replacing if source file sha256 does not match."""
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        src_paper = self.root / "stage_src" / "2508-07872"
+        src_paper.mkdir(parents=True, exist_ok=True)
+        v1_dir = src_paper / "v1"
+        v1_dir.mkdir(parents=True, exist_ok=True)
+        (v1_dir / "main.tex").write_text("TAMPERED_TEX_CONTENT", encoding="utf-8")
+
+        # Manifest claims hash of different content
+        expected_hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        manifest_data = {
+            "status": "complete",
+            "arxiv_id": "2508.07872",
+            "versions": {
+                "v1": {
+                    "status": "success",
+                    "file_checksums": {"main.tex": expected_hash},
+                }
+            },
+        }
+        (src_paper / "manifest.json").write_text(json.dumps(manifest_data), encoding="utf-8")
+
+        target_paper = runner.corpus_dir / "2508-07872"
+        ok = runner._safe_replace_paper(src_paper, target_paper, expected_arxiv_id="2508.07872")
+        self.assertFalse(ok)
+        self.assertFalse(target_paper.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

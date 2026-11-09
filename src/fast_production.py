@@ -9,6 +9,7 @@ Extends the M1 production workflow with:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -286,6 +287,14 @@ class FastProductionRunner:
         }
         return report
 
+    @staticmethod
+    def _compute_sha256(file_path: Path) -> str:
+        h = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     def _archive_cohort(self, number: int, destination: Path) -> None:
         """Create a compressed archive for the cohort and store in Google Drive atomically."""
         pairs = cohort_pairs(number)
@@ -302,11 +311,42 @@ class FastProductionRunner:
                     for _, arxiv_id in pairs:
                         safe_folder = arxiv_id_to_folder_key(arxiv_id)
                         paper_path = self.corpus_dir / safe_folder
-                        if paper_path.exists():
-                            tar.add(paper_path, arcname=safe_folder)
+                        if paper_path.is_dir():
+                            mf = paper_path / "manifest.json"
+                            if not mf.is_file():
+                                continue
+                            try:
+                                m_data = json.loads(mf.read_text(encoding="utf-8"))
+                                if not isinstance(m_data, dict):
+                                    continue
+                            except Exception:
+                                continue
+                            has_unsafe = False
+                            for root, dirs, files in os.walk(paper_path):
+                                for name in dirs + files:
+                                    full_p = Path(root) / name
+                                    if full_p.is_symlink() or not (full_p.is_file() or full_p.is_dir()):
+                                        has_unsafe = True
+                                        break
+                                if has_unsafe:
+                                    break
+                            if not has_unsafe:
+                                tar.add(paper_path, arcname=safe_folder, recursive=True)
                 f_out.flush()
                 os.fsync(f_out.fileno())
+
+            # Verify readability of the created archive before atomic replacement
+            with tarfile.open(tmp_path, "r:gz") as test_tar:
+                _ = test_tar.getmembers()
+
+            archive_sha256 = self._compute_sha256(tmp_path)
             os.replace(tmp_path, destination)
+
+            # Atomic publication of SHA-256 checksum file
+            sha_file = destination.with_name(destination.name + ".sha256")
+            sha_tmp = destination.with_name(f".{destination.name}.sha256.tmp")
+            sha_tmp.write_text(f"{archive_sha256}  {destination.name}\n", encoding="utf-8")
+            os.replace(sha_tmp, sha_file)
         finally:
             if tmp_path.exists():
                 try:
@@ -314,30 +354,84 @@ class FastProductionRunner:
                 except OSError:
                     pass
 
-    def _safe_replace_paper(self, src_folder: Path, target_folder: Path) -> bool:
-        """Validate source folder manifest before replacing or adding target folder."""
+    def _safe_replace_paper(
+        self,
+        src_folder: Path,
+        target_folder: Path,
+        *,
+        expected_arxiv_id: Optional[str] = None,
+    ) -> bool:
+        """Validate source folder manifest and checksums before staging and replacing target folder."""
         src_mf = src_folder / "manifest.json"
-        if not src_mf.exists():
+        if not src_mf.is_file():
             return False
         try:
             m_src = json.loads(src_mf.read_text(encoding="utf-8"))
             if not isinstance(m_src, dict) or ("discovery_status" not in m_src and "status" not in m_src):
                 return False
+            if expected_arxiv_id is not None and "arxiv_id" in m_src:
+                if m_src.get("arxiv_id") != expected_arxiv_id:
+                    return False
         except Exception:
             return False
 
+        # Validate file checksums in src_folder if versions with file_checksums exist
+        versions = m_src.get("versions") or {}
+        for ver_name, ver_info in versions.items():
+            if isinstance(ver_info, dict) and ver_info.get("status") == "success" and ver_info.get("file_checksums"):
+                ver_dir = src_folder / ver_name
+                if not ver_dir.is_dir():
+                    return False
+                for fname, expected_hash in ver_info["file_checksums"].items():
+                    fpath = ver_dir / fname
+                    if not fpath.is_file():
+                        return False
+                    if self._compute_sha256(fpath) != expected_hash:
+                        return False
+
         if target_folder.exists():
             target_mf = target_folder / "manifest.json"
-            if target_mf.exists():
+            if target_mf.is_file():
                 try:
                     m_target = json.loads(target_mf.read_text(encoding="utf-8"))
-                    if str(m_target.get("updated_at", "")) >= str(m_src.get("updated_at", "")):
+                    src_up = str(m_src.get("updated_at", ""))
+                    tgt_up = str(m_target.get("updated_at", ""))
+                    if tgt_up and src_up and tgt_up >= src_up:
                         return False
                 except Exception:
                     pass
-            shutil.rmtree(target_folder)
-        shutil.copytree(src_folder, target_folder)
-        return True
+
+        # Atomic replacement: stage to temporary directory on the same filesystem
+        target_parent = target_folder.parent
+        target_parent.mkdir(parents=True, exist_ok=True)
+        stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=str(target_parent)))
+        backup_dir = None
+        try:
+            stage_paper = stage_dir / target_folder.name
+            shutil.copytree(src_folder, stage_paper)
+
+            if target_folder.exists():
+                backup_dir = Path(tempfile.mkdtemp(prefix=".backup-", dir=str(target_parent)))
+                backup_paper = backup_dir / target_folder.name
+                os.replace(target_folder, backup_paper)
+
+            os.replace(stage_paper, target_folder)
+
+            if backup_dir and backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            return True
+        except Exception:
+            if backup_dir and (backup_dir / target_folder.name).exists() and not target_folder.exists():
+                try:
+                    os.replace(backup_dir / target_folder.name, target_folder)
+                except Exception:
+                    pass
+            return False
+        finally:
+            if stage_dir.exists():
+                shutil.rmtree(stage_dir, ignore_errors=True)
+            if backup_dir and backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
 
     def restore_cohort(self, number: int) -> int:
         """Unpack an existing cohort archive or legacy Drive corpus back to local SSD safely.
@@ -345,40 +439,59 @@ class FastProductionRunner:
         Enables seamless resumption across Colab runtime reconnects in seconds.
         Migrates verified papers from legacy drive_root / "corpus" and extracts
         tar archive members without overwriting newer local files.
+        Restricts restoration strictly to the cohort's assigned papers.
         Returns the count of restored/migrated paper folders.
         """
         restored = 0
         legacy_corpus = self.drive_root / "corpus"
         from src.storage import arxiv_id_to_folder_key
 
+        valid_pairs = cohort_pairs(number)
+        allowed_folders = {arxiv_id_to_folder_key(aid): (mssv, aid) for mssv, aid in valid_pairs}
+
         # 1. Migrate from legacy Drive corpus layout if present
-        for _, arxiv_id in cohort_pairs(number):
-            folder_name = arxiv_id_to_folder_key(arxiv_id)
+        for folder_name, (mssv, arxiv_id) in allowed_folders.items():
             legacy_folder = legacy_corpus / folder_name
             local_folder = self.corpus_dir / folder_name
             if legacy_folder.is_dir():
-                if self._safe_replace_paper(legacy_folder, local_folder):
+                if self._safe_replace_paper(legacy_folder, local_folder, expected_arxiv_id=arxiv_id):
                     restored += 1
 
         # 2. Extract cohort archive from Drive without overwriting newer local papers
         archive_path = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
-        if not archive_path.exists():
+        if not archive_path.is_file():
             return restored
 
+        sha_file = archive_path.with_name(archive_path.name + ".sha256")
+        if sha_file.is_file():
+            try:
+                expected_sha = sha_file.read_text(encoding="utf-8").strip().split()[0]
+                actual_sha = self._compute_sha256(archive_path)
+                if expected_sha != actual_sha:
+                    raise ValueError(f"Archive checksum mismatch for {archive_path.name}: expected {expected_sha}, got {actual_sha}")
+            except ValueError:
+                raise
+            except Exception as e:
+                raise ValueError(f"Cannot verify archive checksum: {e}") from e
+
         import tarfile
-        with tempfile.TemporaryDirectory(prefix=".restore-", dir=self.local_root) as temp_extract:
+        with tempfile.TemporaryDirectory(prefix=".restore-", dir=str(self.local_root)) as temp_extract:
             temp_dir = Path(temp_extract)
             with tarfile.open(archive_path, "r:gz") as tar:
                 for m in tar.getmembers():
                     p = PurePosixPath(m.name)
                     if p.is_absolute() or ".." in p.parts:
                         raise ValueError(f"Unsafe archive member: {m.name}")
-                    if not (m.isfile() or m.isdir()):
+                    if m.issym() or m.islnk() or m.isdev() or m.isfifo():
                         raise ValueError(f"Special files not allowed in backup: {m.name}")
+                    if not (m.isfile() or m.isdir()):
+                        raise ValueError(f"Unrecognized member type in backup: {m.name}")
                 tar.extractall(path=temp_dir)
+
             for item in temp_dir.iterdir():
-                if item.is_dir():
+                if item.is_dir() and item.name in allowed_folders:
+                    _, expected_aid = allowed_folders[item.name]
                     target_folder = self.corpus_dir / item.name
-                    if self._safe_replace_paper(item, target_folder):
+                    if self._safe_replace_paper(item, target_folder, expected_arxiv_id=expected_aid):
                         restored += 1
         return restored
