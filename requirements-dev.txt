@@ -1,0 +1,4 @@
+# Development and Testing Dependencies
+-r requirements.txt
+pytest>=8.0.0
+typeguard>=4.0.0

@@ -1,0 +1,2 @@
+https://hcmus-cs-ta.github.io/lab-book/intro-ds/statement/
+
