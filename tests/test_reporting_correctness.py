@@ -432,5 +432,141 @@ class TestProvenanceAndFaultInjection(BaseReportingTest):
             self.assertEqual(stats["integrity_failed_papers"], 1)
 
 
+class TestPhase2RemediationAudit(BaseReportingTest):
+    """Specific regression tests for Phase 2 Independent Audit Findings (FIND-REP-A to D)."""
+
+    def test_find_rep_a_source_complete_independent_of_broken_metadata_and_references(self):
+        """FIND-REP-A: Corrupted metadata or missing references does NOT negate source_complete."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        # Corrupt metadata.json into unparseable syntax
+        folder_key = self.store.paper_path(self.mssv, self.aid1)
+        (folder_key / "metadata.json").write_text("{CORRUPTED_JSON_METADATA_NOT_VALID", encoding="utf-8")
+        # Remove references.json
+        if (folder_key / "references.json").exists():
+            (folder_key / "references.json").unlink()
+
+        stats = compute_m1_statistics(self.store, [(self.mssv, self.aid1)])
+
+        # Source is valid and complete on disk -> must be counted
+        self.assertEqual(stats["source_complete_papers"], 1)
+        self.assertEqual(stats["source_completion_rate"], 100.0)
+
+        # Metadata and references are NOT complete
+        self.assertEqual(stats["metadata_complete_papers"], 0)
+        self.assertEqual(stats["references_complete_papers"], 0)
+
+        # M1 complete is strictly False
+        self.assertEqual(stats["m1_complete_papers"], 0)
+        self.assertEqual(stats["m1_completion_rate"], 0.0)
+
+        # Corrupted metadata is flagged as integrity failure
+        self.assertEqual(stats["integrity_failed_papers"], 1)
+
+    def test_find_rep_b_integrity_failed_papers_distinguishes_incomplete_from_corruption(self):
+        """FIND-REP-B: Incomplete lifecycle stages (unattempted metadata/references) are NOT integrity failures."""
+        # Paper 1: Freshly initialized (not attempted stage)
+        self.store.initialize_paper(self.mssv, self.aid1)
+
+        # Paper 2: Found, source complete, but metadata not attempted
+        self._setup_found_paper(self.aid2, ["v1"])
+        self._complete_version_tex(self.aid2, "v1")
+
+        # Paper 3: Tampered file checksum (genuine corruption)
+        self._setup_found_paper(self.aid3, ["v1"])
+        self._complete_version_tex(self.aid3, "v1")
+        tex_path = self.store.paper_path(self.mssv, self.aid3) / "v1" / "main.tex"
+        tex_path.write_text("TAMPERED_CHECKSUM_SOURCE", encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1), (self.mssv, self.aid2), (self.mssv, self.aid3)],
+        )
+
+        # Only aid3 is a genuine integrity failure
+        self.assertEqual(stats["integrity_failed_papers"], 1)
+
+    def test_find_rep_c_not_found_with_filesystem_version_dir_rejected_from_confirmed_not_found(self):
+        """FIND-REP-C: Negative discovery requires zero version directories on filesystem."""
+        # Paper 1: Genuine not_found (manifest not_found, versions={}, no vN dirs)
+        self.store.record_discovery({
+            "mssv": self.mssv,
+            "arxiv_id": self.aid1,
+            "status": "not_found",
+        })
+
+        # Paper 2: Manifest claims not_found, but v1/ exists on disk (filesystem anomaly)
+        self.store.record_discovery({
+            "mssv": self.mssv,
+            "arxiv_id": self.aid2,
+            "status": "not_found",
+        })
+        bogus_v1 = self.store.paper_path(self.mssv, self.aid2) / "v1"
+        bogus_v1.mkdir(parents=True, exist_ok=True)
+        (bogus_v1 / "main.tex").write_text("Ghost TeX", encoding="utf-8")
+
+        stats = compute_m1_statistics(
+            self.store,
+            [(self.mssv, self.aid1), (self.mssv, self.aid2)],
+        )
+
+        # Only aid1 is confirmed not found; aid2 is rejected as invalid/integrity failure
+        self.assertEqual(stats["confirmed_not_found"], 1)
+        self.assertEqual(stats["invalid_manifests"], 1)
+        self.assertEqual(stats["integrity_failed_papers"], 1)
+
+    def test_find_rep_d_independent_reconciliation_detects_spoofed_or_discrepant_counts(self):
+        """FIND-REP-D: Independent audit pass catches discrepancies between classifier counts and disk truth."""
+        self._setup_found_paper(self.aid1, ["v1"])
+        self._complete_version_tex(self.aid1, "v1")
+
+        stats = compute_m1_statistics(self.store, [(self.mssv, self.aid1)])
+        self.assertTrue(stats["is_reconciled"])
+        self.assertEqual(stats["reconciliation"]["discrepancies"], [])
+        self.assertIn("independent_audit", stats["reconciliation"])
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_found_count"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_total_versions"], 1)
+
+        # Test directly that _perform_independent_reconciliation catches tampered stats
+        from src.reporting import _perform_independent_reconciliation
+        tampered_stats = dict(stats)
+        tampered_stats["found_papers"] = 999  # Spoofed classifier counter
+        res = _perform_independent_reconciliation(self.store, [(self.mssv, self.aid1)], tampered_stats)
+        self.assertFalse(res["is_reconciled"])
+        self.assertTrue(any("Found papers mismatch" in d for d in res["discrepancies"]))
+
+    def test_source_integrity_failed_versions_counter(self):
+        """source_integrity_failed_versions tracks versions failing integrity audit."""
+        self._setup_found_paper(self.aid1, ["v1", "v2"])
+        self._complete_version_tex(self.aid1, "v1")
+        self._complete_version_tex(self.aid1, "v2")
+
+        # Tamper v2 checksum
+        p_path = self.store.paper_path(self.mssv, self.aid1)
+        (p_path / "v2" / "main.tex").write_text("CORRUPTED_V2", encoding="utf-8")
+
+        stats = compute_m1_statistics(self.store, [(self.mssv, self.aid1)])
+        self.assertEqual(stats["total_discovered_versions"], 2)
+        self.assertEqual(stats["source_integrity_failed_versions"], 1)
+        self.assertEqual(stats["source_complete_papers"], 0)
+
+    def test_git_commit_prioritizes_project_root_over_cwd(self):
+        """_get_git_commit prioritizes PROJECT_ROOT over arbitrary external cwd."""
+        with tempfile.TemporaryDirectory() as fake_git_dir:
+            import subprocess
+            subprocess.run(["git", "init", fake_git_dir], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["git", "-C", fake_git_dir, "config", "user.email", "test@test.com"], check=True)
+            subprocess.run(["git", "-C", fake_git_dir, "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", fake_git_dir, "commit", "--allow-empty", "-m", "fake"], check=True, stdout=subprocess.DEVNULL)
+            fake_sha = subprocess.check_output(["git", "-C", fake_git_dir, "rev-parse", "HEAD"], text=True).strip()
+
+            actual_sha = _get_git_commit(Path(fake_git_dir))
+            self.assertNotEqual(actual_sha, fake_sha)
+            from src.local_config import PROJECT_ROOT
+            expected_sha = subprocess.check_output(["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"], text=True).strip()
+            self.assertEqual(actual_sha, expected_sha)
+
+
 if __name__ == "__main__":
     unittest.main()

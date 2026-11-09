@@ -71,12 +71,34 @@ class PaperIntegrityResult:
     def is_valid(self) -> bool:
         return len(self.violations) == 0
 
+    @property
+    def has_integrity_failure(self) -> bool:
+        """Return True if this paper has actual corruption or integrity failure.
+
+        Distinguishes genuine integrity corruption (corrupted files, hash mismatches,
+        unmanaged files, symlinks, missing declared source files) from normal pipeline
+        incomplete states (e.g. metadata or references not yet attempted/created).
+        """
+        if self.status == "corrupted":
+            return True
+        for v in self.violations:
+            if v.category in {"corrupted", "unmanaged"}:
+                return True
+            if v.category == "invalid":
+                return True
+            if v.category == "missing":
+                msg = v.message.lower()
+                if "source directory" in msg or "expected files missing" in msg or "manifest.json" in msg:
+                    return True
+        return False
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "arxiv_id": self.arxiv_id,
             "mssv": self.mssv,
             "status": self.status,
             "is_valid": self.is_valid,
+            "has_integrity_failure": self.has_integrity_failure,
             "is_source_complete": self.is_source_complete,
             "is_m1_complete": self.is_m1_complete,
             "manifest_status": self.manifest_status,
@@ -1298,16 +1320,18 @@ def audit_paper_integrity(
             )
 
     # Validate metadata.json
+    disc_status = manifest.get("discovery_status") if manifest is not None else None
     if not metadata_path.is_file():
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="missing",
-                severity="error",
-                file_path=str(metadata_path),
-                message="metadata.json does not exist",
+        if disc_status != "not_found":
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path=str(metadata_path),
+                    message="metadata.json does not exist",
+                )
             )
-        )
     else:
         try:
             metadata = store.read_metadata(mssv, arxiv_id)
@@ -1334,15 +1358,16 @@ def audit_paper_integrity(
 
     # Validate references.json
     if not references_path.is_file():
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="missing",
-                severity="error",
-                file_path=str(references_path),
-                message="references.json does not exist",
+        if disc_status != "not_found":
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path=str(references_path),
+                    message="references.json does not exist",
+                )
             )
-        )
     else:
         try:
             references = store.read_references(mssv, arxiv_id)
@@ -1367,8 +1392,8 @@ def audit_paper_integrity(
                 )
             )
 
-    # If any mandatory JSON failed to load, determine initial failure status
-    if manifest is None or metadata is None or references is None:
+    # If manifest failed to load, determine initial failure status
+    if manifest is None:
         has_corrupt = any(v.category == "corrupted" for v in violations)
         has_missing = any(v.category == "missing" for v in violations)
         overall_status = "corrupted" if has_corrupt else ("missing" if has_missing else "invalid")
@@ -1384,93 +1409,158 @@ def audit_paper_integrity(
 
     # 4. Cross-file consistency checks between manifest, metadata, references
     man_status = manifest.get("status")
-    disc_status = manifest.get("discovery_status")
     ver_status = manifest.get("version_status")
-    meta_status = metadata.get("status")
-    ref_status = references.get("status")
+    meta_status = metadata.get("status") if metadata is not None else None
+    ref_status = references.get("status") if references is not None else None
 
-    if manifest.get("metadata_status") != meta_status:
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="invalid",
-                severity="error",
-                expected=meta_status,
-                actual=manifest.get("metadata_status"),
-                message="manifest.metadata_status disagrees with metadata.status",
+    # Check negative discovery filesystem invariants (FIND-REP-C)
+    if disc_status == "not_found":
+        manifest_versions = manifest.get("versions")
+        if not isinstance(manifest_versions, dict) or len(manifest_versions) > 0:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    file_path=str(manifest_path),
+                    expected={},
+                    actual=manifest_versions,
+                    message="Paper marked not_found but manifest has versions",
+                )
             )
-        )
-
-    if manifest.get("references_status") != ref_status:
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="invalid",
-                severity="error",
-                expected=ref_status,
-                actual=manifest.get("references_status"),
-                message="manifest.references_status disagrees with references.status",
+        try:
+            for child in paper_dir.iterdir():
+                if child.is_symlink() or os.path.islink(child):
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            file_path=str(child),
+                            message=f"Symbolic link found in not_found paper directory: {child.name}",
+                        )
+                    )
+                elif child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="invalid",
+                            severity="error",
+                            file_path=str(child),
+                            expected="no version directories for not_found paper",
+                            actual=child.name,
+                            message=f"Paper marked not_found but version directory {child.name} exists on filesystem",
+                        )
+                    )
+                elif child.name not in {"manifest.json", "metadata.json", "references.json"}:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="unmanaged",
+                            severity="error",
+                            file_path=str(child),
+                            expected="only manifest.json or checkpoint files",
+                            actual=child.name,
+                            message=f"Unmanaged extraneous entry in not_found paper directory: {child.name}",
+                        )
+                    )
+        except OSError as exc:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="corrupted",
+                    severity="error",
+                    file_path=str(paper_dir),
+                    message=f"Filesystem error inspecting not_found paper directory: {exc}",
+                )
             )
-        )
 
-    if ver_status != metadata.get("version_status"):
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="invalid",
-                severity="error",
-                expected=metadata.get("version_status"),
-                actual=ver_status,
-                message="manifest.version_status disagrees with metadata.version_status",
+    if metadata is not None:
+        if manifest.get("metadata_status") != meta_status:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    expected=meta_status,
+                    actual=manifest.get("metadata_status"),
+                    message="manifest.metadata_status disagrees with metadata.status",
+                )
             )
-        )
 
-    # Check version coverage synchronization
-    manifest_versions = manifest.get("versions") or {}
-    metadata_versions = [v.get("version") for v in (metadata.get("versions") or []) if isinstance(v, dict)]
-
-    if set(manifest_versions.keys()) != set(metadata_versions):
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="invalid",
-                severity="error",
-                expected=sorted(metadata_versions),
-                actual=sorted(manifest_versions.keys()),
-                message="Version keys in manifest do not match version list in metadata",
+        if ver_status != metadata.get("version_status"):
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    expected=metadata.get("version_status"),
+                    actual=ver_status,
+                    message="manifest.version_status disagrees with metadata.version_status",
+                )
             )
-        )
+
+        # Check version coverage synchronization
+        manifest_versions = manifest.get("versions") or {}
+        metadata_versions = [v.get("version") for v in (metadata.get("versions") or []) if isinstance(v, dict)]
+
+        if set(manifest_versions.keys()) != set(metadata_versions):
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    expected=sorted(metadata_versions),
+                    actual=sorted(manifest_versions.keys()),
+                    message="Version keys in manifest do not match version list in metadata",
+                )
+            )
 
     # 5. References coverage semantics (distinguish null vs empty vs complete)
-    ref_coverage = references.get("coverage") or {}
-    cov_complete = ref_coverage.get("complete") is True
-    ref_items = references.get("items") or []
+    cov_complete = False
+    if references is not None:
+        if manifest.get("references_status") != ref_status:
+            violations.append(
+                IntegrityViolation(
+                    arxiv_id=arxiv_id,
+                    category="invalid",
+                    severity="error",
+                    expected=ref_status,
+                    actual=manifest.get("references_status"),
+                    message="manifest.references_status disagrees with references.status",
+                )
+            )
 
-    if ref_status == "complete":
-        if not cov_complete:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="invalid",
-                    severity="error",
-                    expected=True,
-                    actual=ref_coverage.get("complete"),
-                    message="references marked 'complete' but coverage.complete is False",
+        ref_coverage = references.get("coverage") or {}
+        cov_complete = ref_coverage.get("complete") is True
+        ref_items = references.get("items") or []
+
+        if ref_status == "complete":
+            if not cov_complete:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        expected=True,
+                        actual=ref_coverage.get("complete"),
+                        message="references marked 'complete' but coverage.complete is False",
+                    )
                 )
-            )
-        if ref_coverage.get("continuation") is not None:
-            violations.append(
-                IntegrityViolation(
-                    arxiv_id=arxiv_id,
-                    category="invalid",
-                    severity="error",
-                    expected=None,
-                    actual=ref_coverage.get("continuation"),
-                    message="references marked 'complete' but continuation token is not None",
+            if ref_coverage.get("continuation") is not None:
+                violations.append(
+                    IntegrityViolation(
+                        arxiv_id=arxiv_id,
+                        category="invalid",
+                        severity="error",
+                        expected=None,
+                        actual=ref_coverage.get("continuation"),
+                        message="references marked 'complete' but continuation token is not None",
+                    )
                 )
-            )
 
     # 6. Audit source files for each version
+    manifest_versions = manifest.get("versions") or {}
     all_versions_terminal = bool(manifest_versions)
     all_versions_verified = bool(manifest_versions)
 
@@ -1539,6 +1629,8 @@ def audit_paper_integrity(
         overall_status = "corrupted"
     elif any(v.category in {"invalid", "unmanaged"} for v in violations):
         overall_status = "invalid"
+    elif any(v.category == "missing" for v in violations):
+        overall_status = "missing"
     elif not is_source_complete or man_status in {"not_attempted", "in_progress", "partial", "interrupted", "failed"}:
         overall_status = "incomplete"
     else:

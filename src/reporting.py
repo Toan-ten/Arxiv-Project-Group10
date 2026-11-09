@@ -32,12 +32,10 @@ REPORT_SCHEMA_VERSION = "2.1.0"
 def _get_git_commit(cwd: Optional[Path] = None) -> str:
     """Attempt to get current 40-character Git commit SHA, falling back to UNKNOWN.
 
-    Searches cwd if provided, then PROJECT_ROOT, then repository root of this script.
+    Prioritizes the repository containing the codebase (PROJECT_ROOT, then repository
+    root of this script), and checks cwd only as a fallback.
     """
     candidates: List[Path] = []
-    if cwd is not None:
-        candidates.append(Path(cwd))
-
     try:
         from src.local_config import PROJECT_ROOT
         candidates.append(PROJECT_ROOT)
@@ -48,6 +46,9 @@ def _get_git_commit(cwd: Optional[Path] = None) -> str:
         candidates.append(Path(__file__).resolve().parents[1])
     except Exception:
         pass
+
+    if cwd is not None:
+        candidates.append(Path(cwd))
 
     for target_dir in candidates:
         try:
@@ -61,6 +62,230 @@ def _get_git_commit(cwd: Optional[Path] = None) -> str:
         except Exception:
             continue
     return "UNKNOWN"
+
+
+def _perform_independent_reconciliation(
+    store: CorpusStorage,
+    pairs_list: List[Tuple[str, str]],
+    stats: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Perform a second-pass independent reconciliation audit across disk and candidate records.
+
+    Verifies the accuracy of first-pass classifications against raw filesystem structures,
+    raw manifest checkpoints, and full integrity re-evaluations (FIND-REP-D).
+    """
+    total_candidates = len(pairs_list)
+    raw_found_count = 0
+    raw_confirmed_not_found_count = 0
+    raw_unprocessed_count = 0
+    raw_discovery_failed_count = 0
+    raw_missing_manifest_count = 0
+    raw_invalid_manifest_count = 0
+    raw_other_unresolved_count = 0
+
+    raw_total_versions = 0
+    raw_terminal_versions = 0
+    raw_version_dirs_count = 0
+
+    discrepancies: List[str] = []
+
+    for mssv, arxiv_id in pairs_list:
+        try:
+            folder_key = arxiv_id_to_folder_key(arxiv_id)
+        except Exception:
+            raw_other_unresolved_count += 1
+            continue
+
+        paper_dir = store.root / folder_key
+        if not paper_dir.exists():
+            raw_missing_manifest_count += 1
+            continue
+
+        if paper_dir.is_symlink() or os.path.islink(paper_dir):
+            raw_other_unresolved_count += 1
+            continue
+
+        manifest_path = paper_dir / "manifest.json"
+        if not manifest_path.exists():
+            raw_missing_manifest_count += 1
+            continue
+
+        if manifest_path.is_symlink() or os.path.islink(manifest_path):
+            raw_invalid_manifest_count += 1
+            continue
+
+        try:
+            raw_bytes = manifest_path.read_bytes()
+            raw_man = json.loads(raw_bytes.decode("utf-8"))
+            if not isinstance(raw_man, dict):
+                raw_invalid_manifest_count += 1
+                continue
+        except Exception:
+            raw_invalid_manifest_count += 1
+            continue
+
+        disc = raw_man.get("discovery_status")
+        man_st = raw_man.get("status")
+        raw_vers = raw_man.get("versions")
+
+        if disc == "not_found":
+            has_v_dirs = False
+            has_unmanaged = False
+            try:
+                for child in paper_dir.iterdir():
+                    if child.is_symlink() or os.path.islink(child):
+                        has_unmanaged = True
+                        break
+                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                        has_v_dirs = True
+                        break
+                    if child.name not in {"manifest.json", "metadata.json", "references.json"}:
+                        has_unmanaged = True
+                        break
+            except OSError:
+                has_unmanaged = True
+
+            if (
+                man_st == "not_found"
+                and isinstance(raw_vers, dict)
+                and not raw_vers
+                and not has_v_dirs
+                and not has_unmanaged
+            ):
+                raw_confirmed_not_found_count += 1
+            else:
+                raw_invalid_manifest_count += 1
+
+        elif disc == "not_attempted":
+            raw_unprocessed_count += 1
+        elif disc == "failed":
+            raw_discovery_failed_count += 1
+        elif disc == "found":
+            raw_found_count += 1
+            if isinstance(raw_vers, dict):
+                raw_total_versions += len(raw_vers)
+                for v_info in raw_vers.values():
+                    if isinstance(v_info, dict) and v_info.get("status") in TERMINAL:
+                        raw_terminal_versions += 1
+            try:
+                for child in paper_dir.iterdir():
+                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                        raw_version_dirs_count += 1
+            except OSError:
+                pass
+        else:
+            raw_other_unresolved_count += 1
+
+    # Cross-check independent raw counts against classified statistics
+    if raw_found_count != stats["found_papers"]:
+        discrepancies.append(
+            f"Found papers mismatch: classified {stats['found_papers']} vs independent {raw_found_count}"
+        )
+    if raw_confirmed_not_found_count != stats["confirmed_not_found"]:
+        discrepancies.append(
+            f"Confirmed not-found mismatch: classified {stats['confirmed_not_found']} vs independent {raw_confirmed_not_found_count}"
+        )
+    if raw_unprocessed_count != stats["unprocessed_papers"]:
+        discrepancies.append(
+            f"Unprocessed papers mismatch: classified {stats['unprocessed_papers']} vs independent {raw_unprocessed_count}"
+        )
+    if raw_discovery_failed_count != stats["discovery_failed"]:
+        discrepancies.append(
+            f"Discovery failed mismatch: classified {stats['discovery_failed']} vs independent {raw_discovery_failed_count}"
+        )
+    if raw_missing_manifest_count != stats["missing_manifests"]:
+        discrepancies.append(
+            f"Missing manifests mismatch: classified {stats['missing_manifests']} vs independent {raw_missing_manifest_count}"
+        )
+    if raw_invalid_manifest_count != stats["invalid_manifests"]:
+        discrepancies.append(
+            f"Invalid manifests mismatch: classified {stats['invalid_manifests']} vs independent {raw_invalid_manifest_count}"
+        )
+    if raw_other_unresolved_count != stats["other_unresolved"]:
+        discrepancies.append(
+            f"Other unresolved mismatch: classified {stats['other_unresolved']} vs independent {raw_other_unresolved_count}"
+        )
+    if raw_total_versions != stats["total_discovered_versions"]:
+        discrepancies.append(
+            f"Total versions mismatch: classified {stats['total_discovered_versions']} vs independent {raw_total_versions}"
+        )
+    if raw_terminal_versions != stats["terminal_versions"]:
+        discrepancies.append(
+            f"Terminal versions mismatch: classified {stats['terminal_versions']} vs independent {raw_terminal_versions}"
+        )
+
+    # Verification of arithmetic invariants
+    paper_population_balance = (
+        stats["found_papers"]
+        + stats["confirmed_not_found"]
+        + stats["unprocessed_papers"]
+        + stats["discovery_failed"]
+        + stats["missing_manifests"]
+        + stats["invalid_manifests"]
+        + stats["other_unresolved"]
+    )
+    if paper_population_balance != total_candidates:
+        discrepancies.append(
+            f"Paper population balance equation violated: {paper_population_balance} != {total_candidates}"
+        )
+
+    found_lifecycle_balance = (
+        stats["m1_complete_papers"]
+        + stats["partial_papers"]
+        + stats["failed_papers"]
+        + stats["interrupted_papers"]
+        + stats["unresolved_found_papers"]
+    )
+    if found_lifecycle_balance != stats["found_papers"]:
+        discrepancies.append(
+            f"Found lifecycle balance equation violated: {found_lifecycle_balance} != {stats['found_papers']}"
+        )
+
+    version_balance = (
+        stats["terminal_versions"]
+        + stats["incomplete_versions"]
+        + stats["failed_versions"]
+        + stats["invalid_versions"]
+    )
+    if version_balance != stats["total_discovered_versions"]:
+        discrepancies.append(
+            f"Version balance equation violated: {version_balance} != {stats['total_discovered_versions']}"
+        )
+
+    if not (
+        stats["m1_complete_papers"] <= stats["source_complete_papers"]
+        and stats["m1_complete_papers"] <= stats["metadata_complete_papers"]
+        and stats["m1_complete_papers"] <= stats["references_complete_papers"]
+    ):
+        discrepancies.append("M1 complete hierarchy violation: m1_complete must be <= stage completions")
+
+    return {
+        "is_reconciled": len(discrepancies) == 0,
+        "discrepancies": discrepancies,
+        "independent_audit": {
+            "raw_found_count": raw_found_count,
+            "raw_confirmed_not_found_count": raw_confirmed_not_found_count,
+            "raw_unprocessed_count": raw_unprocessed_count,
+            "raw_discovery_failed_count": raw_discovery_failed_count,
+            "raw_missing_manifest_count": raw_missing_manifest_count,
+            "raw_invalid_manifest_count": raw_invalid_manifest_count,
+            "raw_other_unresolved_count": raw_other_unresolved_count,
+            "raw_total_versions": raw_total_versions,
+            "raw_terminal_versions": raw_terminal_versions,
+            "raw_version_dirs_count": raw_version_dirs_count,
+        },
+        "paper_population_balance": paper_population_balance,
+        "paper_population_expected": total_candidates,
+        "found_lifecycle_balance": found_lifecycle_balance,
+        "found_lifecycle_expected": stats["found_papers"],
+        "version_balance": version_balance,
+        "version_expected": stats["total_discovered_versions"],
+        "m1_hierarchy_valid": (
+            stats["m1_complete_papers"] <= stats["source_complete_papers"]
+            and stats["m1_complete_papers"] <= stats["metadata_complete_papers"]
+            and stats["m1_complete_papers"] <= stats["references_complete_papers"]
+        ),
+    }
 
 
 def compute_m1_statistics(
@@ -111,6 +336,7 @@ def compute_m1_statistics(
     incomplete_versions = 0
     failed_versions = 0
     invalid_versions = 0
+    source_integrity_failed_versions = 0
 
     # 5. Reference Counters
     complete_reference_papers = 0
@@ -162,11 +388,30 @@ def compute_m1_statistics(
         if disc == "not_found":
             # Verify negative discovery contract (R14: versions must be exact empty dict)
             versions = manifest.get("versions")
-            if (
+            is_valid_manifest_not_found = (
                 manifest.get("status") == "not_found"
                 and isinstance(versions, dict)
                 and not versions
-            ):
+            )
+
+            # FIND-REP-C: Check filesystem: no version directories and no unmanaged entries
+            has_version_dirs = False
+            has_unmanaged_entries = False
+            try:
+                for child in paper_dir.iterdir():
+                    if child.is_symlink() or os.path.islink(child):
+                        has_unmanaged_entries = True
+                        break
+                    if child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                        has_version_dirs = True
+                        break
+                    if child.name not in {"manifest.json", "metadata.json", "references.json"}:
+                        has_unmanaged_entries = True
+                        break
+            except OSError:
+                has_unmanaged_entries = True
+
+            if is_valid_manifest_not_found and not has_version_dirs and not has_unmanaged_entries:
                 confirmed_not_found += 1
             else:
                 invalid_manifests += 1
@@ -191,10 +436,11 @@ def compute_m1_statistics(
 
             # Audit paper integrity using canonical Phase 1 API
             audit_res = audit_paper_integrity(store, mssv, arxiv_id)
-            if not audit_res.is_valid:
+            if audit_res.has_integrity_failure:
                 integrity_failed_papers += 1
 
             # --- A. Source Completion Check ---
+            # Decoupled from metadata and references (FIND-REP-A)
             if audit_res.is_source_complete:
                 source_complete_papers += 1
 
@@ -215,8 +461,10 @@ def compute_m1_statistics(
                         )
                     ):
                         is_meta_complete = True
+                except (StorageError, IntegrityError, json.JSONDecodeError, OSError):
+                    is_meta_complete = False
                 except Exception:
-                    pass
+                    is_meta_complete = False
 
             if is_meta_complete:
                 metadata_complete_papers += 1
@@ -255,6 +503,8 @@ def compute_m1_statistics(
                         not_attempted_reference_papers += 1
                     else:
                         invalid_reference_papers += 1
+                except (StorageError, IntegrityError, json.JSONDecodeError, OSError):
+                    invalid_reference_papers += 1
                 except Exception:
                     invalid_reference_papers += 1
             else:
@@ -299,6 +549,11 @@ def compute_m1_statistics(
                     failed_versions += 1
                 else:
                     invalid_versions += 1
+
+                # Check version source integrity violations
+                v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
+                if v_violations:
+                    source_integrity_failed_versions += 1
 
         else:
             other_unresolved += 1
@@ -356,14 +611,30 @@ def compute_m1_statistics(
         + invalid_versions
     )
 
-    is_reconciled = (
-        paper_population_balance == total_candidates
-        and found_lifecycle_balance == found_papers
-        and version_balance == total_discovered_versions
-        and m1_complete_papers <= source_complete_papers
-        and m1_complete_papers <= metadata_complete_papers
-        and m1_complete_papers <= references_complete_papers
-    )
+    stats_draft = {
+        "found_papers": found_papers,
+        "confirmed_not_found": confirmed_not_found,
+        "unprocessed_papers": unprocessed_papers,
+        "discovery_failed": discovery_failed,
+        "missing_manifests": missing_manifests,
+        "invalid_manifests": invalid_manifests,
+        "other_unresolved": other_unresolved,
+        "total_discovered_versions": total_discovered_versions,
+        "terminal_versions": terminal_versions,
+        "incomplete_versions": incomplete_versions,
+        "failed_versions": failed_versions,
+        "invalid_versions": invalid_versions,
+        "m1_complete_papers": m1_complete_papers,
+        "source_complete_papers": source_complete_papers,
+        "metadata_complete_papers": metadata_complete_papers,
+        "references_complete_papers": references_complete_papers,
+        "partial_papers": partial_papers,
+        "failed_papers": failed_papers,
+        "interrupted_papers": interrupted_papers,
+        "unresolved_found_papers": unresolved_found_papers,
+    }
+    reconciliation_result = _perform_independent_reconciliation(store, pairs_list, stats_draft)
+    is_reconciled = reconciliation_result["is_reconciled"]
 
     commit_sha = repository_commit or _get_git_commit(store.root)
 
@@ -414,6 +685,8 @@ def compute_m1_statistics(
         "incomplete_versions": incomplete_versions,
         "failed_versions": failed_versions,
         "invalid_versions": invalid_versions,
+        "unresolved_versions": invalid_versions,  # Canonical metric spec name
+        "source_integrity_failed_versions": source_integrity_failed_versions,
         # References Accounting
         "complete_reference_papers": complete_reference_papers,
         "partial_reference_papers": partial_reference_papers,
@@ -433,19 +706,7 @@ def compute_m1_statistics(
         "average_references_per_paper": average_references_per_paper,
         # Reconciliation Results
         "is_reconciled": is_reconciled,
-        "reconciliation": {
-            "paper_population_balance": paper_population_balance,
-            "paper_population_expected": total_candidates,
-            "found_lifecycle_balance": found_lifecycle_balance,
-            "found_lifecycle_expected": found_papers,
-            "version_balance": version_balance,
-            "version_expected": total_discovered_versions,
-            "m1_hierarchy_valid": (
-                m1_complete_papers <= source_complete_papers
-                and m1_complete_papers <= metadata_complete_papers
-                and m1_complete_papers <= references_complete_papers
-            ),
-        },
+        "reconciliation": reconciliation_result,
         # Backward compatibility aliases
         "completed_papers": source_complete_papers,
         "completed_versions": terminal_versions,

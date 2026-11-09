@@ -34,7 +34,7 @@
 #### `confirmed_not_found`
 - **Ý nghĩa:** Số định danh được xác nhận âm tính hợp lệ (`discovery_status == "not_found"`).
 - **Đơn vị:** Định danh.
-- **Điều kiện:** Manifest hợp lệ, `discovery_status == "not_found"`, `status == "not_found"`, `versions == {}` (từ điển rỗng), và không có thư mục `vN/` nào trên đĩa.
+- **Điều kiện:** Manifest hợp lệ, `discovery_status == "not_found"`, `status == "not_found"`, `versions == {}` (từ điển rỗng), và kiểm tra thực tế trên hệ thống tệp bảo đảm không có bất kỳ thư mục phiên bản `vN/` (ví dụ `v1/`, `v2/`) hay tệp ngoại lai unmanaged nào. Nếu có thư mục phiên bản trên đĩa, bài báo bị loại khỏi `confirmed_not_found`, phân loại thành `invalid_manifests` và ghi nhận `integrity_failed_papers`.
 
 #### `unprocessed_papers`
 - **Ý nghĩa:** Số bài báo chưa được tiến trình cào xử lý (`discovery_status == "not_attempted"`).
@@ -66,6 +66,7 @@
 #### `source_complete_papers`
 - **Ý nghĩa:** Số bài báo có toàn bộ các phiên bản đã được thu thập và xác minh trọn vẹn mã nguồn trên đĩa.
 - **Đơn vị:** Bài báo.
+- **Tính độc lập (Decoupled Scope - FIND-REP-A):** Chỉ số này phản ánh độc lập trạng thái thu thập mã nguồn TeX/PDF. Chỉ số này hoàn toàn không phụ thuộc vào `metadata.json` hay `references.json`. Một bài báo có tệp nguồn hợp lệ và đầy đủ nhưng metadata bị hỏng hoặc references chưa thu thập vẫn được công nhận đạt `source_complete_papers`.
 - **Điều kiện bắt buộc (đồng thời):**
   1. `discovery_status == "found"`.
   2. `version_status == "resolved"`.
@@ -111,7 +112,7 @@
 - **`partial_papers`:** `manifest["status"] == "partial"` (cần tiếp tục chạy resume).
 - **`failed_papers`:** `manifest["status"] == "failed"` (gặp lỗi terminal ở một giai đoạn).
 - **`interrupted_papers`:** `manifest["status"] == "interrupted"` (bị dừng do timeout hoặc hủy phiên).
-- **`integrity_failed_papers`:** Bài báo có ghi nhận `violations` trong kiểm toán tính toàn vẹn (tệp hỏng, sai mã băm, tệp rác unmanaged).
+- **`integrity_failed_papers`:** Bài báo có ghi nhận vi phạm tính toàn vẹn thực tế (tệp hỏng không phân tích được JSON, sai mã băm SHA-256, tệp rác unmanaged trên đĩa, symlink bất hợp lệ, thư mục phiên bản tồn tại khi manifest ghi `not_found`, hoặc thiếu tệp nguồn đã khai báo trong phiên bản `success`). Các trạng thái dữ liệu chưa hoàn tất thông thường trong vòng đời pipeline (ví dụ: `metadata_status == "not_attempted"` khi chưa đến bước Semantic Scholar, hoặc giai đoạn `in_progress`) **tuyệt đối không bị tính là lỗi toàn vẹn** (FIND-REP-B).
 
 ---
 
@@ -178,6 +179,13 @@ Trong đó `unresolved_found_papers` là các bài báo `found` nhưng không r�
 
 ### 6.3. Bất biến thứ tự hoàn tất M1 (M1 Completion Hierarchy)
 $$\text{m1\_complete\_papers} \le \min(\text{source\_complete\_papers}, \text{metadata\_complete\_papers}, \text{references\_complete\_papers})$$
+
+### 6.4. Cơ chế đối chiếu độc lập hai lượt (Two-Pass Independent Reconciliation - FIND-REP-D)
+Hệ thống báo cáo không chỉ cộng dồn các biến số từ một vòng lặp phân loại duy nhất. Mô-đun báo cáo kích hoạt một lượt kiểm toán độc lập (`_perform_independent_reconciliation`):
+1. Quét độc lập hệ thống tệp và cấu trúc JSON thô từ đĩa, tách biệt hoàn toàn khỏi logic bộ phân loại ban đầu.
+2. Tổng hợp các biến đếm thực tế thô (`raw_found_count`, `raw_confirmed_not_found_count`, `raw_total_versions`, `raw_terminal_versions`,...).
+3. Đối chiếu chéo 1:1 giữa số liệu phân loại của báo cáo và số liệu đếm thô từ đĩa. Nếu phát hiện bất kỳ sự sai lệch nào, `is_reconciled` bị đánh dấu `False` và danh sách chi tiết sai lệch được ghi nhận vào `reconciliation["discrepancies"]`.
+4. Toàn bộ bài báo được tuyên bố `m1_complete_papers` được tái thẩm định độc lập để bảo đảm không có lỗi lọt lưới.
 
 ---
 

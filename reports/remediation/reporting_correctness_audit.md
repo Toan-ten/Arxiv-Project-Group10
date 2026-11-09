@@ -32,6 +32,8 @@ Hệ thống tính toán chỉ số và sinh báo cáo kiểm toán Milestone 1 
 
 ## 3. Khắc Phục Chi Tiết Các Phát Hiện Kiểm Toán
 
+### 3.1. Các phát hiện vòng rà soát ban đầu (Initial Audit Findings FIND-REP-01 đến FIND-REP-10)
+
 | ID | Vấn đề đã xác nhận | Biện pháp xử lý kỹ thuật | Ca kiểm thử bảo vệ |
 |---|---|---|---|
 | **FIND-REP-01** | `m1_complete_papers` đếm theo `manifest.status` mà không kiểm tra thực tế | Bắt buộc thỏa mãn đồng thời: `is_source_complete AND is_metadata_complete AND is_references_complete AND manifest.status in {"complete", "complete_with_no_tex"} AND len(violations) == 0`. | `test_manifest_complete_with_partial_metadata_rejected_from_m1_complete`, `test_manifest_complete_with_incomplete_references_rejected_from_m1_complete` |
@@ -44,6 +46,18 @@ Hệ thống tính toán chỉ số và sinh báo cáo kiểm toán Milestone 1 
 | **FIND-REP-08** | Thao tác `store.root.resolve()` thiếu bắt ngoại lệ | Bao bọc trong khối `try ... except (OSError, RuntimeError)` để xử lý an toàn khi đường dẫn không thể phân giải. | `test_corpus_root_unresolvable_handled_gracefully` |
 | **FIND-REP-09** | Bảng Markdown thiếu thông số kiểm toán | Thiết kế lại Markdown với 5 mục rõ ràng: Provenance, Stage Metrics, Version Statistics, References Statistics, và Reconciliation Summary. | `test_format_markdown_summary_provenance`, `test_zero_candidates_and_zero_found_returns_none_rates` |
 | **FIND-REP-10** | Thiếu tùy chọn xuất báo cáo JSON máy đọc được | Bổ sung hàm `export_report_json(stats, out_path)` và tham số `--json` trong CLI `generate_m1_report.py`. | `test_export_report_json_creates_valid_file` |
+
+### 3.2. Khắc phục các phát hiện thẩm định độc lập (Phase 2 Remediation FIND-REP-A đến FIND-REP-D)
+
+| ID | Mức độ | Khiếm khuyết thẩm định | Giải pháp kỹ thuật đã triển khai | Ca kiểm thử bảo vệ |
+|---|---|---|---|---|
+| **FIND-REP-A** | Critical | `source_complete` phụ thuộc vào `metadata` và `references` | Tách biệt hoàn toàn việc thẩm định source: `audit_paper_integrity()` và `compute_m1_statistics()` không thoát sớm hay đánh rớt `is_source_complete` khi metadata hoặc references bị hỏng/thiếu. | `test_find_rep_a_source_complete_independent_of_broken_metadata_and_references` |
+| **FIND-REP-B** | Critical | `integrity_failed_papers` đếm nhầm trạng thái incomplete thông thường | Định nghĩa lại `has_integrity_failure`: chỉ đếm các vi phạm toàn vẹn thực tế (tệp hỏng, sai SHA-256, unmanaged files, symlink, version dir trên not_found). Các giai đoạn chưa thực hiện (`not_attempted`, `in_progress`) không bị tính là lỗi toàn vẹn. | `test_find_rep_b_integrity_failed_papers_distinguishes_incomplete_from_corruption` |
+| **FIND-REP-C** | High | `confirmed_not_found` chưa kiểm tra hệ thống tệp | Bổ sung kiểm tra thực tế: bài báo `not_found` bắt buộc không có bất kỳ thư mục `vN/` hay tệp unmanaged nào trên đĩa. Nếu phát hiện thư mục version, bài báo bị chuyển sang `invalid_manifests` và tăng `integrity_failed_papers`. | `test_find_rep_c_not_found_with_filesystem_version_dir_rejected_from_confirmed_not_found` |
+| **FIND-REP-D** | High | Reconciliation chưa được kiểm chứng độc lập | Triển khai `_perform_independent_reconciliation`: lượt quét độc lập thứ hai đọc trực tiếp đĩa và JSON thô, đối chiếu chéo 1:1 với kết quả bộ phân loại. Nếu có bất kỳ sai lệch nào, `is_reconciled` bị đánh dấu `False` kèm danh sách sai lệch. | `test_find_rep_d_independent_reconciliation_detects_spoofed_or_discrepant_counts` |
+| **SEC3-01** | Medium | `except Exception: pass` khi đọc metadata | Bắt ngoại lệ cụ thể (`StorageError`, `IntegrityError`, `JSONDecodeError`, `OSError`) và ghi nhận trạng thái lỗi rõ ràng. | Toàn bộ suite |
+| **SEC3-02** | Medium | Bổ sung và đồng bộ metrics phiên bản | Xuất `source_integrity_failed_versions` và đồng bộ `unresolved_versions` trong kết quả và đặc tả. | `test_source_integrity_failed_versions_counter` |
+| **SEC3-03** | Medium | Ưu tiên repository chứa source code trong `_get_git_commit` | `_get_git_commit` tìm kiếm `PROJECT_ROOT` trước, sau đó mới dùng `cwd` làm fallback. | `test_git_commit_prioritizes_project_root_over_cwd` |
 
 ---
 
@@ -66,7 +80,7 @@ Toàn bộ các phép tính thống kê đều được kiểm chứng độc l�
 ## 5. Bằng Chứng Kiểm Thử Đầy Đủ (Verification Evidence)
 
 ### 5.1. Kiểm thử chuyên biệt Phase 2
-- `tests/test_reporting_correctness.py`: **16/16 tests passed** (Bao phủ paper-level, version-level, metadata, references, reconciliation, zero-denominator, git commit, JSON export, và fault injection).
+- `tests/test_reporting_correctness.py`: **22/22 tests passed** (Bao phủ paper-level, version-level, metadata, references, reconciliation, zero-denominator, git commit, JSON export, fault injection, và 6 tests remediation FIND-REP-A đến FIND-REP-D).
 - `tests/test_generate_m1_report.py`: **8/8 tests passed** (Bảo đảm tính tương thích ngược hoàn hảo).
 
 ### 5.2. Kiểm thử hồi quy hệ thống
