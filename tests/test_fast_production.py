@@ -349,5 +349,39 @@ class TestFastProduction(unittest.TestCase):
             mock_run.assert_called_once_with(1, resume=True, revision_history=True, s2_config=custom_s2)
 
 
+    def test_notebooks_do_not_contain_destructive_drive_cleanup(self):
+        """Phase 0 / P0-01: No notebook may contain destructive deletion of drive/production data."""
+        repo_root = Path(__file__).resolve().parents[1]
+        for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
+            nb = json.loads(nb_path.read_text(encoding="utf-8"))
+            for idx, cell in enumerate(nb.get("cells", [])):
+                src = "".join(cell.get("source", []))
+                self.assertNotIn(
+                    "shutil.rmtree(drive_production)",
+                    src,
+                    f"Destructive drive cleanup found in {nb_path} cell {idx}",
+                )
+                self.assertNotIn(
+                    "shutil.rmtree(DRIVE_ROOT)",
+                    src,
+                    f"Destructive DRIVE_ROOT cleanup found in {nb_path} cell {idx}",
+                )
+
+    def test_fast_production_notebook_safety_guards(self):
+        """Phase 0 / P1-15: Fast production notebook enforces CPU-only and fail-closed CODE_COMMIT."""
+        repo_root = Path(__file__).resolve().parents[1]
+        nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
+        all_src = "\n".join("".join(c.get("source", [])) for c in nb.get("cells", []))
+
+        # CPU-only guard
+        self.assertIn("COLAB_GPU", all_src)
+        self.assertIn("Chuyển accelerator về None/CPU", all_src)
+
+        # Fail-closed commit check
+        self.assertIn("not re.fullmatch(r\"[0-9a-f]{40}\", CODE_COMMIT)", all_src)
+        self.assertNotIn("sử dụng HEAD hiện tại của nhánh", all_src)
+
+
 if __name__ == "__main__":
     unittest.main()
