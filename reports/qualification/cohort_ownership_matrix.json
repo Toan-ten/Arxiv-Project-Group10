@@ -1,0 +1,68 @@
+{
+  "total_members": 4,
+  "total_cohorts": 200,
+  "total_ids": 20000,
+  "ids_per_cohort": 100,
+  "cohorts_per_member": 50,
+  "ids_per_member": 5000,
+  "complete_coverage_verified": true,
+  "zero_overlap_verified": true,
+  "ownership": {
+    "24120010": {
+      "mssv": "24120010",
+      "member_name": "Thành viên 1",
+      "month": "2025-08",
+      "cohort_start": 1,
+      "cohort_end": 50,
+      "cohort_count": 50,
+      "total_ids": 5000,
+      "first_id": "2508.07872",
+      "last_id": "2508.12871",
+      "expected_start_id": "2508.07872",
+      "expected_end_id": "2508.12871",
+      "matches_config": true
+    },
+    "24120035": {
+      "mssv": "24120035",
+      "member_name": "Thành viên 2",
+      "month": "2025-07",
+      "cohort_start": 51,
+      "cohort_end": 100,
+      "cohort_count": 50,
+      "total_ids": 5000,
+      "first_id": "2507.16659",
+      "last_id": "2507.21658",
+      "expected_start_id": "2507.16659",
+      "expected_end_id": "2507.21658",
+      "matches_config": true
+    },
+    "24120232": {
+      "mssv": "24120232",
+      "member_name": "Thành viên 3",
+      "month": "2025-02",
+      "cohort_start": 101,
+      "cohort_end": 150,
+      "cohort_count": 50,
+      "total_ids": 5000,
+      "first_id": "2502.08235",
+      "last_id": "2502.13234",
+      "expected_start_id": "2502.08235",
+      "expected_end_id": "2502.13234",
+      "matches_config": true
+    },
+    "24120260": {
+      "mssv": "24120260",
+      "member_name": "Thành viên 4",
+      "month": "2025-01",
+      "cohort_start": 151,
+      "cohort_end": 200,
+      "cohort_count": 50,
+      "total_ids": 5000,
+      "first_id": "2501.02642",
+      "last_id": "2501.07641",
+      "expected_start_id": "2501.02642",
+      "expected_end_id": "2501.07641",
+      "matches_config": true
+    }
+  }
+}
