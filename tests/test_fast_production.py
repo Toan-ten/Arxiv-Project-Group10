@@ -74,31 +74,97 @@ DRIVE_DANGER_KEYWORDS = {"drive", "mydrive", "group10", "production"}
 
 
 class DestructiveCallVisitor(ast.NodeVisitor):
-    """Shared AST visitor detecting direct calls and simple local-alias destructive operations."""
+    """Shared AST visitor detecting direct calls and scope-aware local-alias destructive operations.
+
+    Features:
+    - Lexical scope tracking: pushes and pops scope frames for FunctionDef, AsyncFunctionDef, and ClassDef.
+    - Variable reassignment tracking: updates variable taint status sequentially within the current scope
+      (tainted if RHS contains a drive keyword, cleared/untainted if RHS is reassigned to a safe path).
+    - Scope lookup: checks innermost to outermost active scope, respecting local shadowing.
+    - Direct calls: detects rmtree, remove, unlink, rmdir with drive keyword in argument strings.
+    - Simple aliases: detects destructive calls on variables whose RHS contained drive paths.
+    - Method-on-alias: detects target.unlink(), target.rmdir() on tainted variables.
+
+    Documented Limitations:
+    - Chained aliases (target2 = target) are NOT tracked (no symbolic dataflow engine).
+    - Inter-procedural dataflow (parameters passed across function calls, return values) is NOT tracked.
+    - Dynamic runtime path resolution, getattr/eval, and external processes are NOT tracked.
+    """
 
     def __init__(self, filename: str = "<test>"):
         self.filename = filename
-        self.violations = []
-        self.tainted_vars = set()
+        self.violations: list[tuple[int, str, str]] = []
+        # Stack of scopes; each scope maps variable name -> is_tainted bool
+        self.scope_stack: list[dict[str, bool]] = [{}]
+
+    @property
+    def tainted_vars(self) -> set[str]:
+        """Set of currently tainted variable names across all active scopes."""
+        result: set[str] = set()
+        for scope in self.scope_stack:
+            for var_name, is_tainted in scope.items():
+                if is_tainted:
+                    result.add(var_name)
+                else:
+                    result.discard(var_name)
+        return result
 
     def _has_drive_keyword(self, val: str) -> bool:
         val_lower = val.lower()
         return any(k in val_lower for k in DRIVE_DANGER_KEYWORDS)
 
-    def visit_Assign(self, node):
-        rhs_has_drive = False
-        for sub in ast.walk(node.value):
+    def _is_rhs_tainted(self, node_val: ast.AST | None) -> bool:
+        if node_val is None:
+            return False
+        for sub in ast.walk(node_val):
             if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
                 if self._has_drive_keyword(sub.value):
-                    rhs_has_drive = True
-                    break
-        if rhs_has_drive:
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    self.tainted_vars.add(target.id)
+                    return True
+        return False
+
+    def _set_var_taint(self, var_name: str, is_tainted: bool) -> None:
+        self.scope_stack[-1][var_name] = is_tainted
+
+    def is_tainted(self, var_name: str) -> bool:
+        for scope in reversed(self.scope_stack):
+            if var_name in scope:
+                return scope[var_name]
+        return False
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.scope_stack.append({})
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.scope_stack.append({})
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.scope_stack.append({})
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        rhs_tainted = self._is_rhs_tainted(node.value)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self._set_var_taint(target.id, rhs_tainted)
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                for elt in target.elts:
+                    if isinstance(elt, ast.Name):
+                        self._set_var_taint(elt.id, rhs_tainted)
         self.generic_visit(node)
 
-    def visit_Call(self, node):
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            rhs_tainted = self._is_rhs_tainted(node.value)
+            if isinstance(node.target, ast.Name):
+                self._set_var_taint(node.target.id, rhs_tainted)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
         func_name = ""
         called_on_var = None
         if isinstance(node.func, ast.Attribute):
@@ -114,9 +180,12 @@ class DestructiveCallVisitor(ast.NodeVisitor):
                     if self._has_drive_keyword(arg.value):
                         self.violations.append((node.lineno, func_name, arg.value))
             for arg in node.args:
-                if isinstance(arg, ast.Name) and arg.id in self.tainted_vars:
+                if isinstance(arg, ast.Name) and self.is_tainted(arg.id):
                     self.violations.append((node.lineno, func_name, f"alias:{arg.id}"))
-            if called_on_var and called_on_var in self.tainted_vars:
+            for kw in node.keywords:
+                if isinstance(kw.value, ast.Name) and self.is_tainted(kw.value.id):
+                    self.violations.append((node.lineno, func_name, f"alias:{kw.value.id}"))
+            if called_on_var and self.is_tainted(called_on_var):
                 self.violations.append((node.lineno, func_name, f"method_on:{called_on_var}"))
 
         self.generic_visit(node)
@@ -644,14 +713,85 @@ class TestFastProduction(unittest.TestCase):
             self.assertNotIn("rmtree", src, f"Production notebook should not call rmtree in cell {idx}")
 
     def test_destructive_call_visitor_cases(self):
-        """Phase 0 / Unit Test: Verify shared DestructiveCallVisitor detects direct keywords and aliases, and tests unsupported chained alias."""
+        """Phase 0 / Unit Test: Verify shared DestructiveCallVisitor detects direct keywords,
+        scope-aware aliases, variable reassignment, and documents chained alias limitation."""
         # 1. Direct string paths targeting each supported keyword
         for kw in ["drive", "MyDrive", "Group10", "production"]:
             v = DestructiveCallVisitor()
             v.visit(ast.parse(f"shutil.rmtree('/content/{kw}/data')"))
             self.assertEqual(len(v.violations), 1, f"Should detect direct call for keyword '{kw}'")
 
-        # 2. Simple path alias: target = Path(...); shutil.rmtree(target)
+        # 2. Hai function co cung ten bien nhung gia tri duong dan khac nhau (scope isolation)
+        two_funcs_code = """
+import shutil
+from pathlib import Path
+
+def clean_drive_archive():
+    target = Path("/content/drive/MyDrive/production")
+    shutil.rmtree(target)
+
+def clean_local_temp():
+    target = Path("/tmp/scratch_dir")
+    shutil.rmtree(target)
+"""
+        v = DestructiveCallVisitor()
+        v.visit(ast.parse(two_funcs_code))
+        self.assertEqual(len(v.violations), 1, "Only clean_drive_archive should trigger a violation")
+        self.assertEqual(v.violations[0][1], "rmtree")
+        self.assertEqual(v.violations[0][2], "alias:target")
+        self.assertEqual(v.violations[0][0], 7)
+
+        # 3. Bien nguy hiem duoc gan lai thanh duong dan an toan trong cung scope
+        reassigned_safe_code = """
+import shutil
+from pathlib import Path
+
+def cleanup_workspace():
+    target = Path("/content/drive/MyDrive/production")
+    target = Path("/tmp/safe_scratch")
+    shutil.rmtree(target)
+"""
+        v = DestructiveCallVisitor()
+        v.visit(ast.parse(reassigned_safe_code))
+        self.assertEqual(
+            v.violations,
+            [],
+            "Reassigning target to safe path before destructive call must clear taint and trigger 0 violations",
+        )
+
+        # 4. Su dung bien nguy hiem truoc khi gan lai (kiem tra thu tu thuc thi tuan tu trong scope)
+        reassigned_sequential_code = """
+import shutil
+from pathlib import Path
+
+def cleanup_stepwise():
+    target = Path("/content/drive/MyDrive/production")
+    shutil.rmtree(target)
+    target = Path("/tmp/safe_scratch")
+    shutil.rmtree(target)
+"""
+        v = DestructiveCallVisitor()
+        v.visit(ast.parse(reassigned_sequential_code))
+        self.assertEqual(len(v.violations), 1, "Only the first call on tainted target should trigger a violation")
+        self.assertEqual(v.violations[0][0], 7)
+        self.assertEqual(v.violations[0][2], "alias:target")
+
+        # 5. Bien duong dan nguy hiem duoc su dung trong cung function
+        func_dangerous_code = """
+import shutil
+from pathlib import Path
+
+def purge_drive():
+    target = Path("/content/drive/MyDrive/production")
+    shutil.rmtree(target)
+"""
+        v = DestructiveCallVisitor()
+        v.visit(ast.parse(func_dangerous_code))
+        self.assertEqual(len(v.violations), 1)
+        self.assertEqual(v.violations[0][1], "rmtree")
+        self.assertEqual(v.violations[0][2], "alias:target")
+
+        # 6. Simple alias o module scope: target = Path(...); shutil.rmtree(target)
         alias_code = """
 from pathlib import Path
 import shutil
@@ -664,7 +804,7 @@ shutil.rmtree(target)
         self.assertEqual(v.violations[0][1], "rmtree")
         self.assertEqual(v.violations[0][2], "alias:target")
 
-        # 3. Method call on alias: target = Path(...); target.unlink()
+        # 7. Method call on alias: target = Path(...); target.unlink()
         method_alias_code = """
 from pathlib import Path
 target = Path("/content/drive/MyDrive/production/report.pdf")
@@ -676,7 +816,7 @@ target.unlink()
         self.assertEqual(v.violations[0][1], "unlink")
         self.assertEqual(v.violations[0][2], "method_on:target")
 
-        # 4. Clean paths: no false positives
+        # 8. Clean paths: no false positives
         clean_code = """
 import os
 import shutil
@@ -687,7 +827,7 @@ os.remove('/tmp/local_temp_file.txt')
         v.visit(ast.parse(clean_code))
         self.assertEqual(v.violations, [], "Should have 0 violations on clean local scratch paths")
 
-        # 5. Unsupported chained alias case: target2 = target; shutil.rmtree(target2)
+        # 9. Unsupported chained alias case: target2 = target; shutil.rmtree(target2)
         chained_code = """
 from pathlib import Path
 import shutil
@@ -697,7 +837,7 @@ shutil.rmtree(target2)
 """
         v = DestructiveCallVisitor()
         v.visit(ast.parse(chained_code))
-        # Prove that chained variable alias is unsupported and not detected by single-scope visitor
+        # Prove that chained variable alias is unsupported and not detected by scope visitor without dataflow engine
         self.assertEqual(
             v.violations,
             [],

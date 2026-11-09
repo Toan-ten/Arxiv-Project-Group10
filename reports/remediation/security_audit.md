@@ -14,15 +14,20 @@
 - **Hành động khắc phục:** Đã **xóa bỏ hoàn toàn Cell 8** khỏi notebook. Notebook production hiện chỉ còn đúng 8 cells (1 markdown banner, 1 quy định vận hành, và 6 code cells tương ứng với 6 bước tuần tự).
 - **Quy tắc an toàn mới:** Không có bất kỳ dòng code production nào được phép xóa tự động thư mục `DRIVE_ROOT` hoặc `drive_production`. Bất kỳ thao tác dọn dẹp nào chỉ được phép tác động lên vùng tạm thời (`scratch_shm` hoặc `local_workspace`).
 - **Trình duyệt AST dùng chung (Shared `DestructiveCallVisitor`):**
-  1. *Hợp nhất triển khai:* Đã loại bỏ hoàn toàn các bản sao `DestructiveCallVisitor` nằm cục bộ trong các hàm test. Lớp `DestructiveCallVisitor` hiện được định nghĩa duy nhất tại module level của [`tests/test_fast_production.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/tests/test_fast_production.py) và được dùng chung cho cả việc quét sổ tay (`test_notebooks_do_not_contain_destructive_drive_cleanup`) lẫn bài kiểm thử hồi quy (`test_destructive_call_visitor_cases`).
-  2. *Phạm vi phát hiện được xác minh:*
+  1. *Hợp nhất triển khai và phạm vi theo dõi (Scope Tracking):* Đã loại bỏ hoàn toàn các bản sao `DestructiveCallVisitor` cục bộ. Lớp `DestructiveCallVisitor` hiện được định nghĩa duy nhất tại module level của [`tests/test_fast_production.py`](file:///home/tuan-anh/Documents/DS_PJ/Arxiv-Project-Group10/tests/test_fast_production.py) và được dùng chung cho cả việc quét sổ tay lẫn kiểm thử hồi quy. Visitor triển khai ngăn xếp phạm vi từ vựng (lexical scope stack) cho `FunctionDef`, `AsyncFunctionDef`, và `ClassDef`. Các biến được định nghĩa trong hàm này không bị rò rỉ (leak) sang hàm khác, giải quyết triệt để nguy cơ dương tính giả khi hai hàm sử dụng trùng tên biến cục bộ.
+  2. *Cập nhật trạng thái gán lại biến (Variable Reassignment):* Khi một biến được gán lại trong cùng phạm vi, visitor cập nhật trạng thái ô nhiễm (taint) một cách tuần tự:
+     - Nếu gán lại thành một đường dẫn an toàn (ví dụ: `target = Path("/tmp/safe")`), trạng thái ô nhiễm được gỡ bỏ ngay lập tức, không gây cảnh báo sai nếu sau đó gọi `shutil.rmtree(target)`.
+     - Nếu biến bị gọi xóa trước khi gán lại an toàn, lời gọi trước vẫn bị bắt chính xác theo đúng thứ tự thực thi.
+  3. *Khả năng phát hiện đã được kiểm chứng bằng regression tests:*
      - Lời gọi phá hủy trực tiếp (`rmtree`, `remove`, `unlink`, `rmdir`) chứa bất kỳ từ khóa bảo vệ nào: `drive`, `MyDrive`, `Group10`, `production`.
-     - Bí danh biến cục bộ trực tiếp dạng `target = Path(drive_path); shutil.rmtree(target)`.
+     - Bí danh đơn giản (Simple alias) ở module level hoặc trong hàm: `target = Path(drive_path); shutil.rmtree(target)`.
      - Lời gọi phương thức phá hủy trên biến bí danh: `target = Path(...); target.unlink()`.
+     - Cách ly phạm vi (Scope isolation): Hai hàm có cùng tên biến nhưng một hàm trỏ đường dẫn Drive còn một hàm trỏ thư mục tạm thời chỉ kích hoạt đúng 1 vi phạm tại hàm Drive.
      - Đường dẫn sạch (`/tmp/local_scratch_space`, `/tmp/local_temp_file.txt`) trả về 0 vi phạm (không có false positive).
-  3. *Giới hạn kỹ thuật và trường hợp chained alias:*
-     - Trường hợp bí danh bắc cầu (`target2 = target; shutil.rmtree(target2)`) là giới hạn kỹ thuật đã được ghi nhận rõ ràng: trình duyệt AST đơn phạm vi không theo dõi luồng dữ liệu liên biến và sẽ không phát hiện trường hợp này. Điều này đã được chứng minh và kiểm thử tường minh trong `test_destructive_call_visitor_cases`.
-     - Phân tích tĩnh (Static Analysis bằng Regex và AST) không thể bảo đảm phát hiện tuyệt đối mọi dạng xóa dữ liệu nếu đường dẫn được tính toán động tại thời điểm chạy (dynamic path resolution, `getattr`, `eval`, bí danh liên hàm/module, hoặc qua tiến trình nhị phân bên ngoài). Do đó, hệ thống bắt buộc phải áp dụng kiến trúc phòng thủ theo chiều sâu (defense-in-depth): quy định vận hành đơn tiến trình (single-writer) và cách ly hoàn toàn vùng đệm ghi chép (`/content/fast_crawling_workspace`).
+  4. *Giới hạn kỹ thuật đã kiểm chứng (Documented Limitations):*
+     - Bí danh bắc cầu (Chained alias): Trường hợp `target = Path(...); target2 = target; shutil.rmtree(target2)` không được phát hiện do visitor không triển khai công cụ phân tích luồng dữ liệu tượng trưng (symbolic data-flow engine). Giới hạn này đã được chứng minh và kiểm thử tường minh trong `test_destructive_call_visitor_cases`.
+     - Phân tích liên hàm (Inter-procedural analysis): Không theo dõi các biến được truyền qua tham số hàm hoặc trả về từ hàm khác.
+     - Phân tích tĩnh (Static Analysis bằng Regex và AST) không thể bảo đảm phát hiện tuyệt đối mọi dạng xóa dữ liệu nếu đường dẫn được tính toán động tại thời điểm chạy (dynamic path resolution, `os.path.join` với các biến độc lập, `getattr`, `eval`, hoặc qua tiến trình nhị phân bên ngoài). Do đó, hệ thống bắt buộc phải áp dụng kiến trúc phòng thủ theo chiều sâu (defense-in-depth): quy định vận hành đơn tiến trình (single-writer) và cách ly hoàn toàn vùng đệm ghi chép (`/content/fast_crawling_workspace`).
 
 ---
 
