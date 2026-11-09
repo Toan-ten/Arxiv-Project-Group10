@@ -175,6 +175,34 @@ class TestFastProduction(unittest.TestCase):
                 self.assertNotIn("KGAT_", src, f"Hardcoded Kaggle token found in {nb_path}")
                 self.assertNotIn("ghp_", src, f"GitHub token found in {nb_path}")
 
+    def test_restore_rejects_corrupted_backup_and_preserves_good_local_data(self):
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        paper_dir = runner.corpus_dir / "2508-07872"
+        paper_dir.mkdir(parents=True, exist_ok=True)
+        (paper_dir / "manifest.json").write_text('{"updated_at": "2026-11-09T01:00:00Z", "status": "complete"}')
+        (paper_dir / "v1").mkdir(exist_ok=True)
+        (paper_dir / "v1" / "main.tex").write_text("GOOD_LOCAL_BYTES")
+
+        # Giả lập archive trên Drive có manifest corrupt cho 2508-07872 và 2508-07873 (chưa có ở local)
+        archive_path = runner.archives_dir / "cohort_0001_corpus.tar.gz"
+        import tarfile
+        with tarfile.open(archive_path, "w:gz") as tar:
+            ti = tarfile.TarInfo("2508-07872/manifest.json")
+            data = b"NOT_VALID_JSON"
+            ti.size = len(data)
+            import io
+            tar.addfile(ti, io.BytesIO(data))
+
+            ti2 = tarfile.TarInfo("2508-07873/manifest.json")
+            data2 = b"CORRUPTED_MANIFEST"
+            ti2.size = len(data2)
+            tar.addfile(ti2, io.BytesIO(data2))
+
+        # Restore phải bỏ qua các bản hỏng này, bảo toàn 2508-07872 và không nạp 2508-07873
+        runner.restore_cohort(1)
+        self.assertEqual((paper_dir / "v1" / "main.tex").read_text(), "GOOD_LOCAL_BYTES")
+        self.assertFalse((runner.corpus_dir / "2508-07873").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -314,6 +314,31 @@ class FastProductionRunner:
                 except OSError:
                     pass
 
+    def _safe_replace_paper(self, src_folder: Path, target_folder: Path) -> bool:
+        """Validate source folder manifest before replacing or adding target folder."""
+        src_mf = src_folder / "manifest.json"
+        if not src_mf.exists():
+            return False
+        try:
+            m_src = json.loads(src_mf.read_text(encoding="utf-8"))
+            if not isinstance(m_src, dict) or ("discovery_status" not in m_src and "status" not in m_src):
+                return False
+        except Exception:
+            return False
+
+        if target_folder.exists():
+            target_mf = target_folder / "manifest.json"
+            if target_mf.exists():
+                try:
+                    m_target = json.loads(target_mf.read_text(encoding="utf-8"))
+                    if str(m_target.get("updated_at", "")) >= str(m_src.get("updated_at", "")):
+                        return False
+                except Exception:
+                    pass
+            shutil.rmtree(target_folder)
+        shutil.copytree(src_folder, target_folder)
+        return True
+
     def restore_cohort(self, number: int) -> int:
         """Unpack an existing cohort archive or legacy Drive corpus back to local SSD safely.
 
@@ -332,19 +357,7 @@ class FastProductionRunner:
             legacy_folder = legacy_corpus / folder_name
             local_folder = self.corpus_dir / folder_name
             if legacy_folder.is_dir():
-                should_copy = not local_folder.exists()
-                if not should_copy and (legacy_folder / "manifest.json").exists() and (local_folder / "manifest.json").exists():
-                    try:
-                        m_leg = json.loads((legacy_folder / "manifest.json").read_text(encoding="utf-8"))
-                        m_loc = json.loads((local_folder / "manifest.json").read_text(encoding="utf-8"))
-                        if m_leg.get("updated_at", "") > m_loc.get("updated_at", ""):
-                            should_copy = True
-                    except Exception:
-                        pass
-                if should_copy:
-                    if local_folder.exists():
-                        shutil.rmtree(local_folder)
-                    shutil.copytree(legacy_folder, local_folder)
+                if self._safe_replace_paper(legacy_folder, local_folder):
                     restored += 1
 
         # 2. Extract cohort archive from Drive without overwriting newer local papers
@@ -366,23 +379,6 @@ class FastProductionRunner:
             for item in temp_dir.iterdir():
                 if item.is_dir():
                     target_folder = self.corpus_dir / item.name
-                    if not target_folder.exists():
-                        shutil.copytree(item, target_folder)
+                    if self._safe_replace_paper(item, target_folder):
                         restored += 1
-                    else:
-                        local_mf = target_folder / "manifest.json"
-                        arch_mf = item / "manifest.json"
-                        should_replace = False
-                        if arch_mf.exists() and local_mf.exists():
-                            try:
-                                m_arch = json.loads(arch_mf.read_text(encoding="utf-8"))
-                                m_loc = json.loads(local_mf.read_text(encoding="utf-8"))
-                                if m_arch.get("updated_at", "") > m_loc.get("updated_at", ""):
-                                    should_replace = True
-                            except Exception:
-                                pass
-                        if should_replace:
-                            shutil.rmtree(target_folder)
-                            shutil.copytree(item, target_folder)
-                            restored += 1
         return restored
