@@ -298,6 +298,14 @@ class TestFastProduction(unittest.TestCase):
         archive_dest = runner.archives_dir / "cohort_0001_corpus.tar.gz"
         runner._archive_cohort(1, archive_dest)
         self.assertTrue(archive_dest.exists())
+        manifest_dest = runner.archives_dir / "cohort_0001_corpus.manifest.json"
+        self.assertTrue(manifest_dest.exists())
+        manifest_data = json.loads(manifest_dest.read_text(encoding="utf-8"))
+        self.assertEqual(manifest_data["cohort_number"], 1)
+        self.assertEqual(manifest_data["included_count"], 1)
+        self.assertEqual(manifest_data["omitted_count"], 99)
+        self.assertEqual(manifest_data["expected_count"], 100)
+        self.assertEqual(manifest_data["archive_sha256"], runner._compute_sha256(archive_dest))
 
         # Simulate fresh Colab session: wipe local_root
         import shutil

@@ -474,39 +474,51 @@ class FastProductionRunner:
         """Create a compressed archive for the cohort and store in Google Drive atomically."""
         pairs = cohort_pairs(number)
         import tarfile
+        from datetime import datetime, timezone
         from src.storage import arxiv_id_to_folder_key
         destination.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path_str = tempfile.mkstemp(
             prefix=f".{destination.name}.", suffix=".tmp", dir=str(destination.parent)
         )
         tmp_path = Path(tmp_path_str)
+        included_ids: List[str] = []
+        omitted: List[Dict[str, str]] = []
         try:
             with os.fdopen(fd, "wb") as f_out:
                 with tarfile.open(fileobj=f_out, mode="w:gz") as tar:
                     for _, arxiv_id in pairs:
                         safe_folder = arxiv_id_to_folder_key(arxiv_id)
                         paper_path = self.corpus_dir / safe_folder
-                        if paper_path.is_dir():
-                            mf = paper_path / "manifest.json"
-                            if not mf.is_file():
+                        if not paper_path.is_dir():
+                            omitted.append({"arxiv_id": arxiv_id, "reason": "missing_paper_dir"})
+                            continue
+                        mf = paper_path / "manifest.json"
+                        if not mf.is_file():
+                            omitted.append({"arxiv_id": arxiv_id, "reason": "missing_manifest"})
+                            continue
+                        try:
+                            m_data = json.loads(mf.read_text(encoding="utf-8"))
+                            if not isinstance(m_data, dict):
+                                omitted.append({"arxiv_id": arxiv_id, "reason": "invalid_manifest_type"})
                                 continue
-                            try:
-                                m_data = json.loads(mf.read_text(encoding="utf-8"))
-                                if not isinstance(m_data, dict):
-                                    continue
-                            except Exception:
-                                continue
-                            has_unsafe = False
-                            for root, dirs, files in os.walk(paper_path):
-                                for name in dirs + files:
-                                    full_p = Path(root) / name
-                                    if full_p.is_symlink() or not (full_p.is_file() or full_p.is_dir()):
-                                        has_unsafe = True
-                                        break
-                                if has_unsafe:
+                        except Exception as exc:
+                            omitted.append({"arxiv_id": arxiv_id, "reason": f"corrupt_manifest: {exc}"})
+                            continue
+                        has_unsafe = False
+                        for root, dirs, files in os.walk(paper_path):
+                            for name in dirs + files:
+                                full_p = Path(root) / name
+                                if full_p.is_symlink() or not (full_p.is_file() or full_p.is_dir()):
+                                    has_unsafe = True
                                     break
-                            if not has_unsafe:
-                                tar.add(paper_path, arcname=safe_folder, recursive=True)
+                            if has_unsafe:
+                                break
+                        if has_unsafe:
+                            omitted.append({"arxiv_id": arxiv_id, "reason": "unsafe_filesystem_entry"})
+                            continue
+
+                        tar.add(paper_path, arcname=safe_folder, recursive=True)
+                        included_ids.append(arxiv_id)
                 f_out.flush()
                 os.fsync(f_out.fileno())
 
@@ -522,6 +534,25 @@ class FastProductionRunner:
             sha_tmp = destination.with_name(f".{destination.name}.sha256.tmp")
             sha_tmp.write_text(f"{archive_sha256}  {destination.name}\n", encoding="utf-8")
             os.replace(sha_tmp, sha_file)
+
+            # Atomic publication of cohort archive accounting manifest
+            manifest_name = destination.name.replace(".tar.gz", ".manifest.json")
+            manifest_file = destination.with_name(manifest_name)
+            manifest_tmp = destination.with_name(f".{manifest_name}.tmp")
+            accounting_payload = {
+                "cohort_number": number,
+                "archive_filename": destination.name,
+                "archive_sha256": archive_sha256,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "expected_count": len(pairs),
+                "expected_ids": [aid for _, aid in pairs],
+                "included_count": len(included_ids),
+                "included_ids": sorted(included_ids),
+                "omitted_count": len(omitted),
+                "omitted": omitted,
+            }
+            manifest_tmp.write_text(json.dumps(accounting_payload, indent=2), encoding="utf-8")
+            os.replace(manifest_tmp, manifest_file)
         finally:
             if tmp_path.exists():
                 try:
@@ -637,6 +668,7 @@ class FastProductionRunner:
         if not archive_path.is_file():
             return restored
 
+        actual_sha = None
         sha_file = archive_path.with_name(archive_path.name + ".sha256")
         if sha_file.is_file():
             try:
@@ -648,6 +680,23 @@ class FastProductionRunner:
                 raise
             except Exception as e:
                 raise ValueError(f"Cannot verify archive checksum: {e}") from e
+
+        manifest_name = archive_path.name.replace(".tar.gz", ".manifest.json")
+        manifest_file = archive_path.with_name(manifest_name)
+        if manifest_file.is_file():
+            try:
+                m_payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+                if isinstance(m_payload, dict) and "archive_sha256" in m_payload:
+                    if actual_sha is None:
+                        actual_sha = self._compute_sha256(archive_path)
+                    if m_payload["archive_sha256"] != actual_sha:
+                        raise ValueError(
+                            f"Archive SHA-256 mismatch with accounting manifest: expected {m_payload['archive_sha256']}, got {actual_sha}"
+                        )
+            except ValueError:
+                raise
+            except Exception as e:
+                raise ValueError(f"Cannot verify cohort accounting manifest: {e}") from e
 
         import tarfile
         with tempfile.TemporaryDirectory(prefix=".restore-", dir=str(self.local_root)) as temp_extract:

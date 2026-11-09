@@ -1100,7 +1100,23 @@ class TestReportingReconciliationFailClosed(BaseReportingTest):
         )
 
     def test_genuine_file_not_found_remains_classified_as_missing(self):
-        """4. Genuine FileNotFoundError remains classified as missing, not as arbitrary filesystem failure."""
+        """4. Genuine FileNotFoundError (paper dir missing) remains classified as missing, not as arbitrary filesystem failure."""
+        pairs = [(self.mssv, self.aid1)]
+        stats = compute_m1_statistics(self.store, pairs)
+
+        self.assertEqual(stats["missing_manifests"], 1)
+        self.assertEqual(stats["other_unresolved"], 0)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_missing_manifest_count"], 1)
+        self.assertEqual(stats["reconciliation"]["independent_audit"]["raw_other_unresolved_count"], 0)
+        self.assertTrue(stats["is_reconciled"])
+        self.assertEqual(stats["reconciliation"]["discrepancies"], [])
+
+    def test_genuine_manifest_not_found_when_paper_dir_exists_is_classified_as_missing(self):
+        """Genuine FileNotFoundError for manifest.json when paper_dir exists is classified as missing_manifest."""
+        # Create paper directory without manifest.json
+        pdir = self.store.paper_path(self.mssv, self.aid1)
+        pdir.mkdir(parents=True, exist_ok=True)
+
         pairs = [(self.mssv, self.aid1)]
         stats = compute_m1_statistics(self.store, pairs)
 

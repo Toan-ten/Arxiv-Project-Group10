@@ -228,17 +228,22 @@ class PaperIntegrityResult:
         - Any violation with category in {'corrupted', 'unmanaged'} is an integrity failure.
         - Any explicit integrity code in INTEGRITY_FAILURE_CODES is an integrity failure.
         - Any cross-file inconsistency code is an integrity failure if a stage/manifest claimed complete.
-        - MISSING_METADATA and MISSING_REFERENCES are integrity failures ONLY if manifest claimed complete.
-        - MISSING_PAPER_DIR is a normal unattempted lifecycle missing state (NOT an integrity failure).
-        - Any other error violation (including GENERIC or unknown/unrecognized codes) with severity="error"
-          fails closed as an integrity failure so that unknown codes and generic violations cannot silently
-          bypass integrity classification.
+        - MISSING_METADATA is an integrity failure if manifest or metadata claimed complete.
+        - MISSING_REFERENCES is an integrity failure if manifest or references claimed complete.
+        - MISSING_PAPER_DIR is an integrity failure if any stage/paper completion was claimed (contradictory state).
+        - Any non-warning violation with invalid/unrecognized severity is treated fail-closed as an integrity failure.
+        - Any other violation (including GENERIC or unknown/unrecognized codes) fails closed.
         """
         if self.status == "corrupted":
             return True
         for v in self.violations:
-            if v.severity != "error":
+            if v.severity == "warning":
                 continue
+
+            # Fail-closed check on invalid/malformed severity metadata
+            if v.severity != "error":
+                return True
+
             if v.category in {"corrupted", "unmanaged"}:
                 return True
             if v.code in INTEGRITY_FAILURE_CODES:
@@ -251,17 +256,36 @@ class PaperIntegrityResult:
                 ):
                     return True
                 continue
-            if v.code in {IntegrityCode.MISSING_METADATA, IntegrityCode.MISSING_REFERENCES}:
-                if self.manifest_status in {"complete", "complete_with_no_tex"}:
+            if v.code == IntegrityCode.MISSING_METADATA:
+                if (
+                    self.manifest_status in {"complete", "complete_with_no_tex"}
+                    or self.metadata_status == "complete"
+                ):
+                    return True
+                continue
+            if v.code == IntegrityCode.MISSING_REFERENCES:
+                if (
+                    self.manifest_status in {"complete", "complete_with_no_tex"}
+                    or self.references_status == "complete"
+                ):
                     return True
                 continue
             if v.code == IntegrityCode.MISSING_PAPER_DIR:
+                if (
+                    self.is_m1_complete
+                    or self.is_source_complete
+                    or self.manifest_status in {"complete", "complete_with_no_tex"}
+                    or self.metadata_status == "complete"
+                    or self.references_status == "complete"
+                ):
+                    return True
                 continue
 
             # Fail-closed fallback: Any unrecognized/unknown code or GENERIC violation
             # with severity="error" MUST be treated as an integrity failure so that it cannot
             # silently bypass integrity checks.
             return True
+
         return False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -335,6 +359,39 @@ def _inspect_path(path: Path) -> Tuple[bool, bool, bool]:
     is_d = stat.S_ISDIR(st.st_mode)
     is_f = stat.S_ISREG(st.st_mode)
     return is_link, is_d, is_f
+
+
+_ORIGINAL_PATH_READ_BYTES = Path.read_bytes
+
+
+def _read_bytes_safely(path: Path) -> bytes:
+    """Read file content via descriptor with O_NOFOLLOW and validate it is a regular unlinked file.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        PermissionError: If access is denied.
+        OSError: If an I/O error occurs or the file is a symlink/non-regular file.
+    """
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(f"{path} is not a regular unlinked file (mode={oct(info.st_mode)}, nlink={info.st_nlink})")
+        if Path.read_bytes is not _ORIGINAL_PATH_READ_BYTES:
+            return path.read_bytes()
+        with open(fd, "rb", closefd=False) as f:
+            return f.read()
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _open_and_hash_source_file(
@@ -466,8 +523,43 @@ def audit_version_integrity(
 
     version_dir = paper_dir / version_name
 
+    # Check version_dir existence and type safely using _inspect_path
+    try:
+        v_link, v_is_d, _ = _inspect_path(version_dir)
+        v_exists = True
+    except FileNotFoundError:
+        v_exists = False
+        v_link = False
+        v_is_d = False
+    except PermissionError as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Permission denied inspecting version directory {version_name}: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+        return violations
+    except (OSError, RuntimeError) as exc:
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="invalid",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Filesystem error inspecting version directory {version_name}: {exc}",
+                code=IntegrityCode.FILESYSTEM_ERROR,
+            )
+        )
+        return violations
+
     # Reject version_dir if it is a symlink (R5, R12: check symlink before resolve to prevent symlink loops)
-    if version_dir.is_symlink() or os.path.islink(version_dir):
+    if v_link:
         violations.append(
             IntegrityViolation(
                 arxiv_id=arxiv_id,
@@ -527,7 +619,7 @@ def audit_version_integrity(
                 )
             )
 
-        if not version_dir.exists():
+        if not v_exists:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
@@ -543,7 +635,7 @@ def audit_version_integrity(
             )
             return violations
 
-        if not version_dir.is_dir():
+        if not v_is_d:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
@@ -665,7 +757,24 @@ def audit_version_integrity(
         try:
             for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror):
                 root_path = Path(root)
-                if root_path.is_symlink() or os.path.islink(root_path):
+                try:
+                    r_link, _, _ = _inspect_path(root_path)
+                except (PermissionError, OSError, RuntimeError) as exc:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            file_path=str(root_path),
+                            version=version_name,
+                            message=f"Filesystem error inspecting directory {root_path}: {exc}",
+                            code=IntegrityCode.FILESYSTEM_ERROR,
+                        )
+                    )
+                    dirs.clear()
+                    continue
+
+                if r_link:
                     violations.append(
                         IntegrityViolation(
                             arxiv_id=arxiv_id,
@@ -681,7 +790,27 @@ def audit_version_integrity(
                     continue
 
                 # Prune and report symlinked subdirectories (do not enter)
-                symlink_dirs = [d for d in dirs if (root_path / d).is_symlink() or os.path.islink(root_path / d)]
+                symlink_dirs = []
+                for d in list(dirs):
+                    dpath = root_path / d
+                    try:
+                        d_link, _, _ = _inspect_path(dpath)
+                        if d_link:
+                            symlink_dirs.append(d)
+                    except (PermissionError, OSError, RuntimeError) as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(dpath),
+                                version=version_name,
+                                message=f"Filesystem error inspecting subdirectory {d}: {exc}",
+                                code=IntegrityCode.FILESYSTEM_ERROR,
+                            )
+                        )
+                        dirs.remove(d)
+
                 for d in symlink_dirs:
                     violations.append(
                         IntegrityViolation(
@@ -714,8 +843,25 @@ def audit_version_integrity(
                         )
                         continue
 
+                    try:
+                        f_link, _, _ = _inspect_path(fpath)
+                    except (PermissionError, OSError, RuntimeError) as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(fpath),
+                                version=version_name,
+                                message=f"Filesystem error inspecting file {rel_posix}: {exc}",
+                                code=IntegrityCode.FILESYSTEM_ERROR,
+                            )
+                        )
+                        actual_files.add(rel_posix)
+                        continue
+
                     # Reject symlink files immediately (do not follow or open) (R5)
-                    if fpath.is_symlink() or os.path.islink(fpath):
+                    if f_link:
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
@@ -967,7 +1113,7 @@ def audit_version_integrity(
 
         if not expected_files:
             # Empty no_tex_source: directory vN/ must not exist on disk
-            if version_dir.exists():
+            if v_exists:
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
@@ -1024,7 +1170,7 @@ def audit_version_integrity(
                     )
         else:
             # Non-empty no_tex_source (bib-only): version directory must exist and be a directory
-            if not version_dir.exists():
+            if not v_exists:
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
@@ -1038,7 +1184,7 @@ def audit_version_integrity(
                 )
                 return violations
 
-            if not version_dir.is_dir():
+            if not v_is_d:
                 violations.append(
                     IntegrityViolation(
                         arxiv_id=arxiv_id,
@@ -1155,7 +1301,24 @@ def audit_version_integrity(
             try:
                 for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror_bib):
                     root_path = Path(root)
-                    if root_path.is_symlink() or os.path.islink(root_path):
+                    try:
+                        r_link, _, _ = _inspect_path(root_path)
+                    except (PermissionError, OSError, RuntimeError) as exc:
+                        violations.append(
+                            IntegrityViolation(
+                                arxiv_id=arxiv_id,
+                                category="corrupted",
+                                severity="error",
+                                file_path=str(root_path),
+                                version=version_name,
+                                message=f"Filesystem error inspecting directory {root_path}: {exc}",
+                                code=IntegrityCode.FILESYSTEM_ERROR,
+                            )
+                        )
+                        dirs.clear()
+                        continue
+
+                    if r_link:
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
@@ -1170,7 +1333,27 @@ def audit_version_integrity(
                         dirs.clear()
                         continue
 
-                    symlink_dirs = [d for d in dirs if (root_path / d).is_symlink() or os.path.islink(root_path / d)]
+                    symlink_dirs = []
+                    for d in list(dirs):
+                        dpath = root_path / d
+                        try:
+                            d_link, _, _ = _inspect_path(dpath)
+                            if d_link:
+                                symlink_dirs.append(d)
+                        except (PermissionError, OSError, RuntimeError) as exc:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(dpath),
+                                    version=version_name,
+                                    message=f"Filesystem error inspecting subdirectory {d}: {exc}",
+                                    code=IntegrityCode.FILESYSTEM_ERROR,
+                                )
+                            )
+                            dirs.remove(d)
+
                     for d in symlink_dirs:
                         violations.append(
                             IntegrityViolation(
@@ -1203,8 +1386,25 @@ def audit_version_integrity(
                             )
                             continue
 
+                        try:
+                            f_link, _, _ = _inspect_path(fpath)
+                        except (PermissionError, OSError, RuntimeError) as exc:
+                            violations.append(
+                                IntegrityViolation(
+                                    arxiv_id=arxiv_id,
+                                    category="corrupted",
+                                    severity="error",
+                                    file_path=str(fpath),
+                                    version=version_name,
+                                    message=f"Filesystem error inspecting file {rel_posix}: {exc}",
+                                    code=IntegrityCode.FILESYSTEM_ERROR,
+                                )
+                            )
+                            actual_files.add(rel_posix)
+                            continue
+
                         # Reject symlink files immediately (do not follow or open) (R5)
-                        if fpath.is_symlink() or os.path.islink(fpath):
+                        if f_link:
                             violations.append(
                                 IntegrityViolation(
                                     arxiv_id=arxiv_id,
@@ -1430,7 +1630,7 @@ def audit_version_integrity(
 
     else:
         # Non-terminal version: version directory should NOT exist on disk
-        if version_dir.exists():
+        if v_exists:
             violations.append(
                 IntegrityViolation(
                     arxiv_id=arxiv_id,
@@ -1920,7 +2120,22 @@ def audit_paper_integrity(
             )
         try:
             for child in paper_dir.iterdir():
-                if child.is_symlink() or os.path.islink(child):
+                try:
+                    c_link, c_is_d, _ = _inspect_path(child)
+                except (PermissionError, OSError, RuntimeError) as exc:
+                    violations.append(
+                        IntegrityViolation(
+                            arxiv_id=arxiv_id,
+                            category="corrupted",
+                            severity="error",
+                            file_path=str(child),
+                            message=f"Filesystem error inspecting entry in not_found paper directory: {exc}",
+                            code=IntegrityCode.FILESYSTEM_ERROR,
+                        )
+                    )
+                    continue
+
+                if c_link:
                     violations.append(
                         IntegrityViolation(
                             arxiv_id=arxiv_id,
@@ -1931,7 +2146,7 @@ def audit_paper_integrity(
                             code=IntegrityCode.SYMLINK_PAPER_ENTRY,
                         )
                     )
-                elif child.is_dir() and re.fullmatch(r"v[1-9][0-9]*", child.name):
+                elif c_is_d and re.fullmatch(r"v[1-9][0-9]*", child.name):
                     violations.append(
                         IntegrityViolation(
                             arxiv_id=arxiv_id,

@@ -977,8 +977,18 @@ class TestStorageIntegrity(unittest.TestCase):
 
 class TestStructuredIntegrityClassification(unittest.TestCase):
     def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.corpus_dir = Path(self.td.name) / "corpus"
+        self.corpus_dir.mkdir(parents=True, exist_ok=True)
+        self.store = CorpusStorage(self.corpus_dir)
         self.mssv = "24120010"
         self.arxiv_id = "2508.07872"
+        self.folder_key = arxiv_id_to_folder_key(self.arxiv_id)
+        self.paper_dir = self.corpus_dir / self.folder_key
+        self.paper_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.td.cleanup()
 
     def test_message_tampering_does_not_affect_integrity_classification(self):
         """Classification depends strictly on code and category, not on English substrings."""
@@ -1251,6 +1261,169 @@ class TestStructuredIntegrityClassification(unittest.TestCase):
             res.has_integrity_failure,
             "Missing uncreated paper directory must not be treated as an integrity failure",
         )
+
+    def test_case_b_missing_metadata_when_metadata_stage_claimed_complete_is_failure(self):
+        """Case B: If manifest is partial but metadata stage claimed complete, missing metadata.json is failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="incomplete",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path="metadata.json",
+                    message="metadata.json does not exist",
+                    code=IntegrityCode.MISSING_METADATA,
+                )
+            ],
+            manifest_status="partial",
+            metadata_status="complete",
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_case_b_missing_references_when_references_stage_claimed_complete_is_failure(self):
+        """Case B: If manifest is partial but references stage claimed complete, missing references.json is failure."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="incomplete",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="missing",
+                    severity="error",
+                    file_path="references.json",
+                    message="references.json does not exist",
+                    code=IntegrityCode.MISSING_REFERENCES,
+                )
+            ],
+            manifest_status="partial",
+            references_status="complete",
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_case_d_contradictory_missing_paper_dir_with_completion_claim_is_failure(self):
+        """Case D: MISSING_PAPER_DIR combined with completion claims is a contradictory integrity failure."""
+        for kw in [
+            {"is_m1_complete": True},
+            {"is_source_complete": True},
+            {"manifest_status": "complete"},
+            {"metadata_status": "complete"},
+            {"references_status": "complete"},
+        ]:
+            res = PaperIntegrityResult(
+                arxiv_id=self.arxiv_id,
+                mssv=self.mssv,
+                status="missing",
+                is_source_complete=kw.get("is_source_complete", False),
+                is_m1_complete=kw.get("is_m1_complete", False),
+                violations=[
+                    IntegrityViolation(
+                        arxiv_id=self.arxiv_id,
+                        category="missing",
+                        severity="error",
+                        file_path="/corpus/24120010/2508.07872",
+                        message="Paper directory does not exist in corpus root",
+                        code=IntegrityCode.MISSING_PAPER_DIR,
+                    )
+                ],
+                manifest_status=kw.get("manifest_status", "not_attempted"),
+                metadata_status=kw.get("metadata_status", "not_attempted"),
+                references_status=kw.get("references_status", "not_attempted"),
+            )
+            self.assertTrue(res.has_integrity_failure, f"Failed for contradictory completion claim: {kw}")
+
+    def test_case_e_invalid_severity_metadata_fails_closed_as_failure(self):
+        """Case E: Non-warning violation with invalid/malformed severity metadata fails closed."""
+        res = PaperIntegrityResult(
+            arxiv_id=self.arxiv_id,
+            mssv=self.mssv,
+            status="incomplete",
+            is_source_complete=False,
+            is_m1_complete=False,
+            violations=[
+                IntegrityViolation(
+                    arxiv_id=self.arxiv_id,
+                    category="invalid",
+                    severity="critical",
+                    message="Critical anomaly detected",
+                    code=IntegrityCode.MISSING_PAPER_DIR,
+                )
+            ],
+        )
+        self.assertTrue(res.has_integrity_failure)
+
+    def test_version_dir_filesystem_errors_fail_closed(self):
+        """Version directory permission and filesystem errors produce FILESYSTEM_ERROR violations."""
+        v_rec = {
+            "versioned_id": f"{self.arxiv_id}v1",
+            "status": "success",
+            "source_status": "success",
+            "files": ["main.tex"],
+            "file_checksums": {"main.tex": "a" * 64},
+            "kept_bytes": 10,
+            "completed_at": "2026-03-01T00:00:00Z",
+        }
+        original_lstat = os.lstat
+
+        def broken_lstat(path, *args, **kwargs):
+            if Path(path).name == "v1":
+                raise PermissionError("EACCES Access denied inspecting v1")
+            return original_lstat(path, *args, **kwargs)
+
+        try:
+            os.lstat = broken_lstat
+            violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", v_rec)
+        finally:
+            os.lstat = original_lstat
+
+        self.assertTrue(any(v.code == IntegrityCode.FILESYSTEM_ERROR for v in violations))
+        self.assertTrue(any("Permission denied" in v.message for v in violations))
+
+    def test_version_dir_symlink_fails_closed(self):
+        """Symlinked version directory is flagged as SYMLINK_VERSION_DIR."""
+        v_dir = self.paper_dir / "v1"
+        target_dir = self.store.root / "target_v1"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            v_dir.symlink_to(target_dir)
+        except OSError:
+            self.skipTest("Filesystem does not support symlinks")
+
+        v_rec = {
+            "versioned_id": f"{self.arxiv_id}v1",
+            "status": "success",
+            "source_status": "success",
+            "files": ["main.tex"],
+            "file_checksums": {"main.tex": "a" * 64},
+            "kept_bytes": 10,
+            "completed_at": "2026-03-01T00:00:00Z",
+        }
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", v_rec)
+        self.assertTrue(any(v.code == IntegrityCode.SYMLINK_VERSION_DIR for v in violations))
+
+    def test_version_dir_file_instead_of_dir_fails_closed(self):
+        """Version path being a file instead of directory is flagged as NON_DIR_SOURCE_PATH."""
+        v_file = self.paper_dir / "v1"
+        v_file.write_text("not a directory")
+
+        v_rec = {
+            "versioned_id": f"{self.arxiv_id}v1",
+            "status": "success",
+            "source_status": "success",
+            "files": ["main.tex"],
+            "file_checksums": {"main.tex": "a" * 64},
+            "kept_bytes": 10,
+            "completed_at": "2026-03-01T00:00:00Z",
+        }
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", v_rec)
+        self.assertTrue(any(v.code == IntegrityCode.NON_DIR_SOURCE_PATH for v in violations))
 
 
 if __name__ == "__main__":

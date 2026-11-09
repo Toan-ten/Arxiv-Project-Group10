@@ -28,6 +28,7 @@ from src.storage_integrity import (
     IntegrityCode,
     IntegrityViolation,
     _inspect_path,
+    _read_bytes_safely,
     audit_paper_integrity,
     audit_version_integrity,
 )
@@ -185,7 +186,7 @@ def _perform_independent_reconciliation(
                 continue
 
             try:
-                raw_bytes = manifest_path.read_bytes()
+                raw_bytes = _read_bytes_safely(manifest_path)
             except (PermissionError, OSError, RuntimeError) as exc:
                 raw_other_unresolved_count += 1
                 discrepancies.append(
@@ -348,11 +349,20 @@ def _perform_independent_reconciliation(
                 mpath = store.root / folder_key / "manifest.json"
                 m_link, _, m_file = _inspect_path(mpath)
                 if not m_link and m_file:
-                    mdata = json.loads(mpath.read_text(encoding="utf-8"))
-                    if mdata.get("status") in {"complete", "complete_with_no_tex"}:
+                    raw_b = _read_bytes_safely(mpath)
+                    mdata = json.loads(raw_b.decode("utf-8"))
+                    if isinstance(mdata, dict) and mdata.get("status") in {"complete", "complete_with_no_tex"}:
                         m1_complete_candidates.append((mssv, arxiv_id))
-            except Exception:
+            except FileNotFoundError:
                 pass
+            except (PermissionError, OSError, RuntimeError) as exc:
+                discrepancies.append(
+                    f"Filesystem or access error identifying M1 candidate for {arxiv_id}: {exc}"
+                )
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+            except Exception as exc:
+                discrepancies.append(f"Unexpected error identifying M1 candidate for {arxiv_id}: {exc}")
 
     verified_m1_complete_count = 0
     for mssv, arxiv_id in m1_complete_candidates:
@@ -416,7 +426,7 @@ def _perform_independent_reconciliation(
                     reasons.append("Check 2 (raw manifest): manifest.json is not a regular file")
                 else:
                     try:
-                        raw_b = man_path.read_bytes()
+                        raw_b = _read_bytes_safely(man_path)
                     except PermissionError as exc:
                         candidate_failed = True
                         reasons.append(f"Check 2 (raw manifest): permission denied reading manifest.json: {exc}")
@@ -519,7 +529,7 @@ def _perform_independent_reconciliation(
                     reasons.append("Check 8 (read/validate metadata): metadata.json is not regular file")
                 else:
                     try:
-                        raw_meta_b = meta_path.read_bytes()
+                        raw_meta_b = _read_bytes_safely(meta_path)
                     except PermissionError as exc:
                         candidate_failed = True
                         reasons.append(f"Check 8 (read/validate metadata): permission denied reading metadata.json: {exc}")
@@ -584,7 +594,7 @@ def _perform_independent_reconciliation(
                     reasons.append("Check 10 (read/validate references): references.json is not regular file")
                 else:
                     try:
-                        raw_ref_b = ref_path.read_bytes()
+                        raw_ref_b = _read_bytes_safely(ref_path)
                     except PermissionError as exc:
                         candidate_failed = True
                         reasons.append(f"Check 10 (read/validate references): permission denied reading references.json: {exc}")

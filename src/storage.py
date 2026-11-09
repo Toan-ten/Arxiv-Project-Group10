@@ -197,15 +197,32 @@ class CorpusStorage:
 
     def _read(self, path):
         self._safe(path)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+
         try:
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise IntegrityError(f"Cannot read valid checkpoint: {path.name}") from exc
+
+        try:
+            info = os.fstat(fd)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise IntegrityError("JSON must be a regular, unlinked file")
-            with path.open("r", encoding="utf-8") as stream:
+            with open(fd, "r", encoding="utf-8", closefd=False) as stream:
                 value = json.load(stream, object_pairs_hook=_pairs,
                                   parse_constant=lambda value: _require(False, "Nonfinite JSON"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise IntegrityError(f"Cannot read valid checkpoint: {path.name}") from exc
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
         _require(isinstance(value, dict), "JSON root must be an object")
         return value
 
@@ -603,9 +620,23 @@ class CorpusStorage:
     def _snapshot(self, destination):
         files, checksums, total = [], {}, 0
         seen = set()
-        if not destination.exists():
+        try:
+            d_lstat = os.lstat(destination)
+            if stat.S_ISLNK(d_lstat.st_mode):
+                raise IntegrityError("Version destination must not be a symbolic link")
+            if not stat.S_ISDIR(d_lstat.st_mode):
+                raise IntegrityError("Version destination must be a directory")
+        except FileNotFoundError:
             return files, checksums, total
-        _require(destination.is_dir(), "Version destination must be a directory")
+        except OSError as exc:
+            raise IntegrityError(f"Cannot inspect version destination: {destination}") from exc
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+
         pending = [destination]
         while pending:
             parent = pending.pop()
@@ -615,20 +646,47 @@ class CorpusStorage:
                 _relative(relative)
                 _require(relative.casefold() not in seen, "Case-colliding source paths")
                 seen.add(relative.casefold())
-                info = path.stat()
-                if stat.S_ISDIR(info.st_mode):
+
+                try:
+                    lstat_res = os.lstat(path)
+                except OSError as exc:
+                    raise IntegrityError(f"Cannot inspect source path: {path}") from exc
+
+                _require(not stat.S_ISLNK(lstat_res.st_mode), "Source entry must not be a symbolic link")
+                if stat.S_ISDIR(lstat_res.st_mode):
                     pending.append(path)
                     continue
-                _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+
+                _require(stat.S_ISREG(lstat_res.st_mode) and lstat_res.st_nlink == 1,
                          "Source must be a regular, unlinked file")
                 _require(path.suffix.lower() in {".tex", ".bib"}, "Unexpected source file type")
-                digest = hashlib.sha256()
-                with path.open("rb") as stream:
-                    for block in iter(lambda: stream.read(65536), b""):
-                        digest.update(block)
+
+                try:
+                    fd = os.open(path, flags)
+                except OSError as exc:
+                    raise IntegrityError(f"Cannot open source file: {path}") from exc
+
+                try:
+                    fstat_info = os.fstat(fd)
+                    _require(
+                        stat.S_ISREG(fstat_info.st_mode)
+                        and fstat_info.st_nlink == 1
+                        and fstat_info.st_ino == lstat_res.st_ino,
+                        "Source file descriptor validation failed",
+                    )
+                    digest = hashlib.sha256()
+                    with open(fd, "rb", closefd=False) as stream:
+                        for block in iter(lambda: stream.read(65536), b""):
+                            digest.update(block)
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
                 files.append(relative)
                 checksums[relative] = digest.hexdigest()
-                total += info.st_size
+                total += fstat_info.st_size
         return sorted(files), checksums, total
 
     def _verify_source(self, mssv, arxiv_id, version, record):
