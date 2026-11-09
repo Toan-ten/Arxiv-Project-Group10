@@ -1,12 +1,18 @@
 """Tests for high-throughput fast production runner."""
+import ast
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from src.fast_production import FastProductionRunner, cohort_pairs
+from src.fast_production import (
+    FastProductionRunner,
+    cohort_pairs,
+    validate_and_checkout_commit,
+)
 
 
 class TestFastProduction(unittest.TestCase):
@@ -169,7 +175,7 @@ class TestFastProduction(unittest.TestCase):
 
     def test_notebooks_do_not_contain_hardcoded_credentials(self):
         repo_root = Path(__file__).resolve().parents[1]
-        forbidden_prefixes = ["KGAT_", "ghp_", "s2k-", "gho_", "glpat-"]
+        forbidden_prefixes = ["K" + "GAT_", "g" + "hp_", "s" + "2k-", "g" + "ho_", "gl" + "pat-"]
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
             for cell in nb.get("cells", []):
@@ -352,34 +358,89 @@ class TestFastProduction(unittest.TestCase):
 
 
     def test_notebooks_and_source_do_not_contain_hardcoded_credentials(self):
-        """Phase 0 / Step 0.3: No hardcoded credentials (Kaggle, S2, GitHub) in notebooks or source files."""
+        """Phase 0 / Step 0.3: No hardcoded credentials (Kaggle, S2, GitHub) in notebooks or source/test files.
+        
+        Scans:
+        1. Notebooks: source cells, cell outputs (text, stream, display, errors), cell metadata, notebook metadata.
+        2. Python files in src/, scripts/, and tests/.
+        """
         repo_root = Path(__file__).resolve().parents[1]
-        forbidden_prefixes = ["KGAT_", "ghp_", "s2k-", "gho_", "glpat-"]
-        credential_assignment_re = re.compile(
-            r"""(?:KAGGLE_API_TOKEN|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY)\s*=\s*['"][a-zA-Z0-9_\-]{16,}['"]"""
-        )
+        forbidden_prefixes = ["K" + "GAT_", "g" + "hp_", "s" + "2k-", "g" + "ho_", "gl" + "pat-"]
+        credential_patterns = [
+            # Direct variable assignment: KEY = "token_value"
+            re.compile(r"""(?:KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)\s*=\s*['"][a-zA-Z0-9_\-]{16,}['"]"""),
+            # os.environ assignment: os.environ[...] = "token_value"
+            re.compile(r"""(?:os\.environ|environ)(?:\[['"]|\.get\(['"]|\.setdefault\(['"])(?:KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*\]?\s*=\s*['"][a-zA-Z0-9_\-]{16,}['"]"""),
+            # Dict literal assignment: "KEY": "token_value"
+            re.compile(r"""['"](?:KAGGLE_API_TOKEN|KAGGLE_KEY|S2_API_KEY|SEMANTIC_SCHOLAR_API_KEY|GITHUB_TOKEN|GH_TOKEN)['"]\s*:\s*['"][a-zA-Z0-9_\-]{16,}['"]"""),
+        ]
+        mock_keywords = {"mock", "fake", "dummy", "test", "offline", "example", "sample"}
 
-        # Check all notebooks
+        # Check all notebooks: source, outputs, and metadata
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
+            
+            # Check notebook-level metadata
+            nb_meta_str = json.dumps(nb.get("metadata", {}))
+            for prefix in forbidden_prefixes:
+                self.assertNotIn(prefix, nb_meta_str, f"Credential prefix '{prefix}' found in notebook metadata of {nb_path.name}")
+            for pat in credential_patterns:
+                self.assertIsNone(pat.search(nb_meta_str), f"Credential pattern found in notebook metadata of {nb_path.name}")
+
             for idx, cell in enumerate(nb.get("cells", [])):
+                # Check cell metadata
+                cell_meta_str = json.dumps(cell.get("metadata", {}))
+                for prefix in forbidden_prefixes:
+                    self.assertNotIn(prefix, cell_meta_str, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} metadata")
+                for pat in credential_patterns:
+                    self.assertIsNone(pat.search(cell_meta_str), f"Credential pattern in {nb_path.name} cell {idx} metadata")
+
+                # Check cell source
                 src = "".join(cell.get("source", []))
                 for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, src, f"Hardcoded credential '{prefix}...' in {nb_path.name} cell {idx}")
-                match = credential_assignment_re.search(src)
-                self.assertIsNone(match, f"Hardcoded credential assignment found in {nb_path.name} cell {idx}: {match}")
+                    self.assertNotIn(prefix, src, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} source")
+                for pat in credential_patterns:
+                    self.assertIsNone(pat.search(src), f"Credential assignment in {nb_path.name} cell {idx} source")
 
-        # Check all python files in src/ and scripts/
-        for folder in ["src", "scripts"]:
+                # Check cell outputs
+                for out_idx, out in enumerate(cell.get("outputs", [])):
+                    out_str = json.dumps(out)
+                    for prefix in forbidden_prefixes:
+                        self.assertNotIn(prefix, out_str, f"Credential prefix '{prefix}' in {nb_path.name} cell {idx} output {out_idx}")
+                    for pat in credential_patterns:
+                        self.assertIsNone(pat.search(out_str), f"Credential assignment in {nb_path.name} cell {idx} output {out_idx}")
+
+        # Check all python files in src/, scripts/, and tests/
+        for folder in ["src", "scripts", "tests"]:
             for py_path in (repo_root / folder).rglob("*.py"):
                 content = py_path.read_text(encoding="utf-8")
-                for prefix in forbidden_prefixes:
-                    self.assertNotIn(prefix, content, f"Hardcoded credential '{prefix}...' found in {py_path}")
-                match = credential_assignment_re.search(content)
-                self.assertIsNone(match, f"Hardcoded credential assignment found in {py_path}: {match}")
+                # Exclude this test file itself from prefix check to avoid self-match on test assertions
+                if py_path.resolve() != Path(__file__).resolve():
+                    for prefix in forbidden_prefixes:
+                        self.assertNotIn(prefix, content, f"Hardcoded credential '{prefix}...' found in {py_path}")
+                for pat in credential_patterns:
+                    for match in pat.finditer(content):
+                        matched_val = match.group(0)
+                        # In tests/, allow mock/offline values for mocking environment
+                        if folder == "tests" and any(k in matched_val.lower() for k in mock_keywords):
+                            continue
+                        self.fail(f"Hardcoded credential assignment found in {py_path}: {matched_val}")
 
     def test_notebooks_do_not_contain_destructive_drive_cleanup(self):
-        """Phase 0 / P0-01: No notebook may contain destructive deletion of drive/production data."""
+        """Phase 0 / P0-01: No notebook may contain destructive deletion of drive/production data.
+        
+        Detection Heuristics:
+        1. Regex scanning: detects rmtree, remove, unlink, and rm -rf targeting drive/production paths.
+        2. AST inspection: parses code cells into AST and verifies no call to rmtree, remove, unlink, or rmdir
+           passes string arguments containing drive/production paths.
+        3. Strict policy: fast production notebook contains 0 calls to rmtree.
+        
+        Limitation Notice:
+        Static analysis (Regex and AST) verifies direct and statically-resolvable calls. It cannot guarantee
+        absolute detection against runtime dynamic path resolution or obfuscated execution (e.g. getattr,
+        eval, or external binaries). Operational safeguards (Colab single-writer, isolated local scratch)
+        remain required defense-in-depth measures.
+        """
         repo_root = Path(__file__).resolve().parents[1]
         drive_danger_patterns = [
             re.compile(r"""(?:shutil\.)?rmtree\s*\(\s*[^)]*(?:drive|Drive|DRIVE|MyDrive|Group10|production)[^)]*\)"""),
@@ -387,17 +448,47 @@ class TestFastProduction(unittest.TestCase):
             re.compile(r"""Path\s*\(\s*['"][^'"]*(?:drive|Drive|MyDrive|Group10)[^'"]*['"]\s*\)\s*\.unlink"""),
             re.compile(r"""(?:!|%|subprocess\.run\s*\(\s*\[\s*['"])rm\s+-[rR]f\s+.*(?:drive|Drive|MyDrive|Group10)"""),
         ]
+        drive_keywords = {"drive", "mydrive", "group10"}
+
+        class DestructiveCallVisitor(ast.NodeVisitor):
+            def __init__(self, filename):
+                self.filename = filename
+                self.violations = []
+
+            def visit_Call(self, node):
+                func_name = ""
+                if isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                elif isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+
+                if func_name in {"rmtree", "remove", "unlink", "rmdir"}:
+                    for arg in ast.walk(node):
+                        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                            if any(k in arg.value.lower() for k in drive_keywords):
+                                self.violations.append((node.lineno, func_name, arg.value))
+                self.generic_visit(node)
 
         for nb_path in (repo_root / "notebooks").glob("*.ipynb"):
             nb = json.loads(nb_path.read_text(encoding="utf-8"))
             for idx, cell in enumerate(nb.get("cells", [])):
                 src = "".join(cell.get("source", []))
+                
+                # 1. Regex check
                 for pattern in drive_danger_patterns:
                     match = pattern.search(src)
                     self.assertIsNone(
                         match,
                         f"Destructive drive cleanup operation matching {pattern.pattern} found in {nb_path.name} cell {idx}: {match.group(0) if match else ''}",
                     )
+
+                # 2. AST check (for code cells)
+                if cell.get("cell_type") == "code":
+                    filtered_lines = [line if not line.strip().startswith(("!", "%")) else f"# {line}" for line in src.splitlines()]
+                    tree = ast.parse("\n".join(filtered_lines), filename=f"{nb_path.name}:{idx}")
+                    visitor = DestructiveCallVisitor(f"{nb_path.name}:{idx}")
+                    visitor.visit(tree)
+                    self.assertEqual(visitor.violations, [], f"AST destructive call violation in {nb_path.name} cell {idx}: {visitor.violations}")
 
         # In fast production notebook, assert NO rmtree call exists at all
         fast_nb = json.loads((repo_root / "notebooks" / "m1_colab_fast_production.ipynb").read_text(encoding="utf-8"))
@@ -418,44 +509,87 @@ class TestFastProduction(unittest.TestCase):
 
         # Fail-closed commit check in source text
         self.assertIn("not re.fullmatch(r\"[0-9a-f]{40}\", CODE_COMMIT)", all_src)
+        self.assertIn("not isinstance(CODE_COMMIT, str)", all_src)
         self.assertNotIn("sử dụng HEAD hiện tại của nhánh", all_src)
 
     def test_fast_production_notebook_fail_closed_execution(self):
-        """Phase 0 / P1-15: Test execution behavior of fail-closed CODE_COMMIT validation."""
-        import subprocess
+        """Phase 0 / P1-15: Directly execute the actual notebook Step 1 cell in a simulated Colab environment."""
+        repo_root = Path(__file__).resolve().parents[1]
+        nb_path = repo_root / "notebooks" / "m1_colab_fast_production.ipynb"
+        nb = json.loads(nb_path.read_text(encoding="utf-8"))
 
-        def run_code_commit_validation(code_commit, check_output_head=""):
-            if not isinstance(code_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", code_commit):
-                raise RuntimeError("Bắt buộc phải điền đầy đủ mã commit 40 ký tự cho CODE_COMMIT để bảo đảm tính tái lập (fail-closed).")
-            current_head = check_output_head
-            if current_head != code_commit:
-                raise RuntimeError(f"Commit sau khi checkout ({current_head}) không khớp với CODE_COMMIT ({code_commit}).")
-            return current_head
+        step1_src = None
+        for cell in nb.get("cells", []):
+            src = "".join(cell.get("source", []))
+            if "CODE_COMMIT =" in src and "checkout" in src:
+                step1_src = src
+                break
+        self.assertIsNotNone(step1_src, "Step 1 checkout code cell must exist in m1_colab_fast_production.ipynb")
+
+        def run_actual_cell(code_commit, checkout_exc=None, mock_head=None):
+            pattern = re.compile(r'CODE_COMMIT\s*=\s*[\'"][^\'"]*[\'"]')
+            modified_src = pattern.sub(f'CODE_COMMIT = {repr(code_commit)}', step1_src, count=1)
+
+            mock_drive = unittest.mock.MagicMock()
+            mock_colab = unittest.mock.MagicMock()
+            mock_colab.drive = mock_drive
+
+            def mock_run_call(cmd, **kwargs):
+                if isinstance(cmd, list) and "checkout" in cmd and checkout_exc:
+                    raise checkout_exc
+                return unittest.mock.MagicMock(returncode=0)
+
+            with patch.dict("sys.modules", {"google.colab": mock_colab}), \
+                 patch.dict("os.environ", {"COLAB_GPU": "0"}), \
+                 patch("os.chdir"), \
+                 patch("pathlib.Path.exists", return_value=True), \
+                 patch("subprocess.run", side_effect=mock_run_call), \
+                 patch("subprocess.check_output", return_value=(mock_head if mock_head is not None else str(code_commit)) + "\n"):
+                exec(modified_src, {"__name__": "__main__"})
 
         valid_sha = "a" * 40
 
         # Sub-case A: Malformed SHA raises RuntimeError
         for bad_sha in ["", "not_a_sha", "12345", "a" * 39, "a" * 41, "g" * 40, None, 12345]:
             with self.assertRaises(RuntimeError, msg=f"Should raise RuntimeError for malformed SHA: {bad_sha}"):
-                run_code_commit_validation(bad_sha, check_output_head=valid_sha)
+                run_actual_cell(bad_sha, mock_head=valid_sha)
 
         # Sub-case B: Checkout failure propagates error
-        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "git checkout")):
-            def failing_checkout(sha):
-                if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-                    raise RuntimeError("Bắt buộc...")
-                subprocess.run(["git", "checkout", "--detach", sha], check=True)
-            with self.assertRaises(subprocess.CalledProcessError):
-                failing_checkout(valid_sha)
+        with self.assertRaises(subprocess.CalledProcessError):
+            run_actual_cell(valid_sha, checkout_exc=subprocess.CalledProcessError(1, "git checkout"))
 
         # Sub-case C: Post-checkout HEAD mismatch raises RuntimeError
         different_head = "b" * 40
         with self.assertRaises(RuntimeError, msg="Should raise RuntimeError when post-checkout HEAD does not match"):
-            run_code_commit_validation(valid_sha, check_output_head=different_head)
+            run_actual_cell(valid_sha, mock_head=different_head)
 
         # Sub-case D: Matching valid SHA succeeds
-        res = run_code_commit_validation(valid_sha, check_output_head=valid_sha)
-        self.assertEqual(res, valid_sha)
+        run_actual_cell(valid_sha, mock_head=valid_sha)
+
+    def test_validate_and_checkout_commit_production_module(self):
+        """Phase 0 / P1-15: Test reusable production function src.fast_production.validate_and_checkout_commit."""
+        valid_sha = "c" * 40
+
+        # Sub-case A: Malformed SHA raises RuntimeError
+        for bad_sha in ["", "invalid_sha", "12345", "c" * 39, "c" * 41, "h" * 40, None, 9999]:
+            with self.assertRaises(RuntimeError):
+                validate_and_checkout_commit(bad_sha)
+
+        # Sub-case B: Checkout failure propagates error
+        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "git checkout")):
+            with self.assertRaises(subprocess.CalledProcessError):
+                validate_and_checkout_commit(valid_sha)
+
+        # Sub-case C: HEAD mismatch raises RuntimeError
+        with patch("subprocess.run"), patch("subprocess.check_output", return_value="d" * 40 + "\n"):
+            with self.assertRaises(RuntimeError):
+                validate_and_checkout_commit(valid_sha)
+
+        # Sub-case D: Valid checkout succeeds and returns HEAD
+        with patch("subprocess.run") as mock_run, patch("subprocess.check_output", return_value=valid_sha + "\n"):
+            res = validate_and_checkout_commit(valid_sha, repo_dir="/fake/repo")
+            self.assertEqual(res, valid_sha)
+            mock_run.assert_any_call(["git", "checkout", "--detach", valid_sha], cwd="/fake/repo", check=True)
 
 
 if __name__ == "__main__":
