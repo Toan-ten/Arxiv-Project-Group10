@@ -144,7 +144,7 @@ class FastProductionRunner:
         pairs = cohort_pairs(number)
         batch_id = f"fast-arxiv-{number:04d}"
         experiment_id = f"exp-fast-{number:04d}-{int(time.time())}"
-        max_attempts = 5 if self.retry_429 else 1
+        max_attempts = 6 if self.retry_429 else 1
         batch_log_dir = self.logs_dir / batch_id
         batch_json_path = batch_log_dir / "batch.json"
         if batch_json_path.exists():
@@ -171,21 +171,22 @@ class FastProductionRunner:
         old_temp, old_tmpdir = tempfile.tempdir, os.environ.get("TMPDIR")
         try:
             tempfile.tempdir = os.environ["TMPDIR"] = str(self.scratch_dir)
-            report = benchmark_runner.run_benchmark(
-                pairs=pairs,
-                corpus_root=self.corpus_dir,
-                batch_id=batch_id,
-                max_ids=len(pairs),
-                log_root=self.logs_dir,
-                report_root=self.reports_dir,
-                experiment_id=experiment_id,
-                resume=effective_resume,
-                max_attempts=max_attempts,
-                timeout=self.timeout,
-                disk_roots=[self.corpus_dir, self.scratch_dir],
-                s2_config=None,
-                revision_history=revision_history,
-            )
+            with arxiv_client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0):
+                report = benchmark_runner.run_benchmark(
+                    pairs=pairs,
+                    corpus_root=self.corpus_dir,
+                    batch_id=batch_id,
+                    max_ids=len(pairs),
+                    log_root=self.logs_dir,
+                    report_root=self.reports_dir,
+                    experiment_id=experiment_id,
+                    resume=effective_resume,
+                    max_attempts=max_attempts,
+                    timeout=self.timeout,
+                    disk_roots=[self.corpus_dir, self.scratch_dir],
+                    s2_config=None,
+                    revision_history=revision_history,
+                )
         except KeyboardInterrupt:
             interrupted = True
             done_now = self.count_completed_papers(number)

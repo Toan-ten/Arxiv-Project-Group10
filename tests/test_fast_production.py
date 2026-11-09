@@ -104,6 +104,18 @@ class TestFastProduction(unittest.TestCase):
         self.assertIn("elapsed_seconds", res)
         self.assertTrue(Path(res["report_path"]).exists())
 
+    def test_golden_ratio_backoff_policy_schedule(self):
+        from src import arxiv_client
+        with arxiv_client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0) as schedule:
+            waits = [schedule(k) for k in range(1, 6)]
+            # Deterministic bounds: 8.0 * phi^(k-1) <= w_k <= 8.0 * phi^(k-1) + 1.0
+            for k, w in enumerate(waits, start=1):
+                lower = min(8.0 * (arxiv_client.PHI ** (k - 1)), 60.0)
+                self.assertGreaterEqual(w, lower)
+                self.assertLessEqual(w, lower + 1.0)
+            # Cumulative wait across 5 retries exceeds the 120s CDN sliding window
+            self.assertGreater(sum(waits), 130.0)
+
 
 if __name__ == "__main__":
     unittest.main()

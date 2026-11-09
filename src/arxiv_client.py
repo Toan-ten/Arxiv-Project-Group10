@@ -25,6 +25,7 @@ USER_AGENT = (
 )
 MIN_INTERVAL = 3.0
 RETRY_429_FALLBACK_SECONDS = 60.0
+PHI = (1.0 + math.sqrt(5.0)) / 2.0
 XML_CONTENT_TYPES = {"application/atom+xml", "application/xml", "text/xml"}
 
 
@@ -39,6 +40,7 @@ _request_lock = Lock()
 _next_request_at = 0.0
 _REQUEST_LOG = ContextVar("arxiv_request_log", default=None)
 _RETRY_429 = ContextVar("arxiv_experimental_retry_429", default=None)
+_BACKOFF_SCHEDULE = ContextVar("arxiv_backoff_schedule", default=None)
 
 
 class _Retry429:
@@ -74,6 +76,19 @@ def retry_429_policy(wait_budget_seconds=None):
         yield policy
     finally:
         _RETRY_429.reset(token)
+
+
+@contextmanager
+def golden_ratio_backoff_policy(base_seconds: float = 8.0, cap_seconds: float = 60.0):
+    """Opt-in Golden-Ratio / Fibonacci backoff schedule w_k = min(base * phi^(k-1), cap) + U(0, 1)."""
+    def _schedule(attempt: int) -> float:
+        return min(base_seconds * (PHI ** (attempt - 1)), cap_seconds) + random.uniform(0.0, 1.0)
+
+    token = _BACKOFF_SCHEDULE.set(_schedule)
+    try:
+        yield _schedule
+    finally:
+        _BACKOFF_SCHEDULE.reset(token)
 
 
 class ArxivCooldownError(RuntimeError):
@@ -310,7 +325,11 @@ def _request_arxiv(
                     "status": status, "http_status": http_status,
                     "attempts": attempt, "error": error,
                 }
-            backoff = min(3.0 * 2 ** min(attempt - 1, 5), 60.0) + random.uniform(0.0, 1.0)
+            schedule = _BACKOFF_SCHEDULE.get()
+            if schedule is not None:
+                backoff = schedule(attempt)
+            else:
+                backoff = min(3.0 * 2 ** min(attempt - 1, 5), 60.0) + random.uniform(0.0, 1.0)
             _next_request_at = max(_next_request_at, time.monotonic() + backoff)
 
 
