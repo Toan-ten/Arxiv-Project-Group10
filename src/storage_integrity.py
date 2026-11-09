@@ -250,7 +250,21 @@ def audit_version_integrity(
 
     version_dir = paper_dir / version_name
 
-    # R12: Check containment unconditionally before path checks, regardless of existence on disk
+    # Reject version_dir if it is a symlink (R5, R12: check symlink before resolve to prevent symlink loops)
+    if version_dir.is_symlink() or os.path.islink(version_dir):
+        violations.append(
+            IntegrityViolation(
+                arxiv_id=arxiv_id,
+                category="corrupted",
+                severity="error",
+                file_path=str(version_dir),
+                version=version_name,
+                message=f"Version directory {version_name} is a symbolic link",
+            )
+        )
+        return violations
+
+    # R12: Check containment unconditionally, regardless of existence on disk (catch both OSError and RuntimeError)
     try:
         if not version_dir.resolve().is_relative_to(paper_dir.resolve()):
             violations.append(
@@ -264,7 +278,7 @@ def audit_version_integrity(
                 )
             )
             return violations
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         violations.append(
             IntegrityViolation(
                 arxiv_id=arxiv_id,
@@ -273,20 +287,6 @@ def audit_version_integrity(
                 file_path=str(version_dir),
                 version=version_name,
                 message=f"Filesystem error resolving version directory {version_name}: {exc}",
-            )
-        )
-        return violations
-
-    # Reject version_dir if it is a symlink (R5)
-    if version_dir.is_symlink() or os.path.islink(version_dir):
-        violations.append(
-            IntegrityViolation(
-                arxiv_id=arxiv_id,
-                category="corrupted",
-                severity="error",
-                file_path=str(version_dir),
-                version=version_name,
-                message=f"Version directory {version_name} is a symbolic link",
             )
         )
         return violations
@@ -512,7 +512,7 @@ def audit_version_integrity(
                                 )
                             )
                             continue
-                    except OSError as exc:
+                    except (OSError, RuntimeError) as exc:
                         violations.append(
                             IntegrityViolation(
                                 arxiv_id=arxiv_id,
@@ -969,7 +969,7 @@ def audit_version_integrity(
                                     )
                                 )
                                 continue
-                        except OSError as exc:
+                        except (OSError, RuntimeError) as exc:
                             violations.append(
                                 IntegrityViolation(
                                     arxiv_id=arxiv_id,

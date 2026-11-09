@@ -207,7 +207,7 @@ class FastProductionRunner:
             try:
                 if not paper_dir.resolve().is_relative_to(corpus_resolved):
                     continue
-            except OSError:
+            except (OSError, RuntimeError):
                 continue
             if not paper_dir.is_dir():
                 continue

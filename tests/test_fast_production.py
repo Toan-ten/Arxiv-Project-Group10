@@ -1051,6 +1051,11 @@ shutil.rmtree(target2)
 
             self.assertEqual(runner.count_completed_papers(1), 0)
 
+            # Symlink loop paper folder must fail closed without raising RuntimeError
+            symlink_paper.unlink()
+            symlink_paper.symlink_to(symlink_paper)
+            self.assertEqual(runner.count_completed_papers(1), 0)
+
     def test_count_completed_papers_rejects_symlinked_manifest(self):
         """R10: manifest.json that is a symlink or hardlink is rejected."""
         runner = FastProductionRunner(self.local_root, self.drive_root)

@@ -511,6 +511,44 @@ class TestStorageIntegrity(unittest.TestCase):
 
             self.assertTrue(any(v.category == "corrupted" and "symbolic link" in v.message.lower() for v in violations))
 
+    def test_audit_rejects_version_dir_symlink_loop(self):
+        """R12: Symlink loop for version directory is rejected as corrupted without raising RuntimeError."""
+        self._setup_valid_complete_paper()
+        v1_dir = self.paper_dir / "v1"
+        import shutil
+        shutil.rmtree(v1_dir)
+
+        # 1. Direct self-referential symlink loop: v1 -> v1
+        try:
+            v1_dir.symlink_to(v1_dir)
+        except OSError:
+            self.skipTest("Filesystem does not support symlinks")
+
+        rec = {
+            "versioned_id": f"{self.arxiv_id}v1",
+            "status": "success",
+            "source_status": "success",
+            "files": ["main.tex"],
+            "file_checksums": {"main.tex": "a" * 64},
+            "kept_bytes": 100,
+            "completed_at": "2026-11-09T00:00:00Z",
+        }
+
+        # Must not raise RuntimeError: Symlink loop
+        violations = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", rec)
+        self.assertTrue(any(v.category == "corrupted" and "symbolic link" in v.message.lower() for v in violations))
+
+        # 2. Mutual symlink loop: v1 -> v_loop and v_loop -> v1
+        v1_dir.unlink()
+        v_loop = self.paper_dir / "v_loop"
+        v1_dir.symlink_to(v_loop)
+        v_loop.symlink_to(v1_dir)
+
+        violations_mutual = audit_version_integrity(self.paper_dir, self.arxiv_id, "v1", rec)
+        self.assertTrue(any(v.category == "corrupted" and "symbolic link" in v.message.lower() for v in violations_mutual))
+        v_loop.unlink()
+        v1_dir.unlink()
+
     def test_audit_rejects_hardlink_file(self):
         """R5: Hardlinked file with st_nlink != 1 is rejected as corrupted."""
         self._setup_valid_complete_paper()
