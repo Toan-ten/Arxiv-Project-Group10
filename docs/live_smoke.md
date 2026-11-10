@@ -173,9 +173,15 @@ và bước kiểm tra `v2/` không áp dụng.
 ## Trạng thái thực thi
 
 Các kiểm thử trong `tests/test_live_smoke.py` chạy offline bằng fake HTTP, corpus trong
-TEMP, và **không** phải bằng chứng crawl thật. Lần chạy `pilot_10` trên Colab chưa được
-thực hiện trong repository này; bằng chứng nghiệm thu chỉ có sau khi notebook
-`notebooks/colab_m1_runner.ipynb` được chạy và `proof` in `Result: PASS`.
+TEMP. Bản thân chúng không phải bằng chứng crawl thật.
+
+Lượt chạy thật đã thực hiện **10/11/2026** trên Colab CPU-only, corpus trên Google Drive,
+hánh `feat/m1-smoke-resume`: `proof` PASS, `verify` PASS, attempt 1 `interrupted` sau 5/10
+paper, attempt 2 `finished` 10/10, tiết kiệm 12 request. Chi tiết và các điểm cần Toàn
+quyết định trước Full Crawl: [biên bản M1-T02](m1_t02_resume_report.md).
+
+Chưa kiểm chứng ở quy mô 20.000 ID, chưa bật Semantic Scholar, chưa có số liệu
+benchmark; xem mục “Phạm vi bằng chứng” trong biên bản.
 
 ## Kiểm thử offline
 

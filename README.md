@@ -173,8 +173,9 @@ python -B -m scripts.live_smoke proof
 `--interrupt-after N` tiêm `KeyboardInterrupt` từ progress callback của Batch, nên
 đường phục hồi giống hệt Ctrl+C mà vẫn tái lập được. Trên Colab, corpus và log mặc
 định nằm ở `/content/drive/MyDrive/arxiv_corpus`; notebook
-`notebooks/colab_m1_runner.ipynb` chạy đủ bốn bước trên. Bằng chứng crawl thật chỉ
-có sau khi notebook được chạy; unit tests offline không thay thế bước đó.
+`notebooks/colab_m1_runner.ipynb` chạy đủ bốn bước trên. Unit tests offline không thay thế
+được lượt chạy thật: kết quả Colab CPU-only ngày 10/11/2026 là `proof` PASS và `verify`
+PASS, nằm trong [biên bản M1-T02](docs/m1_t02_resume_report.md).
 Xem [hướng dẫn, bằng chứng và giới hạn](docs/live_smoke.md).
 
 ## Chạy toàn bộ unit tests
