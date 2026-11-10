@@ -22,8 +22,12 @@ wall time 50,7 s + 47,8 s, đỉnh RAM 30,4 MB (xem mục 4.2 và 6).
 | Request tiết kiệm khi resume | **12 request** (5 discovery + 7 source) không gửi lại |
 | Số đo tài nguyên | wall 50,7 s + 47,8 s; đỉnh RAM 30,4 MB; 23 request cho 10 paper |
 
-Corpus sau hai lượt: 10 paper, tổng **13 version** đã lưu, tất cả ID đều resolve được và đều
-có source (không có `not_found`, không có `no_tex_source`).
+Corpus sau hai lượt: 10 paper, tổng **13 version** đã lưu: **12 version `success` và 1 version
+`no_tex_source`**. Trên corpus đo lường (`arxiv_corpus_bench`) chỉ có **58 file** đã giữ,
+**1,08 MiB**, trong đó **1,02 MiB** là `.tex`/`.bib`.
+
+Paper `2501.02642` (`v1`) có archive nhưng **không có file `.tex`** → `no_tex_source`, không
+tạo thư mục version, record vẫn được lưu. Đây là trạng thái âm hợp lệ, không phải lỗi mạng.
 
 ## 2. Bằng chứng theo từng tiêu chí nghiệm thu của thẻ
 
@@ -122,8 +126,24 @@ Cần chốt trước khi chạy:
 - `--versions` cho Full Crawl: lấy tất cả version (như pilot, trung bình 1,3 version/paper) hay
   chỉ `v1` để giảm khoảng 30% request → ~38 giờ.
 
-RAM đỉnh 30 MB cho thấy bộ nhớ không phải ràng buộc ở quy mô này; ràng buộc thật là thời gian
-và (có thể) dung lượng Drive.
+RAM đỉnh 30 MB cho thấy bộ nhớ không phải ràng buộc ở quy mô này.
+
+### 4.2b. Dung lượng: không phải ràng buộc (đo được, không còn là phỏng đoán)
+
+`verify` cộng dung lượng thật: **1,08 MiB cho 10 paper** (110,6 KiB/paper), ngoại suy tuyến
+tính **2,12 GiB cho 20.000 paper** — so với hạn mức Google Drive phổ thông 15 GB thì còn xa.
+
+Cảnh báo khi đọc con số này:
+
+- `references.json` trong lượt này là **khung rỗng** (`not_attempted`), nên 2,12 GiB **chưa gồm**
+  dữ liệu Semantic Scholar. Ước lượng thô phần S2: 100 reference × ~600-900 byte ≈ 60-90
+  KiB/paper → thêm **~1,1-1,7 GiB**; tổng khoảng **3-4 GiB**. Cần đo lại sau khi bật `--s2`
+  thay vì tin vào con số này.
+- `reference_limit=100` và `max_pages=10` là mức chặn trên cho phần S2; nếu nới các mức này ở
+  Full Crawl thì ước lượng trên cần tính lại.
+
+Kết luận: trong ba ràng buộc (thời gian ~55 giờ, dung lượng ~3-4 GiB, RAM 30 MB), **chỉ thời
+gian là vấn đề thật**.
 
 ### 4.3. Có số liệu benchmark, nhưng chưa đối chiếu được với tên tệp mà Toàn/Anh chờ
 
@@ -146,7 +166,14 @@ Bằng chứng này là **lượt chạy thật** trên arXiv (không phải fak
 - tính đúng đắn của metadata/references ở mức publication `complete`;
 - độ bền khi Colab kill process **giữa** một paper (lượt này ngắt ở ranh giới paper; trường hợp
   này có `--interrupt-at-start N` và đã có unit test offline, chưa chạy thật);
-- dung lượng corpus ở quy mô 20.000 ID (mới có ngoại suy từ pilot).
+- dung lượng corpus ở quy mô 20.000 ID chỉ là ngoại suy từ pilot (2,12 GiB + phần S2 chưa đo).
+
+**Một điểm cần lưu ý về cách đọc số liệu:** trong attempt log, `source.action="downloaded"`
+gộp chung `success` **và** `no_tex_source` (Pipeline đặt cùng một action cho mọi trạng thái
+terminal). Vì vậy bảng đếm `source_actions` của Batch **không** phải số paper có TeX. Độ phủ
+TeX thật phải lấy từ `manifest.json` của từng paper hoặc từ `verify`. Nếu
+`[ANH - M1-T06]` đếm “downloaded” làm “thu được LaTeX” thì sẽ báo cao hơn thực tế — pilot này
+lệch 1/10 paper (10%).
 
 Đề nghị Toàn xác nhận: (a) chấp nhận S2 tách riêng hay yêu cầu chạy thêm lượt `--s2`;
 (b) kế hoạch chia phiên cho Full Crawl theo mục 4.2.
