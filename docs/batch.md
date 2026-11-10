@@ -11,7 +11,7 @@ run_batch(
     pairs, corpus_root, *,
     batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT, s2_config=None,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None, on_progress=None,
 )
 ```
 
@@ -30,6 +30,14 @@ Batch Runner là `max_attempts=1`; Pipeline gọi trực tiếp vẫn giữ mặ
 `s2_config=None` tắt S2; dictionary bật và được lưu trong run definition.
 Đổi cấu hình hoặc bật S2 trên batch cũ cần batch_id mới. Logs arXiv-only vẫn đọc
 được. Xem [S2 integration](s2_integration.md); giữ hai progress callbacks hiện có.
+
+`on_progress=None` là observer tùy chọn, được gọi với `(event, summary_copy)`
+**sau khi** snapshot của Batch đã ghi atomic, nên bên gọi chỉ thấy trạng thái đã bền.
+Không truyền thì hành vi không đổi; hai callback `paper_started`/`paper_finished`
+của Pipeline giữ nguyên. Exception do observer ném ra được xử lý như exception trong
+lượt chạy: `KeyboardInterrupt` ghi `interrupted` rồi truyền ra, đúng đường đi của Ctrl+C.
+`scripts/live_smoke.py` dùng điểm nối này để mô phỏng ngắt; xem
+[Live smoke, ngắt phiên và Resume](live_smoke.md).
 
 ## Log bền vững
 

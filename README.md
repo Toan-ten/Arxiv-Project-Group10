@@ -15,6 +15,8 @@ config/group10_id_ranges.json  Khoảng ID theo MSSV
 config/pilot_10.json          Bộ ID smoke test
 config/pilot_500.json         Bộ ID pilot/benchmark
 scripts/make_pilots.py        Sinh lại hai bộ pilot
+scripts/live_smoke.py         Chạy smoke, ngắt phiên, resume và nghiệm thu corpus
+notebooks/                    Notebook vận hành trên Google Colab
 src/id_ranges.py              Đọc cấu hình, kiểm tra và sinh ID
 src/pilots.py                 Chọn pilot deterministic từ các range
 src/arxiv_discovery.py        Phân tích Atom XML và xác định version
@@ -28,6 +30,7 @@ src/benchmark.py              Bộ đo thời gian, RAM và dung lượng corpus
 docs/                         Hướng dẫn module và contract M1
 tests/                        Unit tests offline cho các module
 tests/test_pilot_sets.py      Unit tests cho pilot sets
+tests/test_live_smoke.py      Unit tests cho smoke/ngắt phiên/resume
 ```
 
 ## Chạy module ID
@@ -152,6 +155,27 @@ logs và dữ liệu để tổng hợp nhiều attempts, không đếm trùng p
 Trạng thái thực thi, batch finished/stopped, độ phủ source và publication complete
 được trình bày riêng; references chưa thu thập vẫn là dữ liệu chưa biết.
 Xem [API, schema report, phạm vi đo và giới hạn](docs/benchmark_runner.md).
+
+## Live smoke, ngắt phiên và Resume (M1-T02)
+
+`scripts/live_smoke.py` bọc Batch/Pipeline thành bốn lệnh: `smoke` chạy
+`config/pilot_10.json`, `resume` chạy lại cùng batch với `resume=True`, `verify`
+kiểm tra corpus theo contract v2 (ba JSON, `vN/` chỉ chứa `.tex`/`.bib`, SHA-256,
+không còn file tạm) và `proof` in báo cáo PASS/FAIL cho việc nghiệm thu.
+
+```powershell
+python -B -m scripts.live_smoke smoke --interrupt-after 5
+python -B -m scripts.live_smoke resume
+python -B -m scripts.live_smoke verify
+python -B -m scripts.live_smoke proof
+```
+
+`--interrupt-after N` tiêm `KeyboardInterrupt` từ progress callback của Batch, nên
+đường phục hồi giống hệt Ctrl+C mà vẫn tái lập được. Trên Colab, corpus và log mặc
+định nằm ở `/content/drive/MyDrive/arxiv_corpus`; notebook
+`notebooks/colab_m1_runner.ipynb` chạy đủ bốn bước trên. Bằng chứng crawl thật chỉ
+có sau khi notebook được chạy; unit tests offline không thay thế bước đó.
+Xem [hướng dẫn, bằng chứng và giới hạn](docs/live_smoke.md).
 
 ## Chạy toàn bộ unit tests
 

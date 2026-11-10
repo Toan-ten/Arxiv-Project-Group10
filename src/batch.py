@@ -146,14 +146,21 @@ def _history(directory, batch_id, selection):
 def run_batch(
     pairs, corpus_root, *, batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
-    user_agent=arxiv_client.USER_AGENT, s2_config=None,
+    user_agent=arxiv_client.USER_AGENT, s2_config=None, on_progress=None,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
     Existing batches require resume=True, including an explicitly authorized
     restart after 403/429. Every invocation uses Storage/checksum again.
     Log failures and interrupts propagate. No automatic outer retries.
+
+    on_progress(event, summary_copy) is an optional observer called after the
+    internal snapshot is durable, so an exception it raises (e.g. the
+    KeyboardInterrupt an operator would send with Ctrl+C) leaves the same
+    interrupted record a real console interrupt would.
     """
+    if on_progress is not None and not callable(on_progress):
+        raise BatchError("on_progress must be callable or None")
     if (not isinstance(batch_id, str) or
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", batch_id) is None or
             batch_id.upper() in {"CON", "PRN", "AUX", "NUL"} |
@@ -244,6 +251,8 @@ def run_batch(
             row.update(state="processed", ended_at=_now(),
                        wall_seconds=max(0.0, time.perf_counter() - paper_starts[index]))
         persist()
+        if on_progress is not None:
+            on_progress(event, copy.deepcopy(summary))
 
     persist()  # The attempt intent is durable before any HTTP or corpus write.
     try:
