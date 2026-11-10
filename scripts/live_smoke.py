@@ -341,9 +341,12 @@ def execute(args, *, resume: bool) -> int:
     except KeyboardInterrupt as exc:
         status, detail = "interrupted", str(exc)
         print(f"\nInterrupted: {exc}")
-    except BatchError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 2
+    except Exception as exc:  # BatchError, BenchmarkError, OSError, ...
+        # A rejected run must still leave a record: otherwise the only trace is
+        # console text the operator may have scrolled past.
+        status = "rejected"
+        detail = f"{type(exc).__name__}: {exc}"
+        print(f"ERROR: {detail}", file=sys.stderr)
     else:
         status = report.get("batch_status") or "unknown"
         detail = report.get("stop_reason")
@@ -391,15 +394,21 @@ def execute(args, *, resume: bool) -> int:
         detail=detail,
         attempt_number=len(attempt_paths) or None,
         attempt_logs=[path.name for path in attempt_paths],
-        corpus_snapshot=snapshot_corpus(corpus_root),
+        corpus_snapshot=snapshot_corpus(corpus_root) if status != "rejected" else {},
     )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    path = _write_json(
-        log_root / args.batch_id / "evidence" / f"{stamp}-{evidence['mode']}.json",
-        evidence,
-    )
-    print(f"\nEvidence: {path}")
+    try:
+        path = _write_json(
+            log_root / args.batch_id / "evidence" / f"{stamp}-{evidence['mode']}.json",
+            evidence,
+        )
+        print(f"\nEvidence: {path}")
+    except OSError as exc:
+        # Never hide the original failure behind an unwritable log directory.
+        print(f"\nWARNING: could not write evidence record: {exc}", file=sys.stderr)
 
+    if status == "rejected":
+        return 2
     if status == "interrupted":
         print("\nNext: python -B -m scripts.live_smoke resume   "
               "(skips the crawled papers, continues from the checkpoint)")
