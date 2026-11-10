@@ -9,7 +9,7 @@ Ba thành phần:
 | --- | --- |
 | `scripts/live_smoke.py` | CLI `smoke` / `resume` / `verify` / `proof` |
 | `notebooks/colab_m1_runner.ipynb` | Notebook Colab gắn Drive và chạy bốn bước trên |
-| `tests/test_live_smoke.py` | 25 unit tests offline, fake HTTP, corpus trong TEMP |
+| `tests/test_live_smoke.py` | 35 unit tests offline, fake HTTP, corpus trong TEMP |
 
 Module này **không** thay đổi contract v2, không gọi mạng khi import và không tự chạy
 pilot. Nó chỉ orchestration quanh `src.batch`, `src.pipeline` và `src.storage`.
@@ -58,6 +58,11 @@ gián đoạn giữa một paper thay vì ở ranh giới paper.
 | `--timeout` | `30` | Timeout arXiv |
 | `--max-attempts` | `1` | Smoke phải giữ `1` |
 | `--s2` | tắt | Bật Semantic Scholar; cần `SEMANTIC_SCHOLAR_API_KEY` |
+| `--benchmark` | tắt | Đi qua `run_benchmark` để ghi wall time/RAM/disk; đường ngắt và resume giữ nguyên |
+| `--report-root` | cùng cấp corpus | Thư mục report benchmark, phải tách khỏi corpus và log |
+| `--experiment-id` | tự sinh mỗi lượt | Report không bao giờ ghi đè; resume mở experiment mới |
+| `--sample-interval` | `0.1` | Chu kỳ lấy mẫu RAM (giây), chỉ khi `--benchmark` |
+| `--disk-interval` | `30` | Chu kỳ lấy mẫu đĩa (giây), chỉ khi `--benchmark` |
 | `--s2-min-interval` | `2.0` | Pacing S2 (giây) |
 | `--interrupt-after N` | — | Ngắt sau khi N paper hoàn tất |
 | `--interrupt-at-start N` | — | Ngắt khi paper N bắt đầu |
@@ -87,6 +92,32 @@ Vì vậy đường đi mã nguồn của lần ngắt giả lập trùng với 
 `run_batch(..., on_progress=None)` là tham số tùy chọn mới: observer được gọi sau mỗi
 snapshot đã ghi atomic, nhận `(event, summary_copy)` giống Pipeline. Không truyền thì
 hành vi cũ giữ nguyên; `docs/batch.md` vẫn đúng cho mọi mô tả khác.
+
+## `--benchmark`: dữ liệu và metrics trong cùng một lượt
+
+Mặc định `smoke`/`resume` gọi `src.batch.run_batch` (chỉ dữ liệu). Với
+`--benchmark`, chúng gọi `src.benchmark_runner.run_benchmark`: cùng selection,
+cùng checkpoint, cùng đường ngắt/resume, nhưng có thêm wall time, RAM đỉnh và
+dung lượng đĩa cho M1-T03/M1-T06.
+
+Mỗi invocation tạo một experiment riêng dưới `reports/<experiment-id>/`
+(`intent.json`, `report.json`, `resources.json`), và resume **không** ghi đè
+report cũ. Evidence JSON ghi lại đường dẫn report và vài số đo đầu mục.
+
+Hệ quả cần lưu ý: `resume` phải giữ nguyên `--benchmark` nếu muốn số đo cho lượt
+sau; hai lượt là hai experiment độc lập, không cộng gộp wall time thành một con số.
+
+## Dung lượng: đo trước khi chạy 20.000 ID
+
+`verify` cộng dung lượng thật của từng paper và in một dòng ngoại suy:
+
+```text
+Storage: Measured on 10 paper(s): 1.23 MiB, of which 0.94 MiB is .tex/.bib.
+Projected for 20,000 papers: 2.46 GiB
+```
+
+Đây là **ngoại suy tuyến tính từ pilot**, dùng để đối chiếu hạn mức Google Drive
+trước khi đầu tư hàng chục giờ crawl; không phải cam kết về corpus cuối.
 
 ## Resume bỏ qua gì
 
@@ -192,8 +223,10 @@ python -B -m unittest discover -s tests -v
 
 Tests phủ: đọc/kiểm tra pilot (trùng ID, ID ngoài range, file hỏng, lệch generator),
 `SimulatedInterrupt` ở cả hai chế độ, quét file tạm, `verify_corpus` (thiếu paper, ghi đè
-`.tex`, ảnh trong `vN/`, `contract_version` sai, file tạm, corpus rỗng) và end-to-end
-`smoke → resume → proof` qua CLI thật với corpus nhiều version.
+`.tex`, ảnh trong `vN/`, `contract_version` sai, file tạm, corpus rỗng, ngoại suy dung lượng)
+và end-to-end `smoke → resume → proof` qua CLI thật với corpus nhiều version, cả đường
+`run_batch` lẫn đường `--benchmark` (report không ghi đè, attempt `interrupted` vẫn có
+metrics, resume mở experiment mới).
 
 ## Giới hạn
 

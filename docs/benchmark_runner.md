@@ -11,7 +11,7 @@ run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None, s2_config=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None, on_progress=None,
 )
 aggregate_batch(corpus_root, *, batch_id, log_root)
 ```
@@ -34,6 +34,13 @@ print(audit["status"], audit["issues"], audit["data_coverage"])
 Để đo một lượt đã được phép, truyền cùng các tham số của `run_batch()` vào
 `run_benchmark()`, thêm `report_root="benchmark_results"` và experiment ID mới.
 Resume dùng cùng batch ID/cấu hình, `resume=True`, experiment ID khác.
+
+`on_progress` được chuyển nguyên vào Batch, nên một lượt đo bị ngắt vẫn giữ **cả**
+metrics report **và** attempt `interrupted`: `report.json` được ghi trước khi
+exception gốc (kể cả `KeyboardInterrupt`) được ném lại. `resource_metrics.status`
+sẽ là `failed` cho callback bị ngắt, còn `batch_status` vẫn là `interrupted`.
+`scripts/live_smoke.py --benchmark` dùng đúng đường này; xem
+[Live smoke](live_smoke.md).
 Ba root corpus, logs và reports phải tách biệt, không lồng nhau. Chỉ một writer;
 trước khi đọc/tổng hợp phải dừng writer. Không có khóa chống process khác sửa file.
 

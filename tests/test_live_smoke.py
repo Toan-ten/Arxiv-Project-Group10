@@ -343,5 +343,113 @@ class ResumeProofTests(unittest.TestCase):
         self.opener.open.assert_not_called()
 
 
+class BenchmarkPathTests(unittest.TestCase):
+    """--benchmark must record metrics without losing interrupt/resume."""
+
+    setUp = fixtures.PipelineTests.setUp
+    open_response = fixtures.PipelineTests.open_response
+    sleep = fixtures.PipelineTests.sleep
+
+    def setUp(self):
+        fixtures.PipelineTests.setUp(self)
+        self.logs = Path(self.temp.name) / "logs"
+        self.reports = Path(self.temp.name) / "reports"
+        self.entries = [entry(pair) for pair in PAIRS[:2]]
+        pilot = Path(self.temp.name) / "pilot_2.json"
+        pilot.write_text(
+            json.dumps([{"arxiv_id": pair[1], "mssv": pair[0],
+                         "range_start": pair[1], "range_end": pair[1],
+                         "reason": "fixture"} for pair in PAIRS[:2]]),
+            encoding="utf-8",
+        )
+        self.pilot = str(pilot)
+        self.batch_id = "offline-bench"
+
+    def cli(self, *argv):
+        stream, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(errors):
+            code = live_smoke.main(list(argv))
+        return code, stream.getvalue() + errors.getvalue()
+
+    def common(self):
+        return ["--pilot", self.pilot, "--batch-id", self.batch_id,
+                "--corpus-root", str(self.root), "--log-root", str(self.logs),
+                "--report-root", str(self.reports),
+                "--max-ids", "2", "--versions", "v1", "--timeout", "15",
+                "--sample-interval", "0.05", "--disk-interval", "1"]
+
+    def experiments(self):
+        return sorted(path for path in self.reports.iterdir() if path.is_dir())
+
+    def test_interrupted_benchmark_run_records_metrics_then_resumes(self):
+        self.outcomes = [
+            response for pair in PAIRS[:2]
+            for response in (xml_response(pair[1], versions=1), Response(TEX))
+        ]
+        code, output = self.cli("smoke", *self.common(),
+                                "--benchmark", "--interrupt-after", "1")
+        self.assertEqual(code, 0, output)
+        experiments = self.experiments()
+        self.assertEqual(len(experiments), 1)
+        report = json.loads((experiments[0] / "report.json").read_text(encoding="utf-8"))
+        self.assertTrue((experiments[0] / "resources.json").is_file())
+        self.assertTrue((experiments[0] / "intent.json").is_file())
+        self.assertEqual(report["batch_status"], "interrupted")
+        self.assertEqual(report["execution_status"], "raised")
+        # The sampler marks the crawler callback failed because the interrupt
+        # propagated out of run_batch; the report itself is still complete.
+        self.assertEqual(report["resource_metrics"]["status"], "failed")
+        self.assertGreater(report["resource_metrics"]["metrics_v2"]["wall_seconds"], 0)
+        self.assertIn(report["resource_metrics"]["ram_source"], {"psutil", "unavailable"})
+
+        # Resuming keeps the same batch definition but opens a new experiment,
+        # so the interrupted report is never overwritten.
+        self.opener.open.reset_mock()
+        self.outcomes = [xml_response(PAIRS[1][1], versions=1), Response(TEX)]
+        code, output = self.cli("resume", *self.common(), "--benchmark")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(len(self.experiments()), 2)
+        self.assertEqual(self.opener.open.call_count, 2)
+
+        proof = live_smoke.build_proof(self.logs / self.batch_id, self.root, self.entries)
+        self.assertTrue(proof["ok"], proof["problems"])
+        self.assertEqual(proof["interrupted_after"], 1)
+
+    def test_evidence_records_the_benchmark_report(self):
+        self.outcomes = [
+            response for pair in PAIRS[:2]
+            for response in (xml_response(pair[1], versions=1), Response(TEX))
+        ]
+        code, output = self.cli("smoke", *self.common(), "--benchmark")
+        self.assertEqual(code, 0, output)
+        evidence = sorted((self.logs / self.batch_id / "evidence").glob("*-smoke.json"))
+        self.assertEqual(len(evidence), 1)
+        record = json.loads(evidence[0].read_text(encoding="utf-8"))
+        self.assertTrue(record["benchmark_enabled"])
+        self.assertIn("experiment_id", record["benchmark_report"])
+        self.assertTrue(record["benchmark_report"]["report_path"].endswith("report.json"))
+
+    def test_non_callable_on_progress_is_rejected(self):
+        from src.benchmark_runner import BenchmarkError, run_benchmark
+
+        with self.assertRaises(BenchmarkError):
+            run_benchmark(
+                list(PAIRS[:1]), self.root, batch_id="x", max_ids=1,
+                log_root=self.logs, report_root=self.reports, on_progress="nope",
+            )
+        self.opener.open.assert_not_called()
+
+
+class VerificationByteTests(CorpusVerificationTests):
+    def test_projection_appears_in_the_report(self):
+        self.crawl()
+        report = live_smoke.verify_corpus(self.root, [entry(pair) for pair in PAIRS])
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertTrue(all(paper["bytes"] > 0 for paper in report["papers"]))
+        rendered = live_smoke.render_verify(report)
+        self.assertIn("Projected for 20,000 papers", rendered)
+        self.assertIn("is .tex/.bib", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

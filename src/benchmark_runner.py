@@ -502,14 +502,20 @@ def run_benchmark(
     pairs, corpus_root, *, batch_id, max_ids, log_root, report_root,
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
-    disk_interval=30.0, disk_roots=None, s2_config=None,
+    disk_interval=30.0, disk_roots=None, s2_config=None, on_progress=None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
     Reports are isolated in a newly reserved experiment directory. Exceptions
     produce a failed execution report then re-raise the original exception.
     Historical attempts have logs only, not retroactively measured RAM/time.
+
+    on_progress is forwarded to Batch, so an interrupted measured invocation
+    keeps both its metrics report and its interrupted attempt record. The
+    original exception is still re-raised after report.json is written.
     """
+    if on_progress is not None and not callable(on_progress):
+        raise BenchmarkError("on_progress must be callable or None")
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
     definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config)
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
@@ -554,6 +560,7 @@ def run_benchmark(
                 pairs, corpus, batch_id=batch_id, max_ids=max_ids, log_root=logs,
                 resume=resume, versions=versions, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
+                on_progress=on_progress,
                 **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:

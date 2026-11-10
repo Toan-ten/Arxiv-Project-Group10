@@ -44,6 +44,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.batch import BatchError, pilot_pairs, run_batch
+from src.benchmark_runner import run_benchmark
 from src.id_ranges import arxiv_id_to_folder_key, load_config
 from src.pilots import PilotEntry, build_smoke_set
 from src.storage import CorpusStorage, StorageError
@@ -65,12 +66,16 @@ VOLATILE_JSON_KEYS = frozenset({"updated_at", "run_id"})
 # --------------------------------------------------------------------------- paths
 
 
-def default_roots(corpus_root: str | None, log_root: str | None) -> tuple[Path, Path]:
-    """Resolve corpus/log roots; Colab's mounted Drive wins when it exists."""
-    if corpus_root and log_root:
-        return Path(corpus_root), Path(log_root)
+def default_roots(
+    corpus_root: str | None, log_root: str | None, report_root: str | None = None
+) -> tuple[Path, Path, Path]:
+    """Resolve corpus/log/report roots; Colab's mounted Drive wins when present."""
     base = COLAB_CORPUS if COLAB_CORPUS.parent.is_dir() else ROOT / "data/pilot-10-smoke"
-    return Path(corpus_root or base / "corpus"), Path(log_root or base / "logs")
+    return (
+        Path(corpus_root or base / "corpus"),
+        Path(log_root or base / "logs"),
+        Path(report_root or base / "reports"),
+    )
 
 
 def _now() -> str:
@@ -238,10 +243,10 @@ def _s2_config(args) -> dict | None:
     }
 
 
-def _paper_lines(result: dict) -> list[str]:
-    """Render the attempt rows returned by Batch (results are nested per row)."""
+def _attempt_lines(attempt: dict) -> list[str]:
+    """Render paper rows from a persisted attempt log (Batch and Benchmark alike)."""
     lines = []
-    for index, row in enumerate(result.get("papers", []), start=1):
+    for index, row in enumerate(attempt.get("papers", []), start=1):
         paper = row.get("result") or {}
         source = paper.get("source") or {}
         actions = ", ".join(f"{name}={record['action']}" for name, record in source.items())
@@ -254,15 +259,31 @@ def _paper_lines(result: dict) -> list[str]:
     return lines
 
 
+def _latest_attempt(log_root: Path, batch_id: str) -> dict | None:
+    """Read the newest attempt log; it is the ground truth for either runner."""
+    attempts = []
+    for path in (Path(log_root) / batch_id / "attempts").glob("*.json"):
+        try:
+            attempts.append(_read_json(path))
+        except (OSError, ValueError):
+            continue
+    if not attempts:
+        return None
+    return max(attempts, key=lambda value: value.get("attempt_number") or 0)
+
+
 def execute(args, *, resume: bool) -> int:
     """Run or resume the smoke batch, then persist an evidence record."""
     entries = load_pilot(args.pilot)
-    corpus_root, log_root = default_roots(args.corpus_root, args.log_root)
+    corpus_root, log_root, report_root = default_roots(
+        args.corpus_root, args.log_root, args.report_root
+    )
     problems = pilot_problems(entries)
     if problems and not resume:
         print("WARNING: " + "; ".join(problems), file=sys.stderr)
 
     watchdog = SimulatedInterrupt(args.interrupt_after, args.interrupt_at_start)
+    observer = watchdog if watchdog.active else None
     evidence = dict(
         mode="resume" if resume else "smoke",
         batch_id=args.batch_id,
@@ -271,26 +292,52 @@ def execute(args, *, resume: bool) -> int:
         max_ids=args.max_ids,
         versions=None if args.versions is None else list(args.versions),
         s2_enabled=bool(args.s2),
+        benchmark_enabled=bool(args.benchmark),
         interrupt=dict(after=args.interrupt_after, at_start=args.interrupt_at_start),
         corpus_root=str(corpus_root),
         log_root=str(log_root),
+        report_root=str(report_root) if args.benchmark else None,
         started_at=_now(),
     )
-    status, detail = "unknown", None
+    status, detail, report = "unknown", None, None
     try:
-        result = run_batch(
-            pilot_pairs(entries),
-            corpus_root,
-            batch_id=args.batch_id,
-            max_ids=args.max_ids,
-            log_root=log_root,
-            resume=resume,
-            versions=args.versions,
-            timeout=args.timeout,
-            max_attempts=args.max_attempts,
-            s2_config=_s2_config(args),
-            on_progress=watchdog if watchdog.active else None,
-        )
+        if args.benchmark:
+            report = run_benchmark(
+                pilot_pairs(entries),
+                corpus_root,
+                batch_id=args.batch_id,
+                max_ids=args.max_ids,
+                log_root=log_root,
+                report_root=report_root,
+                experiment_id=args.experiment_id,
+                resume=resume,
+                versions=args.versions,
+                timeout=args.timeout,
+                max_attempts=args.max_attempts,
+                sample_interval=args.sample_interval,
+                disk_interval=args.disk_interval,
+                s2_config=_s2_config(args),
+                on_progress=observer,
+            )
+        else:
+            result = run_batch(
+                pilot_pairs(entries),
+                corpus_root,
+                batch_id=args.batch_id,
+                max_ids=args.max_ids,
+                log_root=log_root,
+                resume=resume,
+                versions=args.versions,
+                timeout=args.timeout,
+                max_attempts=args.max_attempts,
+                s2_config=_s2_config(args),
+                on_progress=observer,
+            )
+            report = dict(
+                batch_status=result["status"],
+                stop_reason=result.get("stop_reason"),
+                experiment_id=None,
+            )
     except KeyboardInterrupt as exc:
         status, detail = "interrupted", str(exc)
         print(f"\nInterrupted: {exc}")
@@ -298,26 +345,52 @@ def execute(args, *, resume: bool) -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     else:
-        status = result["status"]
-        detail = result.get("stop_reason")
-        print(f"\nStatus: {status}"
-              + (f" ({detail})" if detail else ""))
-        for line in _paper_lines(result):
-            print(line)
-        stats = result.get("stats") or {}
-        if stats:
-            print(f"Discovery: {stats.get('discovery_actions')} "
-                  f"Source: {stats.get('source_actions')} "
-                  f"Papers: {stats.get('paper_statuses')}")
+        status = report.get("batch_status") or "unknown"
+        detail = report.get("stop_reason")
+        print(f"\nStatus: {status}" + (f" ({detail})" if detail else ""))
+        latest = _latest_attempt(log_root, args.batch_id)
+        if latest:
+            for line in _attempt_lines(latest):
+                print(line)
+            stats = latest.get("stats") or {}
+            if stats:
+                print(f"Discovery: {stats.get('discovery_actions')} "
+                      f"Source: {stats.get('source_actions')} "
+                      f"Papers: {stats.get('paper_statuses')}")
+        if report.get("experiment_id"):
+            print(f"Experiment: {report['experiment_id']}")
+            for key in ("measurement_status", "execution_status", "batch_status"):
+                print(f"  {key}: {report.get(key)}")
+            resources = report.get("resource_metrics") or {}
+            detailed = resources.get("metrics_v2") or {}
+            wall = detailed.get("wall_seconds", resources.get("elapsed_seconds"))
+            if resources:
+                print(f"  wall_seconds: {wall} "
+                      f"peak_ram_mb: {resources.get('peak_ram_mb')} "
+                      f"disk_used_diff_mb: {resources.get('disk_used_diff_mb')}")
+            evidence["benchmark_report"] = dict(
+                experiment_id=report.get("experiment_id"),
+                measurement_status=report.get("measurement_status"),
+                execution_status=report.get("execution_status"),
+                batch_status=report.get("batch_status"),
+                wall_seconds=wall,
+                peak_ram_mb=resources.get("peak_ram_mb"),
+                average_ram_mb=resources.get("average_ram_mb"),
+                disk_corpus_size_mb=resources.get("disk_corpus_size_mb"),
+                ram_source=resources.get("ram_source"),
+                report_path=str(report_root / str(report.get("experiment_id")) / "report.json"),
+                resources_path=str(report_root / str(report.get("experiment_id")) / "resources.json"),
+            )
+
 
     # The attempt log is written by Batch; this record adds the operator view.
-    attempts = sorted((log_root / args.batch_id / "attempts").glob("*.json"))
+    attempt_paths = sorted((log_root / args.batch_id / "attempts").glob("*.json"))
     evidence.update(
         finished_at=_now(),
         status=status,
         detail=detail,
-        attempt_number=len(attempts) or None,
-        attempt_logs=[path.name for path in attempts],
+        attempt_number=len(attempt_paths) or None,
+        attempt_logs=[path.name for path in attempt_paths],
         corpus_snapshot=snapshot_corpus(corpus_root),
     )
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -330,6 +403,9 @@ def execute(args, *, resume: bool) -> int:
     if status == "interrupted":
         print("\nNext: python -B -m scripts.live_smoke resume   "
               "(skips the crawled papers, continues from the checkpoint)")
+        if args.benchmark:
+            print("      keep --benchmark on the resume: the reports are a separate "
+                  "experiment per invocation")
         return 0
     print("\nNext: python -B -m scripts.live_smoke verify && "
           "python -B -m scripts.live_smoke proof")
@@ -481,15 +557,43 @@ def verify_corpus(corpus_root: Path, entries: list[PilotEntry]) -> dict:
         report["warnings"].extend(warnings)
         paper["versions"] = versions
         paper["files"] = sum(item["files"] for item in versions)
+        paper["bytes"] = sum(path.stat().st_size for path in folder.rglob("*")
+                             if path.is_file() and not path.is_symlink())
+        paper["source_bytes"] = sum(
+            path.stat().st_size for path in folder.rglob("*")
+            if path.is_file() and path.suffix in KEPT_SUFFIXES
+        )
         report["papers"].append(paper)
 
     report["temp_files"] = sweep_temp(corpus_root)
     if report["temp_files"]:
-        report["problems"].extend(
-            f"leftover temp file {item['path']}" for item in report["temp_files"]
+        report["problems"].extend(            f"leftover temp file {item['path']}" for item in report["temp_files"]
         )
     report["ok"] = not report["problems"]
     return report
+
+
+def _projection(report: dict, papers: int = 20000) -> str | None:
+    """Extrapolate storage from the rolled papers, for the Drive quota check."""
+    measured = [paper for paper in report.get("papers", []) if paper.get("bytes")]
+    if not measured:
+        return None
+    total = sum(paper["bytes"] for paper in measured)
+    source = sum(paper.get("source_bytes") or 0 for paper in measured)
+    per_paper = total / len(measured)
+    return (
+        f"Measured on {len(measured)} paper(s): {_mb(total)}, of which "
+        f"{_mb(source)} is .tex/.bib. Projected for {papers:,} papers: "
+        f"{_gb(per_paper * papers)}"
+    )
+
+
+def _mb(value: float) -> str:
+    return f"{value / 1024 ** 2:.2f} MiB"
+
+
+def _gb(value: float) -> str:
+    return f"{value / 1024 ** 3:.2f} GiB"
 
 
 def render_verify(report: dict) -> str:
@@ -514,6 +618,10 @@ def render_verify(report: dict) -> str:
         lines.extend(f"- {item}" for item in items)
         lines.append("")
     lines.append(f"**Result: {'PASS' if report['ok'] else 'FAIL'}**")
+    projection = _projection(report)
+    if projection:
+        lines.append("")
+        lines.append(f"Storage: {projection}")
     return "\n".join(lines) + "\n"
 
 
@@ -776,6 +884,8 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--corpus-root", default=None,
                         help="Persistent corpus root (default: Colab Drive or data/)")
     parser.add_argument("--log-root", default=None, help="Batch log root")
+    parser.add_argument("--report-root", default=None,
+                        help="Benchmark report root (sibling of corpus/logs)")
     parser.add_argument("--max-ids", type=int, default=10,
                         help="Number of IDs from the pilot file (default: 10)")
     parser.add_argument("--versions", nargs="+", default=None,
@@ -785,6 +895,15 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
                         help="Keep at 1 for a smoke test")
     parser.add_argument("--s2", action="store_true",
                         help="Enable Semantic Scholar (needs SEMANTIC_SCHOLAR_API_KEY)")
+    parser.add_argument("--benchmark", action="store_true",
+                        help="Route through run_benchmark to record time/RAM/disk; "
+                             "the same interruption and resume path still applies")
+    parser.add_argument("--experiment-id", default=None,
+                        help="Benchmark experiment id (default: generated per invocation)")
+    parser.add_argument("--sample-interval", type=float, default=0.1,
+                        help="Resource sampling interval in seconds (benchmark only)")
+    parser.add_argument("--disk-interval", type=float, default=30.0,
+                        help="Disk sampling interval in seconds (benchmark only)")
     parser.add_argument("--s2-timeout", type=float, default=15.0)
     parser.add_argument("--s2-min-interval", type=float, default=2.0)
     parser.add_argument("--s2-reference-limit", type=int, default=100)
@@ -819,6 +938,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--pilot", default=str(DEFAULT_PILOT))
     verify.add_argument("--corpus-root", default=None)
     verify.add_argument("--log-root", default=None)
+    verify.add_argument("--report-root", default=None)
     verify.add_argument("--json-out", default=None)
 
     proof = commands.add_parser("proof", help="Resume evidence report")
@@ -826,6 +946,7 @@ def build_parser() -> argparse.ArgumentParser:
     proof.add_argument("--batch-id", default=DEFAULT_BATCH_ID)
     proof.add_argument("--corpus-root", default=None)
     proof.add_argument("--log-root", default=None)
+    proof.add_argument("--report-root", default=None)
     proof.add_argument("--json-out", default=None)
     proof.add_argument("--md-out", default=None)
     return parser
@@ -833,7 +954,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _corpus_command(args, runner) -> int:
     entries = load_pilot(args.pilot)
-    corpus_root, log_root = default_roots(args.corpus_root, args.log_root)
+    corpus_root, log_root, _report_root = default_roots(
+        args.corpus_root, args.log_root, None
+    )
     payload = runner(entries, corpus_root, log_root)
     if args.json_out:
         _write_json(Path(args.json_out), payload)
