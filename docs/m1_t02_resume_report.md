@@ -3,8 +3,13 @@
 **Thẻ:** `[KHOI_ANH - M1-T02]` · **Ngày chạy:** 10/11/2026 · **Môi trường:** Google Colab CPU-only,
 corpus trên Google Drive (`/content/drive/MyDrive/arxiv_corpus`).
 **Trình bày cho:** Nguyễn Văn Toàn (ký duyệt Full Crawl `[ALL - M1-T04]`).
-**Công cụ:** `scripts/live_smoke.py` trên nhánh `feat/m1-smoke-resume` (commit `7b24479`),
+**Công cụ:** `scripts/live_smoke.py` trên nhánh `feat/m1-smoke-resume` (commit `7412c25`),
 notebook `notebooks/colab_m1_runner.ipynb`.
+
+**Lượt chạy lại có đo lường (cùng ngày, `--benchmark`, corpus
+`/content/drive/MyDrive/arxiv_corpus_bench`)** xác nhận lại toàn bộ chuỗi
+interrupt → resume → verify → proof **kèm metrics**: `PROOF_OK: True`, `VERIFY_OK: True`,
+wall time 50,7 s + 47,8 s, đỉnh RAM 30,4 MB (xem mục 4.2 và 6).
 
 ## 1. Kết quả tổng hợp
 
@@ -15,6 +20,7 @@ notebook `notebooks/colab_m1_runner.ipynb`.
 | Attempt 1 | `interrupted`, 5/10 paper hoàn tất |
 | Attempt 2 | `finished`, 10/10 paper |
 | Request tiết kiệm khi resume | **12 request** (5 discovery + 7 source) không gửi lại |
+| Số đo tài nguyên | wall 50,7 s + 47,8 s; đỉnh RAM 30,4 MB; 23 request cho 10 paper |
 
 Corpus sau hai lượt: 10 paper, tổng **13 version** đã lưu, tất cả ID đều resolve được và đều
 có source (không có `not_found`, không có `no_tex_source`).
@@ -78,31 +84,57 @@ chưa được kiểm chứng**. Đề nghị chọn một trong hai:
 2. Chạy thêm một lượt `--s2` với batch id mới (`m1-smoke-pilot-10-s2`) để xác nhận cả metadata
    và references trên cùng 10 bài.
 
-### 4.2. Full Crawl 20.000 ID không thể xong trong một phiên Colab
+### 4.2. Full Crawl 20.000 ID cần ~55 giờ, không thể xong trong một phiên Colab
 
-Đo trên pilot: 23 request cho 10 paper (2,3 request/paper), client đặt pacing **3 giây/request**
-(`src/arxiv_client.py`). Ngoại suy cho 20.000 ID:
+Số đo thật (10/11/2026, `--benchmark`, Colab CPU-only):
+
+| Lượt | Request | Paper | Wall time | Đỉnh RAM |
+| --- | --- | --- | --- | --- |
+| 1 (interrupted) | 12 | 5 | 50,7 s | 30,4 MB |
+| 2 (resume) | 11 | 5 | 47,8 s | 30,2 MB |
+| **Tổng** | **23** | **10** | **98,5 s** | **30,4 MB** |
+
+Chia ra: **4,28 s/request**, **9,85 s/paper**, 2,3 request/paper. Pacing 3 s/request của client
+chiếm 69 s trên 98,5 s; phần còn lại ~15 s là overhead khởi động mỗi invocation.
+Ngoại suy tuyến tính cho 20.000 ID:
 
 | | Giá trị |
 | --- | --- |
 | Request ước tính | ~46.000 |
-| Thời gian chỉ riêng pacing | **~38 giờ** |
-| Số phiên Colab (giới hạn 12 giờ/phiên) | **~3,2 phiên** |
+| Sàn pacing (3 s/request) | 38,3 giờ |
+| **Theo tốc độ đo được (4,28 s/request)** | **~54,7 giờ** |
+| Số phiên Colab 12 giờ | **~4,6 → cần 5-6 phiên** |
 
-Hệ quả: Full Crawl bắt buộc phải **chia nhiều phiên và dựa vào checkpoint/resume** — đúng cơ
-chế đã kiểm chứng ở đây. Nhưng cần chốt trước:
+Hai kết luận dùng được ngay:
 
-- chiến lược chia phiên (ví dụ mỗi phiên một `batch_id` theo dải ID, hoặc một batch duy nhất
-  `resume=True` nhiều lần);
+- **Chi phí của một lần ngắt chỉ là overhead khởi động một invocation (~15 s)**, không phải
+  crawl lại 5 bài (12 request). Resume gần như miễn phí về thời gian.
+- **Full Crawl bắt buộc chia phiên và dựa vào checkpoint/resume** — đúng cơ chế đã kiểm chứng
+  ở đây. Một phiên Colab không đủ cho 55 giờ.
+
+Cần chốt trước khi chạy:
+
+- chiến lược chia phiên (mỗi phiên một `batch_id` theo dải ID, hay một batch duy nhất
+  `resume=True` nhiều lần). **Lưu ý:** mỗi lần resume duyệt lại toàn bộ selection để kiểm tra
+  checkpoint/checksum, nên batch càng lớn thì overhead kiểm tra đầu phiên càng tăng; chia theo
+  dải ID giữ chi phí này nhỏ và cố định;
 - có giảm pacing hay không (giảm xuống 1 giây sẽ rủi ro 429/403 và vi phạm hướng dẫn của arXiv);
 - `--versions` cho Full Crawl: lấy tất cả version (như pilot, trung bình 1,3 version/paper) hay
-  chỉ `v1` để giảm ~30% request.
+  chỉ `v1` để giảm khoảng 30% request → ~38 giờ.
 
-### 4.3. Chưa có số liệu benchmark
+RAM đỉnh 30 MB cho thấy bộ nhớ không phải ràng buộc ở quy mô này; ràng buộc thật là thời gian
+và (có thể) dung lượng Drive.
 
-Wall time, RAM đỉnh và dung lượng đĩa chưa được thu trong lượt này: phần đó thuộc
-`[ANH - M1-T03]` và cần được nối vào cùng invocation Colab trước khi `[ANH - M1-T06]` tổng hợp
-chương M1. Pilot hiện chưa cung cấp `benchmark_summary.json` / `http_metrics.json`.
+### 4.3. Có số liệu benchmark, nhưng chưa đối chiếu được với tên tệp mà Toàn/Anh chờ
+
+Lượt chạy này **đã** ghi metrics: mỗi invocation tạo một experiment riêng với
+`report.json` + `resources.json` (schema `metrics_v2`, RAM lấy mẫu bằng `psutil`, xem
+mục 6).
+
+Tuy vậy thẻ `[ANH - M1-T03]` và `[ANH - M1-T06]` nhắc tới `benchmark_summary.json` và
+`http_metrics.json` — hiện **chưa có** tệp với đúng hai tên đó. Cần Anh chốt: dùng
+`report.json`/`resources.json` của `benchmark_runner` hay cần thêm bước export sang hai tên kia.
+Nếu cần, nên làm ở M1-T03 chứ không nhân bản logic đo.
 
 ## 5. Phạm vi bằng chứng
 
@@ -113,7 +145,33 @@ Bằng chứng này là **lượt chạy thật** trên arXiv (không phải fak
 - xử lý 429/403 thực tế của S2 (S2 chưa bật);
 - tính đúng đắn của metadata/references ở mức publication `complete`;
 - độ bền khi Colab kill process **giữa** một paper (lượt này ngắt ở ranh giới paper; trường hợp
-  này có `--interrupt-at-start N` và đã có unit test offline, chưa chạy thật).
+  này có `--interrupt-at-start N` và đã có unit test offline, chưa chạy thật);
+- dung lượng corpus ở quy mô 20.000 ID (mới có ngoại suy từ pilot).
 
 Đề nghị Toàn xác nhận: (a) chấp nhận S2 tách riêng hay yêu cầu chạy thêm lượt `--s2`;
 (b) kế hoạch chia phiên cho Full Crawl theo mục 4.2.
+
+## 6. Bàn giao cho M1-T03 / M1-T06
+
+Mỗi invocation tạo một experiment riêng (không ghi đè):
+
+```text
+<report-root>/<experiment-id>/
+  intent.json      định nghĩa lượt đo, môi trường, cấu hình sampling
+  report.json      execution_status, batch_status, data_coverage, benchmark_metrics
+  resources.json   wall time, RAM đầu/cuối/đỉnh/trung bình, dung lượng corpus
+```
+
+Hai experiment của lượt chạy này: `66b1d616…` (interrupted, 50,7 s) và `90ae2cf6…`
+(finished, 47,8 s), nằm trong `logs/m1-smoke-pilot-10/evidence/` và
+`reports/<experiment-id>/` trên Drive.
+
+Lưu ý khi tổng hợp:
+
+- **Không cộng wall time hai experiment thành một con số “thời gian crawl”** — chúng là hai
+  invocation độc lập, mỗi lượt có overhead khởi động riêng.
+- `batch_status` phản ánh trạng thái Batch; `execution_status="raised"` ở lượt bị ngắt là
+  bình thường, kèm `resource_metrics.status="failed"` cho callback bị ngắt.
+- `http_requests`/`http_errors` hiện là `null` (`http_metrics_status="not_collected"`): số
+  request trong biên bản này được **đếm từ attempt log**, không phải counter của client.
+  Muốn có HTTP metrics thật cần bổ sung ở tầng client, không phải suy từ log.
