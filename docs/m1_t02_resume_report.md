@@ -44,6 +44,10 @@ tạo thư mục version, record vẫn được lưu. Đây là trạng thái â
 
 ## 3. Diễn biến hai lượt
 
+> Cột `source` dưới đây là action của Pipeline. `downloaded` bao gồm **cả** `success` và
+> `no_tex_source`, nên trạng thái thật của từng version phải đọc từ `manifest.json` hoặc
+> `verify` (xem mục 1 và mục 5).
+
 **Attempt 1 — ngắt sau bài 5**
 
 | # | arXiv ID | discovery | source |
