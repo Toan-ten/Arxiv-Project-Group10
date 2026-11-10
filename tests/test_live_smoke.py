@@ -331,6 +331,49 @@ class ResumeProofTests(unittest.TestCase):
         self.assertIn("no interrupted attempt", output)
         self.assertIn("Result: FAIL", output)
 
+    def test_export_writes_a_git_friendly_bundle(self):
+        self.interrupt_after_two()
+        self.resume_third()
+        out = Path(self.temp.name) / "bundle"
+        code, output = self.cli(
+            "export", "--pilot", self.pilot, "--batch-id", self.batch_id,
+            "--corpus-root", str(self.root), "--log-root", str(self.logs),
+            "--report-root", str(self.logs), "--out", str(out),
+        )
+        self.assertEqual(code, 0, output)
+        names = sorted(path.name for path in out.iterdir())
+        self.assertEqual(names, ["README.md", "attempts.json", "benchmark-summary.json",
+                                 "corpus-verification.json", "resume-proof.md"])
+
+        index = (out / "README.md").read_text(encoding="utf-8")
+        self.assertIn("| `proof` | PASS |", index)
+        self.assertIn("| `verify` | PASS |", index)
+        self.assertIn("not a single", index)
+
+        summary = json.loads((out / "benchmark-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(summary["attempts"]), 2)
+        # 3 papers x (discovery + source) = 6 requests, none of them repeated by
+        # the resume: cached discovery and skipped versions must not be counted.
+        self.assertEqual(summary["totals"]["requests"], 6)
+        self.assertEqual(summary["totals"]["papers"], 3)
+        self.assertEqual(summary["totals"]["version_status"], {"success": 3})
+
+        attempts = json.loads((out / "attempts.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["status"] for item in attempts["attempts"]],
+                         ["interrupted", "finished"])
+        self.assertEqual(attempts["attempts"][0]["requests"], 4)
+        self.assertEqual(attempts["attempts"][1]["requests"], 2)
+
+    def test_export_without_a_batch_still_writes_a_failing_bundle(self):
+        out = Path(self.temp.name) / "empty"
+        code, output = self.cli(
+            "export", "--pilot", self.pilot, "--batch-id", "nope",
+            "--corpus-root", str(self.root), "--log-root", str(self.logs),
+            "--report-root", str(self.logs), "--out", str(out),
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("Result: FAIL", (out / "resume-proof.md").read_text(encoding="utf-8"))
+
     def test_proof_without_a_batch_directory_fails_cleanly(self):
         report = live_smoke.build_proof(self.logs / "missing", self.root, self.entries)
         self.assertFalse(report["ok"])

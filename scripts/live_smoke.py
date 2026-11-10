@@ -34,6 +34,7 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
 import sys
@@ -634,6 +635,205 @@ def render_verify(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+# --------------------------------------------------------------------------- export
+
+
+def _attempt_summary(attempt: dict) -> dict:
+    """Compact one attempt, counting only the requests it actually issued.
+
+    Cached discovery and skipped versions carry the attempts of the run that
+    first collected them, so counting every record would inflate the total.
+    """
+    papers = []
+    requests = 0
+    for row in attempt.get("papers", []):
+        result = row.get("result") or {}
+        discovery = result.get("discovery") or {}
+        source = result.get("source") or {}
+        if discovery.get("action") == "queried":
+            requests += int(discovery.get("attempts") or 0)
+        versions = {}
+        for name, record in source.items():
+            if record.get("action") in {"downloaded", "failed"}:
+                requests += int(record.get("attempts") or 0)
+            versions[name] = dict(
+                action=record.get("action"), status=record.get("status"),
+                http_status=record.get("http_status"), attempts=record.get("attempts"),
+            )
+        papers.append(dict(
+            index=row.get("index"), arxiv_id=row.get("arxiv_id"), mssv=row.get("mssv"),
+            state=row.get("state"), paper_status=result.get("paper_status"),
+            discovery=dict(
+                action=discovery.get("action"), status=discovery.get("status"),
+                http_status=discovery.get("http_status"), attempts=discovery.get("attempts"),
+            ),
+            versions=versions,
+        ))
+    return dict(
+        attempt_number=attempt.get("attempt_number"),
+        attempt_id=attempt.get("attempt_id"),
+        run_id=attempt.get("run_id"),
+        status=attempt.get("status"),
+        started_at=attempt.get("started_at"),
+        ended_at=attempt.get("ended_at"),
+        wall_seconds=attempt.get("wall_seconds"),
+        previous_incomplete_attempts=attempt.get("previous_incomplete_attempts"),
+        processed=sum(1 for row in attempt.get("papers", [])
+                      if row.get("state") == "processed"),
+        selected=len(attempt.get("papers", [])),
+        requests=requests,
+        papers=papers,
+    )
+
+
+def _experiment_summary(report_root: Path) -> list[dict]:
+    experiments = []
+    root = Path(report_root)
+    if not root.is_dir():
+        return experiments
+    for directory in sorted(path for path in root.iterdir() if path.is_dir()):
+        try:
+            report = _read_json(directory / "report.json")
+        except (OSError, ValueError):
+            continue
+        resources = report.get("resource_metrics") or {}
+        detailed = resources.get("metrics_v2") or {}
+        experiments.append(dict(
+            experiment_id=report.get("experiment_id") or directory.name,
+            batch_status=report.get("batch_status"),
+            execution_status=report.get("execution_status"),
+            measurement_status=report.get("measurement_status"),
+            wall_seconds=detailed.get("wall_seconds", resources.get("elapsed_seconds")),
+            peak_ram_mb=resources.get("peak_ram_mb"),
+            average_ram_mb=resources.get("average_ram_mb"),
+            ram_source=resources.get("ram_source"),
+            disk_corpus_size_mb=resources.get("disk_corpus_size_mb"),
+            data_coverage=(report.get("data_coverage") or {}).get("status"),
+        ))
+    return experiments
+
+
+def _version_mix(attempts: list[dict]) -> dict:
+    """Final status per (paper, version), read from the newest attempt that saw it."""
+    final: dict[tuple[str, str], str] = {}
+    for attempt in attempts:
+        for paper in attempt.get("papers", []):
+            source = (paper.get("result") or {}).get("source") or {}
+            for name, record in source.items():
+                if record.get("status"):
+                    final[(paper["arxiv_id"], name)] = record["status"]
+    mix: dict[str, int] = {}
+    for status in final.values():
+        mix[status] = mix.get(status, 0) + 1
+    return dict(sorted(mix.items()))
+
+
+def build_export(entries, corpus_root: Path, log_root: Path, report_root: Path,
+                 batch_id: str, repo_root: Path | None = None) -> dict:
+    """Collect the acceptance evidence into one small, reviewable payload."""
+    batch_dir = Path(log_root) / batch_id
+    attempts = _attempt_logs(batch_dir)
+    summaries = [_attempt_summary(item) for item in attempts]
+    verified = verify_corpus(corpus_root, entries)
+    proof = build_proof(batch_dir, corpus_root, entries)
+    experiments = _experiment_summary(report_root)
+    mixed = _version_mix(attempts)
+    return dict(
+        generated_at=_now(),
+        batch_id=batch_id,
+        repo=_repo_state(repo_root),
+        environment=dict(python=sys.version.split()[0], platform=platform.platform()),
+        selection=[[item.mssv, item.arxiv_id] for item in entries],
+        attempts=summaries,
+        experiments=experiments,
+        totals=dict(
+            papers=len(entries),
+            versions=sum(mixed.values()),
+            version_status=mixed,
+            requests=sum(item["requests"] for item in summaries),
+            wall_seconds=sum(item["wall_seconds"] or 0.0 for item in experiments),
+        ),
+        proof_ok=proof.get("ok"),
+        proof=proof,
+        verification=verified,
+    )
+
+
+def _repo_state(repo_root: Path | None) -> dict | None:
+    if repo_root is None:
+        return None
+    try:
+        import subprocess
+        commit = subprocess.run(
+            ["git", "-C", str(repo_root), "log", "-1", "--oneline"],
+            text=True, capture_output=True, timeout=10,
+        ).stdout.strip()
+        branch = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--abbrev-ref", "HEAD"],
+            text=True, capture_output=True, timeout=10,
+        ).stdout.strip()
+        return dict(commit=commit or None, branch=branch or None)
+    except (OSError, ValueError):
+        return None
+
+
+def render_export_index(payload: dict) -> str:
+    totals = payload["totals"]
+    lines = [
+        "# M1 evidence bundle",
+        "",
+        f"Batch: `{payload['batch_id']}`  ",
+        f"Generated: {payload['generated_at']}  ",
+        f"Repo: `{(payload.get('repo') or {}).get('commit')}` "
+        f"(`{(payload.get('repo') or {}).get('branch')}`)  ",
+        f"Environment: {payload['environment']['python']} "
+        f"on {payload['environment']['platform']}",
+        "",
+        "| | |",
+        "| --- | --- |",
+        f"| Papers | {totals['papers']} |",
+        f"| Versions | {totals['versions']} |",
+        f"| Version status | {totals['version_status']} |",
+        f"| Requests issued | {totals['requests']} |",
+        f"| Measured wall time | {totals['wall_seconds']:.1f} s across "
+        f"{len(payload['experiments'])} invocation(s) |",
+        f"| `proof` | {'PASS' if payload['proof_ok'] else 'FAIL'} |",
+        f"| `verify` | {'PASS' if payload['verification']['ok'] else 'FAIL'} |",
+        "",
+        "Wall time is the sum over independent invocations. It is not a single"
+        "crawl duration and must not be reported as one.",
+        "",
+        "Files: `resume-proof.md`, `corpus-verification.json`, `benchmark-summary.json`,",
+        "`attempts.json`.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def export_bundle(batch_id, corpus_root, log_root, report_root, out_dir, entries,
+                  repo_root=None) -> list[Path]:
+    """Write the acceptance evidence as small files that can live in git."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    payload = build_export(entries, corpus_root, log_root, report_root, batch_id, repo_root)
+    written = []
+    written.append(out / "resume-proof.md")
+    written[-1].write_text(render_proof(payload["proof"]), encoding="utf-8")
+    written.append(_write_json(out / "corpus-verification.json", payload["verification"]))
+    written.append(_write_json(out / "benchmark-summary.json", dict(
+        generated_at=payload["generated_at"], batch_id=batch_id,
+        repo=payload["repo"], environment=payload["environment"],
+        attempts=[{k: v for k, v in item.items() if k != "papers"}
+                  for item in payload["attempts"]],
+        experiments=payload["experiments"], totals=payload["totals"],
+    )))
+    written.append(_write_json(out / "attempts.json", dict(
+        batch_id=batch_id, attempts=payload["attempts"],
+    )))
+    written.append(out / "README.md")
+    written[-1].write_text(render_export_index(payload), encoding="utf-8")
+    return written
+
+
 # --------------------------------------------------------------------------- proof
 
 
@@ -958,6 +1158,17 @@ def build_parser() -> argparse.ArgumentParser:
     proof.add_argument("--report-root", default=None)
     proof.add_argument("--json-out", default=None)
     proof.add_argument("--md-out", default=None)
+
+    export = commands.add_parser(
+        "export", help="Write the evidence bundle into the repo (git-friendly)"
+    )
+    export.add_argument("--pilot", default=str(DEFAULT_PILOT))
+    export.add_argument("--batch-id", default=DEFAULT_BATCH_ID)
+    export.add_argument("--corpus-root", default=None)
+    export.add_argument("--log-root", default=None)
+    export.add_argument("--report-root", default=None)
+    export.add_argument("--out", default=str(ROOT / "reports" / "m1-t02"),
+                         help="Bundle directory inside the repository")
     return parser
 
 
@@ -987,6 +1198,28 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command in {"smoke", "resume"}:
         return args.handler(args)
+    if args.command == "export":
+        entries = load_pilot(args.pilot)
+        corpus_root, log_root, report_root = default_roots(
+            args.corpus_root, args.log_root, args.report_root
+        )
+        try:
+            written = export_bundle(
+                args.batch_id, corpus_root, log_root, report_root, args.out, entries,
+                repo_root=ROOT,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"ERROR: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+        payload = build_export(entries, corpus_root, log_root, report_root,
+                               args.batch_id, ROOT)
+        print(render_export_index(payload))
+        for path in written:
+            print("wrote:", path)
+        print("\nCommit it with:")
+        print(f"  git add {Path(args.out).relative_to(ROOT) if Path(args.out).is_relative_to(ROOT) else args.out}")
+        print("  git commit -m \"docs(m1): add M1 evidence bundle\" && git push")
+        return 0 if payload["proof_ok"] and payload["verification"]["ok"] else 1
     if args.command == "verify":
         def runner(entries, corpus_root, _log_root):
             report = verify_corpus(corpus_root, entries)

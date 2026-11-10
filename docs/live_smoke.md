@@ -9,7 +9,7 @@ Ba thành phần:
 | --- | --- |
 | `scripts/live_smoke.py` | CLI `smoke` / `resume` / `verify` / `proof` |
 | `notebooks/colab_m1_runner.ipynb` | Notebook Colab gắn Drive và chạy bốn bước trên |
-| `tests/test_live_smoke.py` | 35 unit tests offline, fake HTTP, corpus trong TEMP |
+| `tests/test_live_smoke.py` | 37 unit tests offline, fake HTTP, corpus trong TEMP |
 
 Module này **không** thay đổi contract v2, không gọi mạng khi import và không tự chạy
 pilot. Nó chỉ orchestration quanh `src.batch`, `src.pipeline` và `src.storage`.
@@ -192,8 +192,34 @@ và bước kiểm tra `v2/` không áp dụng.
 
 ## Bằng chứng nộp thẻ
 
+### `export`: bằng chứng nằm trong git, không phải trong chat
+
+```powershell
+python -B -m scripts.live_smoke export --out reports/m1-t02
+```
+
+Ghi ra `reports/m1-t02/` năm tệp nhỏ (vài KB), commit được vào repo:
+
+| Tệp | Nội dung |
+| --- | --- |
+| `README.md` | Bảng tổng hợp: paper/version, số request thực gửi, wall time, PASS/FAIL |
+| `resume-proof.md` | Báo cáo `proof` đầy đủ |
+| `corpus-verification.json` | Báo cáo `verify` (bản máy đọc) |
+| `benchmark-summary.json` | Từng attempt + từng experiment: wall, RAM, coverage |
+| `attempts.json` | Chi tiết từng paper/version trong từng attempt |
+
+Số request trong `benchmark-summary.json` chỉ đếm request **thực gửi** trong attempt đó
+(`discovery=queried`, version `downloaded`/`failed`); discovery `cached` và version `skipped`
+không được cộng, nên resume không làm phống số liệu. Lệnh trả exit code 1 nếu `proof` hoặc
+`verify` FAIL, nên dùng được trong CI.
+
+Corpus không bao giờ được commit (đã gitignore); chỉ các báo cáo dẫn xuất này.
+
+### Bằng chứng gốc trên Drive
+
 | Bằng chứng | Đường dẫn |
 | --- | --- |
+| Bundle trong git | `reports/m1-t02/` (xem mục trên) |
 | Resume proof PASS/FAIL | `logs/<batch-id>/evidence/resume-proof.md` |
 | Kiểm tra corpus | `logs/<batch-id>/evidence/corpus-verification.json` |
 | Attempt bị ngắt | `logs/<batch-id>/attempts/<attempt-id>.json` |
