@@ -110,12 +110,14 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("thử chuyển đổi cục bộ", self.text)
 
     def test_runtime_pins_match_implementation_commit(self):
-        expected = "ea0d23a1799953686c64dad7ea884e1cd8db0082"
+        expected = "0a052527fdfe3c1083bca8780b319bfce0111737"
         setup = self.code[0]
         self.assertIn(f'M1_RUNTIME_COMMIT = "{expected}"', setup)
         self.assertEqual(len(expected), 40)
         import subprocess
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
+                       cwd=self.root, check=True, capture_output=True)
+        subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
                        cwd=self.root, check=True, capture_output=True)
         for module in ("session_evidence.py", "kaggle_candidates.py", "m1_workflow.py", "bbl_handling.py"):
             self.assertTrue((self.root / "src" / module).is_file())
