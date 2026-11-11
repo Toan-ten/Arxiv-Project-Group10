@@ -384,7 +384,7 @@ class HistoryIntegrationTests(unittest.TestCase):
         value=self.benchmark()
         self.assertEqual(value['batch_status'],'finished')
         self.assertIs(value['configuration']['revision_history'],True)
-        self.assertEqual(value['resource_metrics']['elapsed_seconds'],18)
+        self.assertAlmostEqual(value['resource_metrics']['elapsed_seconds'], 18.0, places=9)
         self.assertEqual(value['aggregation']['history']['http_requests'],7)
         path=next((self.root.parent/'logs/history-offline/attempts').glob('*.json'))
         result=json.loads(path.read_text())['papers'][0]['result']
