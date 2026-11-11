@@ -18,6 +18,9 @@ from typing import Iterable
 from src.kaggle_discovery import _parse_iso_date
 from src.storage import _atomic_json
 
+SNAPSHOT_DOWNLOAD_TIMEOUT_SECONDS = 3600
+SNAPSHOT_PROGRESS_INTERVAL_SECONDS = 30
+
 
 def file_sha256(path: str | Path) -> str:
     """Return SHA-256 of a file using bounded memory."""
@@ -146,10 +149,10 @@ def apply_verified_history(store, mssv: str, arxiv_id: str, candidate: dict,
 
 
 def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict:
-    """Reuse a verified snapshot or download it atomically with the Kaggle CLI.
+    """Tái sử dụng snapshot hợp lệ hoặc tải tệp tạm bằng Kaggle CLI.
 
-    A failed or unverifiable cache is never overwritten. Credentials stay in
-    the child environment and errors contain no command output or secrets.
+    Hiển thị trạng thái tải định kỳ mà không in thông tin xác thực. Snapshot
+    hiện có không bị ghi đè nếu bản tải mới lỗi hoặc chưa được xác minh.
     """
     import shutil
     import subprocess
@@ -166,13 +169,16 @@ def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict
             saved = json.loads(manifest.read_text(encoding='utf-8'))
             if not path.is_file() or saved['sha256'] != file_sha256(path):
                 raise ValueError('snapshot checksum mismatch')
+            print('Kaggle: snapshot cache hợp lệ; dùng lại bản đã xác minh.', flush=True)
             return dict(status='ready', source='cached', snapshot_path=str(path),
                         snapshot_sha256=saved['sha256'], snapshot_time=saved.get('snapshot_time', 'unknown'),
                         validation_seconds=time.monotonic()-started, download_seconds=0.0)
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            print('Kaggle: snapshot cache không hợp lệ; giữ nguyên tệp và chuyển sang arXiv.', flush=True)
             return dict(status='fallback', reason='invalid_existing_cache', download_seconds=None,
                         validation_seconds=time.monotonic()-started)
     if not token or not token.strip():
+        print('Kaggle: chưa có token; chuyển sang xác minh trực tiếp bằng arXiv.', flush=True)
         return dict(status='fallback', reason='missing_kaggle_token', download_seconds=None,
                     validation_seconds=None)
     try:
@@ -181,15 +187,50 @@ def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict
             env = os.environ.copy()
             env['KAGGLE_API_TOKEN'] = token.strip()
             started = time.monotonic()
-            proc = subprocess.run([sys.executable, '-c', 'from kaggle.cli import main; main()', 'datasets', 'download',
-                                   '-d', 'Cornell-University/arxiv', '-f', path.name,
-                                   '-p', str(temporary)], env=env, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, check=False, timeout=3600)
+            command = [sys.executable, '-c', 'from kaggle.cli import main; main()', 'datasets', 'download',
+                       '-d', 'Cornell-University/arxiv', '-f', path.name, '-p', str(temporary)]
+            print('Kaggle: bắt đầu tải snapshot arXiv; giới hạn thời gian là 60 phút.', flush=True)
+            proc = subprocess.Popen(command, env=env, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+            deadline = started + SNAPSHOT_DOWNLOAD_TIMEOUT_SECONDS
+            try:
+                while True:
+                    returncode = proc.poll()
+                    if returncode is not None:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        proc.kill()
+                        proc.wait()
+                        raise subprocess.TimeoutExpired(command, SNAPSHOT_DOWNLOAD_TIMEOUT_SECONDS)
+                    try:
+                        proc.wait(timeout=min(SNAPSHOT_PROGRESS_INTERVAL_SECONDS, remaining))
+                    except subprocess.TimeoutExpired:
+                        elapsed = time.monotonic() - started
+                        print(f'Kaggle: vẫn đang tải snapshot; đã trôi qua {elapsed:.0f} giây.', flush=True)
+            except KeyboardInterrupt:
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            proc.kill()
+                        except OSError:
+                            pass
+                        proc.wait()
+                print('Kaggle: đã dừng tiến trình tải; tệp tạm sẽ được dọn.', flush=True)
+                raise
             download_seconds = time.monotonic()-started
             if proc.returncode:
+                print('Kaggle: tải snapshot thất bại; quy trình sẽ dùng arXiv dự phòng.', flush=True)
                 return dict(status='fallback', reason='kaggle_download_failed',
                             error_type='KaggleDownloadError', download_seconds=download_seconds,
                             validation_seconds=None)
+            print('Kaggle: tải xong; đang kiểm tra snapshot và tính SHA-256.', flush=True)
             raw = temporary / path.name
             archive = temporary / (path.name + '.zip')
             if not raw.is_file() and archive.is_file():
@@ -220,9 +261,11 @@ def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict
                         snapshot_sha256=digest, snapshot_time='unknown',
                         download_seconds=download_seconds, validation_seconds=time.monotonic()-started)
     except subprocess.TimeoutExpired:
+        print('Kaggle: quá thời hạn tải 60 phút; chuyển sang xác minh trực tiếp bằng arXiv.', flush=True)
         return dict(status='fallback', reason='download_timeout', error_type='TimeoutExpired',
                     download_seconds=None, validation_seconds=None)
     except (OSError, ValueError, UnicodeError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+        print('Kaggle: không tải hoặc xác minh được snapshot; chuyển sang arXiv.', flush=True)
         return dict(status='fallback', reason='download_or_validation_failed',
                     error_type=type(exc).__name__, download_seconds=None, validation_seconds=None)
 

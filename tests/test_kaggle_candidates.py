@@ -121,23 +121,82 @@ class TestCandidatesPipeline(HistoryIntegrationTests):
         self.assertEqual(len(self.requests), 7)
 
 
-def test_snapshot_download_and_reuse_offline(tmp_path):
+def test_snapshot_download_and_reuse_offline(tmp_path, capsys):
+    import subprocess
     import zipfile
-    from types import SimpleNamespace
-    def fake_run(args, **kwargs):
-        target=Path(args[args.index('-p')+1])
-        filename='arxiv-metadata-oai-snapshot.json'
-        with zipfile.ZipFile(target/(filename+'.zip'), 'w') as archive:
-            archive.writestr(filename, json.dumps(record('2501.00001'))+'\n')
-        assert kwargs['env']['KAGGLE_API_TOKEN']=='private-token'
-        return SimpleNamespace(returncode=0)
-    with patch('subprocess.run', side_effect=fake_run):
+
+    class FakeProcess:
+        def __init__(self, args, **kwargs):
+            target = Path(args[args.index('-p') + 1])
+            filename = 'arxiv-metadata-oai-snapshot.json'
+            with zipfile.ZipFile(target / (filename + '.zip'), 'w') as archive:
+                archive.writestr(filename, json.dumps(record('2501.00001')) + '\n')
+            assert kwargs['env']['KAGGLE_API_TOKEN'] == 'private-token'
+            self.returncode = None
+            self.wait_calls = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise subprocess.TimeoutExpired('kaggle', timeout)
+            self.returncode = 0
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    with patch('subprocess.Popen', FakeProcess):
         first=prepare_snapshot(tmp_path, token='private-token')
+    output = capsys.readouterr().out
     assert first['status']=='ready' and first['source']=='downloaded'
+    assert 'bắt đầu tải snapshot' in output
+    assert 'vẫn đang tải snapshot' in output
+    assert 'đang kiểm tra snapshot và tính SHA-256' in output
+    assert 'private-token' not in output
     assert 'private-token' not in json.dumps(first)
     assert 'private-token' not in (tmp_path/'snapshot.manifest.json').read_text()
     second=prepare_snapshot(tmp_path)
     assert second['source']=='cached' and second['snapshot_sha256']==first['snapshot_sha256']
+
+
+def test_manual_stop_terminates_kaggle_process_and_removes_temporary_files(tmp_path, capsys):
+    import pytest
+
+    class InterruptedProcess:
+        def __init__(self, *_args, **_kwargs):
+            self.returncode = None
+            self.wait_calls = 0
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = -15
+
+        def kill(self):
+            self.returncode = -9
+
+    with patch('subprocess.Popen', InterruptedProcess):
+        with pytest.raises(KeyboardInterrupt):
+            prepare_snapshot(tmp_path, token='private-token')
+
+    output = capsys.readouterr().out
+    assert 'đã dừng tiến trình tải' in output
+    assert 'private-token' not in output
+    assert not list(tmp_path.glob('.kaggle-*'))
+    assert not (tmp_path / 'arxiv-metadata-oai-snapshot.json').exists()
 
 
 def test_index_reuse_requires_matching_snapshot_and_scope(tmp_path):
