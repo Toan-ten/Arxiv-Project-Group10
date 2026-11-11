@@ -1363,7 +1363,7 @@ def run_m1_audit_member(
             destination = Path(output_dir).expanduser().resolve() if output_dir else drive / "exports" / selection["fingerprint"]
             export_result = export_official_datasets(
                 runner.store,
-                selection["pairs"],
+                [tuple(pair) for pair in selection["pairs"]],
                 destination,
                 require_m1_complete=True,
             )

@@ -416,14 +416,13 @@ class TestArxivAndAuditGates(unittest.TestCase):
                 "error": None,
             })
 
-        with patch("src.export.export_official_datasets", return_value={"status": "exported"}) as export:
-            result = m1_phases.run_m1_audit_member(
-                MSSV,
-                drive_root=self.drive,
-                local_root=self.local,
-                cohort_limit=1,
-                budget_seconds=120,
-            )
+        result = m1_phases.run_m1_audit_member(
+            MSSV,
+            drive_root=self.drive,
+            local_root=self.local,
+            cohort_limit=1,
+            budget_seconds=120,
+        )
         self.assertTrue(result["is_reconciled"], json.dumps({
             "source_issues": result.get("source_issues"),
             "s2_issues": result.get("s2_issues"),
@@ -433,8 +432,10 @@ class TestArxivAndAuditGates(unittest.TestCase):
         }, default=str))
         self.assertEqual(result["merged_s2_ids"], 1)
         self.assertEqual(result["export_status"], "exported")
+        self.assertTrue(result["export"]["is_valid"])
+        self.assertEqual(result["export"]["papers_count"], 1)
         self.assertFalse(result["bbl_audit"]["source_corpus_modified"])
-        export.assert_called_once()
+        self.assertTrue(Path(result["export"]["output_dir"]).is_dir())
         after = runner.store.paper_path(MSSV, found_id) / "v1" / "main.tex"
         self.assertEqual(after.read_bytes(), before)
         metadata = runner.store.read_metadata(MSSV, found_id)
