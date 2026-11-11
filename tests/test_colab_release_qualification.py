@@ -112,7 +112,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("thử chuyển đổi cục bộ", self.text)
 
     def test_runtime_pins_match_implementation_commit(self):
-        expected = "cdfde34b8beaed0afc20c7fb660070987cbec4e3"
+        expected = "d5279dc2cc667d13e688ab76d3044e3d9ecf905a"
         setup = self.code[0]
         self.assertIn(f'M1_RUNTIME_COMMIT = "{expected}"', setup)
         self.assertEqual(len(expected), 40)

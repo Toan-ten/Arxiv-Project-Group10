@@ -4,6 +4,8 @@ Thực hiện các bước trong [hướng dẫn chạy M1](../M1_COLAB_MEMBER_G
 
 ## Điều kiện chạy
 
+Notebook ghim runtime `d5279dc2cc667d13e688ab76d3044e3d9ecf905a`. Commit runtime phải có trên remote mà notebook clone trước khi chạy Colab. Khi cập nhật runtime, commit mã trước, đổi pin notebook sang SHA đó, rồi chạy lại toàn bộ các ô trên một runtime Colab mới.
+
 - Chọn CPU; mỗi corpus chỉ có một tiến trình ghi.
 - Lưu `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` trong Colab Secrets. Không chép khóa vào mã hoặc báo cáo.
 - Dùng MSSV trong `config/group10_id_ranges.json`. Mặc định chạy đủ 50 lô của thành viên; `COHORT_LIMIT` chỉ giới hạn số lô đầu trong cùng luồng.
