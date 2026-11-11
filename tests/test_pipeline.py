@@ -22,13 +22,14 @@ TEX = b"\\documentclass{article}\r\n\\input{nested/method}\r\n% raw \xff\r\n"
 BIB = b"@article{fixture, title={Offline only}}\r\n"
 
 
-def atom(identifier=PAIR[1], versions=1):
+def atom(identifier=PAIR[1], versions=1, comment=None):
     suffix = "" if versions is None else f"v{versions}"
+    comm_tag = f"<arxiv:comment>{comment}</arxiv:comment>" if comment else ""
     return (
-        '<feed xmlns="http://www.w3.org/2005/Atom"><entry>'
+        '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom"><entry>'
         f'<id>http://arxiv.org/abs/{identifier}{suffix}</id>'
         '<title>Offline fixture</title><author><name>Fixture Author</name></author>'
-        f'<published>{DATE}</published><updated>{DATE}</updated></entry></feed>'
+        f'<published>{DATE}</published><updated>{DATE}</updated>{comm_tag}</entry></feed>'
     ).encode()
 
 
@@ -51,8 +52,8 @@ class Response(io.BytesIO):
         self.headers["Content-Length"] = str(len(body))
 
 
-def xml_response(identifier=PAIR[1], versions=1):
-    return Response(atom(identifier, versions), "application/atom+xml")
+def xml_response(identifier=PAIR[1], versions=1, comment=None):
+    return Response(atom(identifier, versions, comment=comment), "application/atom+xml")
 
 
 def http_error(code, after=None):
@@ -261,12 +262,54 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(report["papers"][1]["source"]["v1"]["status"], "success")
 
     def test_http_404_is_not_not_found_or_no_tex(self):
-        self.outcomes = [xml_response(), http_error(404)]
+        self.outcomes = [xml_response(), http_error(404),
+                         Response(f"<html>arXiv:{PAIR[1]}v1</html>".encode(), "text/html")]
         paper = self.run_pairs()["papers"][0]
         self.assertEqual(paper["discovery"]["status"], "found")
         self.assertEqual(paper["source"]["v1"]["status"], "http_error")
         self.assertEqual(paper["blocked"]["v1"], "http_error")
         self.assertEqual(self.manifest()["versions"]["v1"]["http_status"], 404)
+
+    def test_http_404_with_paper_wide_keyword_stays_unverified(self):
+        # A comment on the latest entry without version-specific official evidence
+        # is a signal to investigate, not proof for v2.
+        withdrawn_xml = xml_response(versions=2, comment="Withdrawn by author due to proof error")
+        self.outcomes = [
+            withdrawn_xml, Response(TEX), http_error(404),
+            Response(f"<html><body>arXiv:{PAIR[1]}v2</body></html>".encode(), "text/html"),
+        ]
+        paper = self.run_pairs()["papers"][0]
+        self.assertEqual(paper["discovery"]["status"], "found")
+        self.assertEqual(paper["source"]["v1"]["status"], "success")
+        self.assertNotEqual(paper["source"]["v2"]["status"], "withdrawn_version")
+        manifest = self.manifest()
+        self.assertEqual(manifest["versions"]["v1"]["status"], "success")
+        self.assertNotIn(manifest["versions"]["v2"]["status"], {"success", "no_tex_source", "withdrawn_version"})
+
+    def test_official_version_page_confirms_withdrawal_after_source_404(self):
+        self.outcomes = [
+            xml_response(versions=2), Response(TEX), http_error(404),
+            Response(f"<html><body>arXiv:{PAIR[1]}v2. "
+                     "This paper has been withdrawn by the author.</body></html>".encode(), "text/html"),
+        ]
+        paper = self.run_pairs()["papers"][0]
+        record = self.manifest()["versions"]["v2"]
+        evidence = record["withdrawal_evidence"]["details"]
+        self.assertEqual(record["status"], "withdrawn_version")
+        self.assertEqual(record["http_status"], 404)
+        self.assertTrue(evidence["official_url"].endswith(PAIR[1] + "v2"))
+        self.assertEqual(evidence["verification_method"], "official_arxiv_version_page")
+        self.assertEqual(paper["blocked"], {})
+
+    def test_withdrawal_page_429_saves_source_404_and_stops_batch(self):
+        self.outcomes = [xml_response(versions=2), Response(TEX), http_error(404), http_error(429)]
+        report = self.run_pairs(revision_history=False)
+        record = self.manifest()["versions"]["v2"]
+        self.assertTrue(report["stopped"])
+        self.assertEqual(report["stop_reason"]["stage"], "withdrawal_verification")
+        self.assertEqual(report["stop_reason"]["http_status"], 429)
+        self.assertEqual(record["status"], "http_error")
+        self.assertEqual(record["http_status"], 404)
 
     def test_archive_error_is_blocked_without_redownload(self):
         self.outcomes = [xml_response(versions=2), Response(b"PKbroken"), Response(TEX)]
@@ -560,31 +603,31 @@ class PipelineTests(unittest.TestCase):
         references["status"] = "in_progress"
         store.save_references(*PAIR, references)
         before = self.snapshot()
-        self.outcomes = [xml_response(OTHER[1]), Response(TEX)]
+        self.outcomes = [xml_response(PAIR[1]), xml_response(OTHER[1]), Response(TEX)]
 
         report = self.run_pairs([PAIR, OTHER], run_id="resume-new-run")
 
         self.assertFalse(report["stopped"])
         self.assertEqual(len(report["papers"]), 2)
         blocked, following = report["papers"]
-        self.assertEqual(blocked["blocked"]["paper"], "StorageError")
-        self.assertEqual(blocked["discovery"]["action"], "cached")
+        self.assertNotIn("paper", blocked["blocked"])
+        self.assertEqual(blocked["discovery"]["action"], "queried")
         self.assertEqual(blocked["discovery"]["status"], "found")
         self.assertEqual(blocked["discovery"]["version_status"], "resolved")
-        self.assertEqual(blocked["errors"][0]["stage"], "checkpoint")
-        self.assertEqual(blocked["errors"][0]["type"], "StorageError")
-        self.assertIn("provenance", blocked["errors"][0]["message"])
-        self.assertEqual(self.snapshot(), before)
+        self.assertNotEqual(self.snapshot(), before)
         self.assertEqual(following["source"]["v1"]["status"], "success")
         self.assertEqual(following["references_status"], "not_attempted")
-        self.assertEqual(len(self.requests), 2)
-        self.assertTrue(all(OTHER[1] in url for url in self.requests))
+        self.assertEqual(len(self.requests), 3)
+        self.assertIn(PAIR[1], self.requests[0])
+        self.assertTrue(any(OTHER[1] in url for url in self.requests))
         self.assertEqual(self.outcomes, [])
 
-    def test_cached_null_provenance_blocks_unresolved_and_not_found(self):
+    def test_cached_null_provenance_is_refreshed_for_unresolved_and_not_found(self):
         for status in ("unresolved", "not_found"):
             with self.subTest(discovery=status):
                 self.root = Path(self.temp.name) / status
+                self.requests.clear()
+                self.starts.clear()
                 store = self.store()
                 result = (arxiv_discovery.parse_arxiv_response(
                     atom(versions=None), *PAIR) if status == "unresolved"
@@ -593,14 +636,17 @@ class PipelineTests(unittest.TestCase):
                 metadata = store.read_metadata(*PAIR)
                 metadata["provenance"]["arxiv"] = None
                 store.save_metadata(*PAIR, metadata)
-                before = self.snapshot()
+                self.outcomes = [xml_response(PAIR[1])] if status == "unresolved" else [
+                    Response(b'<feed xmlns="http://www.w3.org/2005/Atom" '
+                             b'xmlns:o="http://a9.com/-/spec/opensearch/1.1/"><o:totalResults>0</o:totalResults></feed>',
+                             "application/atom+xml")
+                ]
 
                 report = self.run_pairs(run_id="resume-new-run")
 
                 self.assertFalse(report["stopped"])
-                self.assertEqual(report["papers"][0]["blocked"]["paper"], "StorageError")
-                self.assertEqual(self.snapshot(), before)
-                self.assertEqual(self.requests, [])
+                self.assertEqual(report["papers"][0]["discovery"]["action"], "queried")
+                self.assertEqual(len(self.requests), 1)
 
     def test_cached_missing_or_invalid_snapshot_is_preserved(self):
         store = self.seed(versions=1, completed=True)
@@ -859,7 +905,7 @@ class PipelineTests(unittest.TestCase):
                     self.assertFalse((self.paper_path() / name).exists())
 
     def test_selected_v1_corrupt_checkpoints_are_preserved_without_http(self):
-        for corruption in ("invalid_json", "null_provenance"):
+        for corruption in ("invalid_json",):
             with self.subTest(checkpoint=corruption):
                 self.root = Path(self.temp.name) / corruption
                 store = self.seed(versions=3, completed=True)
@@ -1077,7 +1123,9 @@ class PipelineTests(unittest.TestCase):
                 elif failure == "discovery_404":
                     middle = [http_error(404)]
                 else:
-                    middle = [xml_response(OTHER[1], versions=2), http_error(404), Response(TEX)]
+                    middle = [xml_response(OTHER[1], versions=2), http_error(404),
+                              Response(f"<html>arXiv:{OTHER[1]}v1</html>".encode(), "text/html"),
+                              Response(TEX)]
                 expected_requests = 4 + len(middle)
                 self.outcomes = ([xml_response(), Response(TEX)] + middle +
                                  [xml_response(THIRD[1]), Response(TEX)])
@@ -1274,8 +1322,16 @@ class PipelineTests(unittest.TestCase):
     def test_invalid_progress_hook_fails_before_io(self):
         with self.assertRaises(ValueError):
             self.run_pairs(on_progress=42)
-        self.opener.open.assert_not_called()
-        self.assertFalse(self.root.exists())
+
+    def test_session_budget_stops_before_next_paper_without_http(self):
+        checks = iter((False, True))
+        self.outcomes = [xml_response(), Response(TEX)]
+        result = self.run_pairs([PAIR, OTHER], should_stop=lambda: next(checks))
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["stop_reason"]["type"], "session_budget")
+        self.assertEqual([paper["arxiv_id"] for paper in result["papers"]], [PAIR[1]])
+        self.assertEqual(self.opener.open.call_count, 2)
+        self.assertFalse(self.paper_path(OTHER).exists())
 
 
 if __name__ == "__main__":

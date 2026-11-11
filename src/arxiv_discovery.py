@@ -6,12 +6,16 @@ from xml.etree import ElementTree as ET
 NS = {
     "atom": "http://www.w3.org/2005/Atom",
     "opensearch": "http://a9.com/-/spec/opensearch/1.1/",
+    "arxiv": "http://arxiv.org/schemas/atom",
 }
 ARXIV_HOSTS = {"arxiv.org", "export.arxiv.org"}
 ID_PATTERN = re.compile(
     r"(?P<base>[0-9]{2}(?:0[1-9]|1[0-2])\.[0-9]{4,5}"
     r"|[A-Za-z][A-Za-z0-9.-]*/[0-9]{2}(?:0[1-9]|1[0-2])[0-9]{3})"
     r"(?:v(?P<version>[1-9][0-9]*))?"
+)
+WITHDRAWAL_PATTERN = re.compile(
+    r"(?i)\b(?:withdrawn|withdraw|withdrew|withdrawing|retracted|retract|withdrawal)\b"
 )
 
 
@@ -144,9 +148,14 @@ def parse_arxiv_response(xml: str | bytes, mssv: str, arxiv_id: str) -> dict:
                              ("published", published), ("updated", updated)):
             if not value:
                 missing.append(field)
+        summary = _text(entry, "atom:summary")
+        comments = _text(entry, "arxiv:comment")
+        is_withdrawn = bool(WITHDRAWAL_PATTERN.search(f"{title or ''} {summary or ''} {comments or ''}"))
+
         result.update(
             status="found", title=title, authors=authors, published=published,
             updated=updated, missing_fields=missing, version_status="needs_verification",
+            comments=comments, abstract=summary, is_withdrawn=is_withdrawn,
         )
         if versions:
             latest = versions.pop()

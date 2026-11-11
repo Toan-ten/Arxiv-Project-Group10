@@ -212,6 +212,7 @@ def run_batch(
     pairs, corpus_root, *, batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
     user_agent=arxiv_client.USER_AGENT, s2_config=None, revision_history=None,
+    should_stop=None,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
@@ -265,8 +266,14 @@ def run_batch(
         definition["s2"] = s2_config
     if directory.exists():
         manifest = existing
+        stored_def = copy.deepcopy(manifest.get("definition"))
+        if isinstance(stored_def, dict):
+            if "s2_config" in stored_def and "s2" not in stored_def:
+                stored_def["s2"] = s2_integration.configuration(stored_def.pop("s2_config"))
+            elif "s2" in stored_def and stored_def["s2"] is not None:
+                stored_def["s2"] = s2_integration.configuration(stored_def["s2"])
         if (manifest.get("schema_version") != 1 or manifest.get("batch_id") != batch_id or
-                manifest.get("definition") != definition):
+                stored_def != definition):
             raise BatchError("Batch definition changed; create a new batch_id")
         if not resume:
             raise BatchError("Existing batch requires an explicit resume=True")
@@ -350,6 +357,7 @@ def run_batch(
                 max_attempts=max_attempts, user_agent=user_agent,
                 versions=definition["versions"], on_progress=progress,
                 revision_history=revision_history,
+                should_stop=should_stop,
                 **({"s2_config": s2_config} if s2_config is not None else {}),
             )
     except BatchLogError:

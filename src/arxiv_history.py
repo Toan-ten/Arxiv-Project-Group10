@@ -6,6 +6,7 @@ only for an existing, resolved checkpoint, with one corpus writer at a time.
 import copy
 from datetime import datetime, timezone
 import math
+import re
 from urllib.parse import parse_qs, urlencode, urlsplit
 import xml.etree.ElementTree as ET
 
@@ -102,8 +103,12 @@ def _verified_dates(metadata, records):
         published = parsed["published"] if published is None else published
         _require(parsed["published"] == published, "conflicting submission dates")
         if version["date"] is not None:
-            _require(_instant(version["date"]) == _instant(parsed["date"]),
-                     "conflict with known version date")
+            old_date = version["date"]
+            prior = (metadata.get("provenance", {}).get("arxiv") or {}).get("previous_version_history") or {}
+            if len(old_date) == 10 and prior.get("provider") == "kaggle_snapshot":
+                _require(old_date == parsed["date"][:10], "conflict with known version date")
+            else:
+                _require(_instant(old_date) == _instant(parsed["date"]), "conflict with known version date")
         dates.append(parsed["date"])
     _require(dates and all(_instant(a) <= _instant(b) for a, b in zip(dates, dates[1:])),
              "revision order")
@@ -134,10 +139,28 @@ def _cached(metadata):
     history = metadata["provenance"]["version_history"]
     if history is None:
         return False
-    _require(isinstance(history, dict) and history.get("provider") == "arxiv_atom_versioned"
+    _require(isinstance(history, dict), "history provenance dict")
+    provider = history.get("provider")
+    _require(provider in {"arxiv_atom_versioned", "kaggle_snapshot"}
              and history.get("query_identifier") == metadata["arxiv_id"],
              "unknown history provenance requires audit")
     _instant(history.get("retrieved_at"))
+    if provider == "kaggle_snapshot":
+        _require(isinstance(history.get("snapshot_sha256"), str)
+                 and re.fullmatch(r"[0-9a-f]{64}", history["snapshot_sha256"]) is not None
+                 and history.get("dataset") == "Cornell-University/arxiv"
+                 and isinstance(history.get("snapshot_time"), str)
+                 and bool(history["snapshot_time"]), "invalid Kaggle history provenance")
+        discovery = (metadata.get("provenance", {}).get("arxiv") or {}).get("snapshot") or {}
+        _require(discovery.get("status") == "found" and discovery.get("http_status") == 200
+                 and discovery.get("version_status") == "resolved"
+                 and discovery.get("version_ids") == [v["versioned_id"] for v in metadata["versions"]],
+                 "Kaggle dates do not match arXiv-confirmed versions")
+        _require(all(v["date_status"] == "verified" for v in metadata["versions"])
+                 and metadata["revised_dates"] is not None
+                 and [v["date"] for v in metadata["versions"][1:]] == metadata["revised_dates"],
+                 "kaggle history disagreements")
+        return True
     dates = _verified_dates(metadata, history.get("snapshot"))
     _require(metadata["submission_date"] is not None
              and _instant(metadata["submission_date"]) == _instant(dates[0])
@@ -224,7 +247,9 @@ def enrich_version_history(store, mssv, arxiv_id, *, timeout=30.0, max_attempts=
     # Preserve the original v1 spelling/provenance if it denotes the same instant.
     value["submission_date"] = metadata["submission_date"] or dates[0]
     for index, version in enumerate(value["versions"]):
-        version.update(date=version["date"] or dates[index], date_status="verified")
+        old_date = version["date"]
+        version.update(date=dates[index] if old_date is None or len(old_date) == 10 else old_date,
+                       date_status="verified")
     value["revised_dates"] = [v["date"] for v in value["versions"][1:]]
     value["provenance"]["version_history"] = dict(
         provider="arxiv_atom_versioned", query_identifier=arxiv_id,

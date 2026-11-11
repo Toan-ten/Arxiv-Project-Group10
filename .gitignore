@@ -241,3 +241,11 @@ __marimo__/
 /benchmark_results/
 /test_corpus_tmp/
 /raw/
+
+# Local audit reports and generated reports
+/reports/
+/docs/audits/
+
+# Local assignment documents and captured source samples
+/request/
+/docs/contracts/evidence/

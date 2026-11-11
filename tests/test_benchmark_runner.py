@@ -531,6 +531,54 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertTrue(result["data_coverage"]["all_version_sources_terminal"])
         self.assertEqual(self.opener.open.call_count, 3)
 
+    def test_benchmark_resume_with_same_s2_config_succeeds(self):
+        """BUG-002: Resume with matching s2_config succeeds without BenchmarkError."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes()
+        res1 = self.run_adapter(experiment_id="before", s2_config=s2_cfg)
+        self.assertEqual(res1["execution_status"], "returned")
+        self.successes()
+        res2 = self.run_adapter(experiment_id="after", resume=True, s2_config=s2_cfg)
+        self.assertEqual(res2["execution_status"], "returned")
+
+    def test_benchmark_resume_with_legacy_s2_config_key_succeeds(self):
+        """BUG-002: Resume accepts legacy 's2_config' key in batch.json."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes()
+        self.run_adapter(experiment_id="before", s2_config=s2_cfg)
+
+        batch_json_path = self.settings()["log_root"] / self.settings()["batch_id"] / "batch.json"
+        data = json.loads(batch_json_path.read_text(encoding="utf-8"))
+        norm_s2 = data["definition"].pop("s2")
+        data["definition"]["s2_config"] = norm_s2
+        batch_json_path.write_text(json.dumps(data), encoding="utf-8")
+
+        self.successes()
+        res = self.run_adapter(experiment_id="after", resume=True, s2_config=s2_cfg)
+        self.assertEqual(res["execution_status"], "returned")
+
+    def test_benchmark_resume_with_changed_s2_config_raises_benchmark_error(self):
+        """BUG-002: Resume with changed s2_config is cleanly rejected."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        s2_changed = {"timeout": 25.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes()
+        self.run_adapter(experiment_id="before", s2_config=s2_cfg)
+
+        with self.assertRaisesRegex(runner.BenchmarkError, "Invalid benchmark input or evidence"):
+            self.run_adapter(experiment_id="after", resume=True, s2_config=s2_changed)
+
+    def test_benchmark_resume_with_missing_definition_raises_benchmark_error(self):
+        """BUG-002: Resume with missing or corrupted batch.json is cleanly rejected."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes()
+        self.run_adapter(experiment_id="before", s2_config=s2_cfg)
+
+        batch_json_path = self.settings()["log_root"] / self.settings()["batch_id"] / "batch.json"
+        batch_json_path.unlink()
+
+        with self.assertRaisesRegex(runner.BenchmarkError, "Missing or invalid batch definition/history"):
+            self.run_adapter(experiment_id="after", resume=True, s2_config=s2_cfg)
+
 
 if __name__ == "__main__":
     unittest.main()

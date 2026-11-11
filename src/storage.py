@@ -26,19 +26,20 @@ SOURCE_ERRORS = {
     "rate_limited", "server_error", "archive_error", "unsafe_archive",
     "unsupported_source", "invalid_response", "size_limit", "storage_error",
     "output_exists", "validation_failed",
+    "http_error_404_unverified", "version_not_found", "transient_error", "permanent_error",
 }
 DISCOVERY_STATES = SOURCE_ERRORS | {
     "not_attempted", "found", "not_found", "api_error", "invalid_xml",
 }
-TERMINAL = {"success", "no_tex_source"}
+TERMINAL = {"success", "no_tex_source", "withdrawn_version"}
 VERSION_STATES = TERMINAL | SOURCE_ERRORS | {"pending", "in_progress", "interrupted"}
 RETRYABLE = {
     "pending", "interrupted", "timeout", "dns_error", "connection_error",
-    "rate_limited", "server_error",
+    "rate_limited", "server_error", "transient_error",
 }
 PAPER_STATES = {
     "not_attempted", "in_progress", "partial", "failed", "interrupted",
-    "not_found", "complete", "complete_with_no_tex",
+    "not_found", "complete", "complete_with_no_tex", "complete_with_withdrawn",
 }
 _RESERVED = {"CON", "PRN", "AUX", "NUL"} | {
     f"{prefix}{n}" for prefix in ("COM", "LPT") for n in range(1, 10)
@@ -197,15 +198,32 @@ class CorpusStorage:
 
     def _read(self, path):
         self._safe(path)
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+
         try:
-            info = path.stat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise IntegrityError(f"Cannot read valid checkpoint: {path.name}") from exc
+
+        try:
+            info = os.fstat(fd)
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise IntegrityError("JSON must be a regular, unlinked file")
-            with path.open("r", encoding="utf-8") as stream:
+            with open(fd, "r", encoding="utf-8", closefd=False) as stream:
                 value = json.load(stream, object_pairs_hook=_pairs,
                                   parse_constant=lambda value: _require(False, "Nonfinite JSON"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise IntegrityError(f"Cannot read valid checkpoint: {path.name}") from exc
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
         _require(isinstance(value, dict), "JSON root must be an object")
         return value
 
@@ -473,7 +491,12 @@ class CorpusStorage:
               and stages == ["complete", "complete"]):
             for name, record in manifest["versions"].items():
                 self._verify_source(mssv, arxiv_id, name, record)
-            status = "complete_with_no_tex" if "no_tex_source" in states else "complete"
+            if "withdrawn_version" in states:
+                status = "complete_with_withdrawn"
+            elif "no_tex_source" in states:
+                status = "complete_with_no_tex"
+            else:
+                status = "complete"
         elif (manifest["discovery_status"] == "found" or any(x in TERMINAL for x in states)
               or any(x in {"partial", "complete"} for x in stages)):
             status = "partial"
@@ -594,6 +617,77 @@ class CorpusStorage:
         _atomic_json(self._path(mssv, arxiv_id, "metadata.json"), metadata)
         return self._commit(manifest)
 
+    def refresh_discovery(self, result):
+        """Append newly confirmed arXiv versions without replacing source or S2.
+
+        Metadata is atomically written before the manifest. The existing
+        resume reconciliation recovers an interruption between those writes.
+        """
+        result = _clone(result)
+        _keys(result, ["mssv", "arxiv_id", "status", "http_status", "version_status", "version_ids", "latest_version_id"])
+        mssv, arxiv_id = result["mssv"], result["arxiv_id"]
+        _require(result["status"] == "found" and result["http_status"] == 200
+                 and result["version_status"] == "resolved", "Unverified refresh")
+        manifest = self.read_manifest(mssv, arxiv_id)
+        metadata = self.read_metadata(mssv, arxiv_id)
+        references = self.read_references(mssv, arxiv_id)
+        _require(manifest["discovery_status"] == "found", "Refresh requires found discovery")
+        self._sync(_clone(manifest), metadata, references)
+        old_names = self._versions(metadata, arxiv_id)
+        def dates_agree(old, fresh):
+            if not old or not fresh:
+                return True
+            try:
+                left = datetime.fromisoformat(old.replace("Z", "+00:00"))
+                right = datetime.fromisoformat(fresh.replace("Z", "+00:00"))
+                if len(old) == 10 or len(fresh) == 10:
+                    return left.date() == right.date()
+                return left.tzinfo is not None and right.tzinfo is not None and left == right
+            except (ValueError, TypeError, AttributeError):
+                return False
+        _require(dates_agree(metadata["submission_date"], result.get("published")),
+                 "Fresh discovery conflicts with known submission date")
+        ids = result["version_ids"]
+        _require(_strings(ids) and ids == [arxiv_id + f"v{i}" for i in range(1, len(ids) + 1)]
+                 and bool(ids) and result["latest_version_id"] == ids[-1], "Invalid refresh versions")
+        _require(len(ids) >= len(old_names), "Refresh cannot drop known versions")
+        if len(ids) == len(old_names):
+            previous_arxiv = metadata["provenance"]["arxiv"] or {}
+            previous_history = metadata["provenance"]["version_history"]
+            prior_snapshot = previous_arxiv.get("snapshot")
+            metadata["provenance"]["arxiv"] = dict(
+                query_identifier=arxiv_id,
+                retrieved_at=_now(),
+                snapshot=result,
+                field_sources=previous_arxiv.get("field_sources", {}),
+                previous_discovery=(dict(
+                    query_identifier=previous_arxiv.get("query_identifier"),
+                    retrieved_at=previous_arxiv.get("retrieved_at"),
+                    snapshot=prior_snapshot,
+                ) if isinstance(prior_snapshot, dict) else None),
+                previous_version_history=previous_history,
+            )
+            self._metadata(metadata, mssv, arxiv_id)
+            _atomic_json(self._path(mssv, arxiv_id, "metadata.json"), metadata)
+            return manifest
+        previous_arxiv = metadata["provenance"]["arxiv"]
+        previous_history = metadata["provenance"]["version_history"]
+        for i in range(len(old_names) + 1, len(ids) + 1):
+            metadata["versions"].append(dict(version=f"v{i}", versioned_id=arxiv_id + f"v{i}",
+                                             date=None, date_status="unknown"))
+        metadata["status"] = "partial"
+        metadata["revised_dates"] = None
+        if "version_history" not in metadata["missing_fields"]:
+            metadata["missing_fields"].append("version_history")
+        metadata["provenance"]["version_history"] = None
+        metadata["provenance"]["arxiv"] = dict(
+            query_identifier=arxiv_id, retrieved_at=_now(), snapshot=result,
+            field_sources=(previous_arxiv or {}).get("field_sources", {}),
+            previous_discovery=previous_arxiv, previous_version_history=previous_history)
+        self._metadata(metadata, mssv, arxiv_id)
+        _atomic_json(self._path(mssv, arxiv_id, "metadata.json"), metadata)
+        return self._commit(manifest)
+
     def version_destination(self, mssv, arxiv_id, version):
         _version(version)
         manifest = self.read_manifest(mssv, arxiv_id)
@@ -603,9 +697,23 @@ class CorpusStorage:
     def _snapshot(self, destination):
         files, checksums, total = [], {}, 0
         seen = set()
-        if not destination.exists():
+        try:
+            d_lstat = os.lstat(destination)
+            if stat.S_ISLNK(d_lstat.st_mode):
+                raise IntegrityError("Version destination must not be a symbolic link")
+            if not stat.S_ISDIR(d_lstat.st_mode):
+                raise IntegrityError("Version destination must be a directory")
+        except FileNotFoundError:
             return files, checksums, total
-        _require(destination.is_dir(), "Version destination must be a directory")
+        except OSError as exc:
+            raise IntegrityError(f"Cannot inspect version destination: {destination}") from exc
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+
         pending = [destination]
         while pending:
             parent = pending.pop()
@@ -615,20 +723,47 @@ class CorpusStorage:
                 _relative(relative)
                 _require(relative.casefold() not in seen, "Case-colliding source paths")
                 seen.add(relative.casefold())
-                info = path.stat()
-                if stat.S_ISDIR(info.st_mode):
+
+                try:
+                    lstat_res = os.lstat(path)
+                except OSError as exc:
+                    raise IntegrityError(f"Cannot inspect source path: {path}") from exc
+
+                _require(not stat.S_ISLNK(lstat_res.st_mode), "Source entry must not be a symbolic link")
+                if stat.S_ISDIR(lstat_res.st_mode):
                     pending.append(path)
                     continue
-                _require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1,
+
+                _require(stat.S_ISREG(lstat_res.st_mode) and lstat_res.st_nlink == 1,
                          "Source must be a regular, unlinked file")
-                _require(path.suffix.lower() in {".tex", ".bib"}, "Unexpected source file type")
-                digest = hashlib.sha256()
-                with path.open("rb") as stream:
-                    for block in iter(lambda: stream.read(65536), b""):
-                        digest.update(block)
+                _require(path.suffix.lower() in {".tex", ".bib", ".bbl"}, "Unexpected source file type")
+
+                try:
+                    fd = os.open(path, flags)
+                except OSError as exc:
+                    raise IntegrityError(f"Cannot open source file: {path}") from exc
+
+                try:
+                    fstat_info = os.fstat(fd)
+                    _require(
+                        stat.S_ISREG(fstat_info.st_mode)
+                        and fstat_info.st_nlink == 1
+                        and fstat_info.st_ino == lstat_res.st_ino,
+                        "Source file descriptor validation failed",
+                    )
+                    digest = hashlib.sha256()
+                    with open(fd, "rb", closefd=False) as stream:
+                        for block in iter(lambda: stream.read(65536), b""):
+                            digest.update(block)
+                finally:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+
                 files.append(relative)
                 checksums[relative] = digest.hexdigest()
-                total += info.st_size
+                total += fstat_info.st_size
         return sorted(files), checksums, total
 
     def _verify_source(self, mssv, arxiv_id, version, record):
@@ -696,6 +831,15 @@ class CorpusStorage:
         attempts, size = result.get("attempts", 0), result.get("downloaded_bytes")
         _require(type(attempts) is int and attempts >= 0, "Invalid source attempts")
         _require(size is None or type(size) is int and size >= 0, "Invalid downloaded size")
+        if status == "withdrawn_version":
+            from src.withdrawal_evidence import confirmed_withdrawal
+            evidence = result.get("withdrawal_evidence")
+            detail = evidence.get("details") if isinstance(evidence, dict) else None
+            _require(isinstance(evidence, dict)
+                     and evidence.get("classification") == "withdrawn_version"
+                     and evidence.get("original_http_status") == 404
+                     and confirmed_withdrawal(detail, arxiv_id, name),
+                     "withdrawn_version requires exact version-scoped arXiv evidence")
         record.update(
             status=status, source_status=status, http_status=result.get("http_status"),
             content_type=result.get("content_type"), attempts=attempts,
@@ -703,6 +847,8 @@ class CorpusStorage:
             error=None if result["error"] is None else dict(
                 stage="source", type=status, message=str(result["error"])),
         )
+        if "withdrawal_evidence" in result:
+            record["withdrawal_evidence"] = result["withdrawal_evidence"]
         if status in TERMINAL:
             try:
                 files, hashes, total = self._snapshot(self._path(mssv, arxiv_id, name))
@@ -716,6 +862,33 @@ class CorpusStorage:
                     stage="storage", type="validation_failed", message=str(exc)))
                 self._commit(manifest)
                 raise IntegrityError(str(exc)) from exc
+        return self._commit(manifest)
+
+    def confirm_withdrawn_version(self, mssv, arxiv_id, version, evidence):
+        """Promote a source 404 only after exact official-page evidence validates."""
+        version = _version(version)
+        manifest = self.read_manifest(mssv, arxiv_id)
+        _require(version in manifest["versions"], "Unknown source version")
+        record = manifest["versions"][version]
+        _require(record["status"] in {"http_error", "http_error_404_unverified"}
+                 and record["http_status"] == 404, "Only an unresolved source 404 can be reconciled")
+        destination = self._path(mssv, arxiv_id, version)
+        _require(not destination.exists(), "Withdrawn version has an existing source directory")
+        from src.withdrawal_classifier import classify_version_outcome
+
+        classification = classify_version_outcome(
+            arxiv_id, version, http_status=404,
+            content_type=record.get("content_type"),
+            discovery_metadata=evidence, error_message=(record.get("error") or {}).get("message"),
+            has_tex_files=False, file_list=[],
+        )
+        _require(classification["classification"] == "withdrawn_version",
+                 "Official page evidence does not confirm withdrawal")
+        record.update(
+            status="withdrawn_version", source_status="withdrawn_version", error=None,
+            withdrawal_evidence=classification, completed_at=_now(), files=[],
+            file_checksums={}, kept_bytes=0,
+        )
         return self._commit(manifest)
 
     def resume(self, mssv, arxiv_id):
@@ -735,11 +908,66 @@ class CorpusStorage:
                 _atomic_json(self._path(mssv, arxiv_id, name + ".json"), value)
         self._sync(manifest, self.read_metadata(mssv, arxiv_id),
                    self.read_references(mssv, arxiv_id))
-        plan = dict(skip=[], retry=[], blocked={})
+        plan = dict(skip=[], retry=[], verify_withdrawal=[], blocked={})
         for name, record in manifest["versions"].items():
             if record["status"] == "in_progress":
                 record.update(status="interrupted", error=dict(
                     stage="source", type="interrupted", message="Previous session did not commit a result"))
+            if record["status"] == "withdrawn_version":
+                from src.withdrawal_evidence import confirmed_withdrawal
+
+                evidence = record.get("withdrawal_evidence")
+                details = evidence.get("details") if isinstance(evidence, dict) else None
+                evidence_is_version_scoped = (
+                    isinstance(evidence, dict)
+                    and evidence.get("classification") == "withdrawn_version"
+                    and evidence.get("original_http_status") == 404
+                    and confirmed_withdrawal(details, arxiv_id, name)
+                )
+                if not evidence_is_version_scoped:
+                    destination = self._path(mssv, arxiv_id, name)
+                    safely_recoverable = (
+                        record.get("http_status") == 404
+                        and not destination.exists()
+                        and not destination.is_symlink()
+                        and not record.get("files")
+                        and not record.get("file_checksums")
+                        and record.get("kept_bytes") in (None, 0)
+                    )
+                    if safely_recoverable:
+                        history = record.get("withdrawal_evidence_history", [])
+                        if not isinstance(history, list):
+                            history = [{"unparsed_previous_history": history}]
+                        history.append({
+                            "evidence": evidence,
+                            "reviewed_at": _now(),
+                            "review_result": "rejected_missing_version_scoped_proof",
+                        })
+                        record["withdrawal_evidence_history"] = history
+                        record.pop("withdrawal_evidence", None)
+                        record.update(
+                            status="http_error_404_unverified",
+                            source_status="http_error_404_unverified",
+                            error=dict(
+                                stage="source",
+                                type="http_error_404_unverified",
+                                message=("Previous withdrawn_version claim lacked valid exact-version evidence; "
+                                         "prior evidence was preserved and the official version page must be checked"),
+                            ),
+                            completed_at=None,
+                            files=[],
+                            file_checksums={},
+                            kept_bytes=None,
+                            archive_bytes=None,
+                            archive_sha256=None,
+                            extracted_bytes=None,
+                            removed_files=None,
+                        )
+                        plan["verify_withdrawal"].append(name)
+                        continue
+                    record.update(status="validation_failed", source_status="validation_failed", error=dict(
+                        stage="storage", type="validation_failed",
+                        message="Withdrawn-version evidence is invalid and its source state is not safe to recover automatically"))
             if record["status"] in TERMINAL:
                 try:
                     self._verify_source(mssv, arxiv_id, name, record)
@@ -750,6 +978,14 @@ class CorpusStorage:
                     plan["skip"].append(name)
                     continue
             destination = self._path(mssv, arxiv_id, name)
+            if (
+                record["status"] in {"http_error", "http_error_404_unverified"}
+                and record.get("http_status") == 404
+                and not destination.exists()
+            ):
+                plan["verify_withdrawal"].append(name)
+                continue
+
             if record["status"] in RETRYABLE and not destination.exists():
                 plan["retry"].append(name)
             else:
@@ -759,3 +995,13 @@ class CorpusStorage:
                 )
         manifest = self._commit(manifest)
         return {**plan, "manifest": manifest}
+
+    def audit_paper(self, mssv, arxiv_id):
+        """Perform comprehensive storage contract and data integrity audit on a paper."""
+        from src.storage_integrity import audit_paper_integrity
+        return audit_paper_integrity(self, mssv, arxiv_id)
+
+    def audit_cohort(self, pairs, *, cohort_number=None):
+        """Perform comprehensive storage contract and data integrity audit on a cohort or paper list."""
+        from src.storage_integrity import audit_cohort_integrity
+        return audit_cohort_integrity(self, pairs, cohort_number=cohort_number)

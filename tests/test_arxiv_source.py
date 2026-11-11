@@ -84,8 +84,9 @@ class SourceExtractionTests(unittest.TestCase):
                    ("style.sty", b"style"), ("notes.txt", b"notes")]
         result = self.extract(tar_bytes(entries))
         self.assertEqual(result["status"], "success")
-        self.assertEqual(result["files"], ["main.tex", "refs/library.bib", "sections/method.tex"])
+        self.assertEqual(result["files"], ["main.tex", "paper.bbl", "refs/library.bib", "sections/method.tex"])
         self.assertEqual((self.destination / "main.tex").read_bytes(), TEX)
+        self.assertEqual((self.destination / "paper.bbl").read_bytes(), b"bibliography")
         self.assertEqual((self.destination / "sections/method.tex").read_bytes(), b"Method \xff\r\n")
         self.assertEqual((self.destination / "refs/library.bib").read_bytes(), BIB)
         self.assertEqual(sorted(p.relative_to(self.destination).as_posix()
@@ -242,6 +243,12 @@ class SourceExtractionTests(unittest.TestCase):
             for first, second in conflicts:
                 with self.subTest(builder=builder.__name__, paths=(first, second)):
                     self.assert_rejected(builder([(first, TEX), (second, TEX)]), "unsafe_archive")
+
+    def test_duplicate_non_kept_image_paths_do_not_reject_tex(self):
+        entries = [("main.tex", TEX), ("figs/div.jpg", b"JPG1"), ("figs/div.jpg", b"JPG2")]
+        result = self.extract(tar_bytes(entries))
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["files"], ["main.tex"])
 
     def test_existing_file_or_directory_is_never_overwritten(self):
         self.destination.mkdir()
@@ -483,6 +490,150 @@ class SourceDownloadTests(unittest.TestCase):
         self.assertEqual(result["status"], "connection_error")
         self.assertEqual(result["http_status"], 200)
         self.assertFalse(self.destination.exists())
+
+    def test_range_continuation_completes_truncated_large_archive(self):
+        full_body = tar_bytes([("main.tex", TEX), ("refs.bib", BIB)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-1"'
+        part2 = FakeResponse(full_body[split_at:], content_type="application/gzip", length=len(full_body) - split_at)
+        part2.status = 206
+        part2.headers["Content-Range"] = f"bytes {split_at}-{len(full_body) - 1}/{len(full_body)}"
+        part2.headers["ETag"] = '"etag-1"'
+        self.outcomes = [part1, part2]
+        result = self.download(max_attempts=1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["downloaded_bytes"], len(full_body))
+        self.assertEqual((self.destination / "main.tex").read_bytes(), TEX)
+
+    def test_range_continuation_rejects_wrong_offset_or_mismatched_etag(self):
+        full_body = tar_bytes([("main.tex", TEX), ("refs.bib", BIB)])
+        split_at = len(full_body) // 2
+        # Case 1: Wrong start offset in Content-Range
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-1"'
+        part2_wrong_offset = FakeResponse(full_body[split_at:], content_type="application/gzip")
+        part2_wrong_offset.status = 206
+        part2_wrong_offset.headers["Content-Range"] = f"bytes 0-{len(full_body) - split_at - 1}/{len(full_body)}"
+        part2_wrong_offset.headers["ETag"] = '"etag-1"'
+        self.outcomes = [part1, part2_wrong_offset]
+        res1 = self.download(max_attempts=1)
+        self.assertNotEqual(res1["status"], "success")
+        self.assertFalse(self.destination.exists())
+
+        # Case 2: Mismatched ETag
+        part1_etag = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1_etag.headers["Accept-Ranges"] = "bytes"
+        part1_etag.headers["ETag"] = '"etag-1"'
+        part2_etag = FakeResponse(full_body[split_at:], content_type="application/gzip")
+        part2_etag.status = 206
+        part2_etag.headers["Content-Range"] = f"bytes {split_at}-{len(full_body) - 1}/{len(full_body)}"
+        part2_etag.headers["ETag"] = '"etag-2"'
+        self.outcomes = [part1_etag, part2_etag]
+        res2 = self.download(max_attempts=1)
+        self.assertNotEqual(res2["status"], "success")
+        self.assertFalse(self.destination.exists())
+
+    def test_range_continuation_stops_immediately_on_empty_206_or_403(self):
+        full_body = tar_bytes([("main.tex", TEX)])
+        split_at = len(full_body) // 2
+        # Empty 206 must fail immediately without spinning 5+ times
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        empty_206 = FakeResponse(b"", content_type="application/gzip")
+        empty_206.status = 206
+        empty_206.headers["Content-Range"] = f"bytes {split_at}-{len(full_body) - 1}/{len(full_body)}"
+        self.outcomes = [part1, empty_206]
+        res_empty = self.download(max_attempts=1)
+        self.assertEqual(res_empty["status"], "connection_error")
+        self.assertEqual(self.opener.open.call_count, 2)
+
+        # 403 on Range must stop immediately and propagate http_status=403
+        self.opener.open.reset_mock()
+        part1_403 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1_403.headers["Accept-Ranges"] = "bytes"
+        self.outcomes = [part1_403, self.error(403)]
+        res_403 = self.download(max_attempts=3)
+        self.assertEqual(res_403["status"], "http_error")
+        self.assertEqual(res_403["http_status"], 403)
+        self.assertEqual(self.opener.open.call_count, 2)
+
+    def test_range_continuation_records_http_metrics_and_request_log(self):
+        from src import arxiv_client, http_metrics
+        full_body = tar_bytes([("main.tex", TEX)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-ok"'
+        part2 = FakeResponse(full_body[split_at:], content_type="application/gzip")
+        part2.status = 206
+        part2.headers["Content-Range"] = f"bytes {split_at}-{len(full_body) - 1}/{len(full_body)}"
+        part2.headers["ETag"] = '"etag-ok"'
+        self.outcomes = [part1, part2]
+        metrics = http_metrics.HttpMetrics()
+        log = []
+        with http_metrics.collect(metrics), arxiv_client.record_requests(log.append):
+            res = self.download(max_attempts=1)
+        self.assertEqual(res["status"], "success")
+        snap = metrics.snapshot(complete=True)
+        self.assertEqual(snap["providers"]["arxiv"]["attempts"], 2)
+        self.assertEqual(len(log), 2)
+        self.assertEqual(res["attempts"], 2)
+
+    def test_range_request_encounters_429_then_succeeds(self):
+        full_body = tar_bytes([("main.tex", TEX)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-ok"'
+        part2 = FakeResponse(full_body[split_at:], content_type="application/gzip")
+        part2.status = 206
+        part2.headers["Content-Range"] = f"bytes {split_at}-{len(full_body) - 1}/{len(full_body)}"
+        part2.headers["ETag"] = '"etag-ok"'
+        self.outcomes = [part1, self.error(429, "5"), part2]
+        res = self.download(max_attempts=3)
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["http_status"], 200)
+        self.assertEqual((self.destination / "main.tex").read_bytes(), TEX)
+        self.assertEqual(self.opener.open.call_count, 3)
+
+    def test_range_request_repeated_429_exhausts_retries_safely(self):
+        full_body = tar_bytes([("main.tex", TEX)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-ok"'
+        self.outcomes = [part1, self.error(429, "3"), self.error(429, "3"), self.error(429, "3")]
+        res = self.download(max_attempts=3)
+        self.assertEqual(res["status"], "rate_limited")
+        self.assertEqual(res["http_status"], 429)
+        self.assertFalse(self.destination.exists())
+        self.assertEqual(self.opener.open.call_count, 4)
+
+    def test_range_request_wait_budget_exhaustion(self):
+        from src import arxiv_client
+        full_body = tar_bytes([("main.tex", TEX)])
+        split_at = len(full_body) // 2
+        part1 = FakeResponse(full_body[:split_at], content_type="application/gzip", length=len(full_body))
+        part1.headers["Accept-Ranges"] = "bytes"
+        part1.headers["ETag"] = '"etag-ok"'
+        self.outcomes = [part1, self.error(429, "50")]
+        with arxiv_client.golden_ratio_backoff_policy(wait_budget_seconds=10.0):
+            res = self.download(max_attempts=3)
+        self.assertEqual(res["status"], "rate_limited")
+        self.assertEqual(res["http_status"], 429)
+        self.assertIn("budget exhausted", res.get("error", "").lower())
+        self.assertFalse(self.destination.exists())
+
+    def test_source_download_initial_429_retry_success(self):
+        full_body = tar_bytes([("main.tex", TEX)])
+        self.outcomes = [self.error(429, "5"), FakeResponse(full_body, content_type="application/gzip")]
+        res = self.download(max_attempts=3)
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(res["attempts"], 2)
+        self.assertEqual(self.starts, [0.0, 5.0])
 
     def test_failed_retry_does_not_reuse_headers_from_earlier_response(self):
         self.outcomes = [FakeResponse(TEX, length=len(TEX) + 10), self.error(503)]

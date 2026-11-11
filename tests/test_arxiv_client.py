@@ -404,6 +404,47 @@ class ArxivClientTests(unittest.TestCase):
             self.query()
         self.assertFalse(client._request_lock.locked())
 
+    def test_golden_ratio_backoff_honors_zero_budget_and_retry_after(self):
+        self.outcomes = [http_error(429, "45"), FakeResponse()]
+        with client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0, wait_budget_seconds=0.0) as policy:
+            result = self.query(max_attempts=6)
+        self.assertEqual(result["status"], "rate_limited")
+        self.assertEqual(result["attempts"], 1)
+        self.assertTrue(policy.exhausted)
+        self.assertEqual(len(self.starts), 1)
+
+    def test_golden_ratio_backoff_waits_for_longer_retry_after_within_budget(self):
+        self.outcomes = [http_error(429, "25"), FakeResponse()]
+        with client.golden_ratio_backoff_policy(base_seconds=8.0, cap_seconds=60.0, wait_budget_seconds=60.0) as policy:
+            result = self.query(max_attempts=3)
+        self.assertEqual(result["status"], "found")
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(self.starts, [0.0, 25.0])
+        self.assertAlmostEqual(policy.waited, 25.0, places=3)
+
+    def test_query_arxiv_with_official_arxiv_client(self):
+        import datetime
+        from src.arxiv_client import query_arxiv_official
+        import unittest.mock
+        mock_result = unittest.mock.Mock()
+        mock_result.entry_id = "http://arxiv.org/abs/2502.09992v2"
+        mock_result.title = "Sample Paper Title"
+        mock_author = unittest.mock.Mock()
+        mock_author.name = "Author One"
+        mock_result.authors = [mock_author]
+        mock_result.published = datetime.datetime(2025, 2, 10, 10, 0, 0, tzinfo=datetime.timezone.utc)
+        mock_result.updated = datetime.datetime(2025, 2, 12, 12, 0, 0, tzinfo=datetime.timezone.utc)
+        mock_client = unittest.mock.Mock()
+        mock_client.results.return_value = iter([mock_result])
+
+        res = query_arxiv_official("24120232", "2502.09992", client=mock_client)
+        self.assertEqual(res["status"], "found")
+        self.assertEqual(res["arxiv_id"], "2502.09992")
+        self.assertEqual(res["version_ids"], ["2502.09992v1", "2502.09992v2"])
+        self.assertEqual(res["latest_version_id"], "2502.09992v2")
+        self.assertEqual(res["title"], "Sample Paper Title")
+        self.assertEqual(res["authors"], ["Author One"])
+
 
 if __name__ == "__main__":
     unittest.main()

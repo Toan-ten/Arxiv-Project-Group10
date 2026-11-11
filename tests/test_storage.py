@@ -313,6 +313,42 @@ class StorageTests(unittest.TestCase):
         manifest = self.store.save_references(MSSV, ARXIV_ID, self.complete_references())
         self.assertEqual(manifest["status"], "complete_with_no_tex")
 
+    def test_confirmed_withdrawn_version_needs_no_version_directory_and_paper_complete_with_withdrawn(self):
+        self.discover(1)
+        destination = self.store.begin_version(MSSV, ARXIV_ID, "v1")
+        evidence = {
+            "classification": "withdrawn_version",
+            "is_terminal": True,
+            "original_http_status": 404,
+            "evidence_source": "arxiv_metadata",
+            "reason": "Withdrawn by author",
+            "details": {
+                "arxiv_id": ARXIV_ID,
+                "versioned_id": ARXIV_ID + "v1",
+                "official_url": f"https://arxiv.org/abs/{ARXIV_ID}v1",
+                "withdrawal_reason": "This paper has been withdrawn by the author.",
+            },
+        }
+        res = self.result("v1", status="withdrawn_version", files=[], withdrawal_evidence=evidence)
+        manifest = self.store.record_source_result(res)
+        self.assertFalse(destination.exists())
+        self.assertTrue(self.store.should_skip_version(MSSV, ARXIV_ID, "v1"))
+        self.assertEqual(manifest["versions"]["v1"]["status"], "withdrawn_version")
+        self.assertEqual(manifest["versions"]["v1"]["withdrawal_evidence"], evidence)
+        self.store.save_metadata(MSSV, ARXIV_ID, self.complete_metadata())
+        manifest = self.store.save_references(MSSV, ARXIV_ID, self.complete_references())
+        self.assertEqual(manifest["status"], "complete_with_withdrawn")
+
+    def test_withdrawn_status_rejects_keyword_without_version_scoped_evidence(self):
+        self.discover(1)
+        self.store.begin_version(MSSV, ARXIV_ID, "v1")
+        evidence = {"classification": "withdrawn_version", "reason": "Withdrawn by author"}
+        with self.assertRaises(StorageError):
+            self.store.record_source_result(self.result(
+                "v1", status="withdrawn_version", files=[], withdrawal_evidence=evidence,
+            ))
+        self.assertEqual(self.store.read_manifest(MSSV, ARXIV_ID)["versions"]["v1"]["status"], "in_progress")
+
     def test_bib_only_source_is_retained_and_no_tex_is_terminal(self):
         destination = self.put_source(entries={"refs.bib": BIB})
         self.assertEqual((destination / "refs.bib").read_bytes(), BIB)

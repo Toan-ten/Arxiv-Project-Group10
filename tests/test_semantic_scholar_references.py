@@ -1,4 +1,4 @@
-"""Issue #6: fake S2 references pages; no network or corpus writes."""
+"""Kiểm thử ngoại tuyến các trang tài liệu tham khảo từ Semantic Scholar."""
 import contextlib
 import copy
 import io

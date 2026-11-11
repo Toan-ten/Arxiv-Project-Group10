@@ -1,4 +1,4 @@
-"""Issue #5 tests: fake transport/clock only; no S2 requests or corpus files."""
+"""Kiểm thử ngoại tuyến bộ gọi Semantic Scholar; không gọi mạng hoặc ghi corpus."""
 import contextlib
 from email.message import Message
 from email.utils import formatdate
@@ -729,6 +729,34 @@ class SemanticScholarTests(unittest.TestCase):
                 self.assertTrue(failure.closed)
                 self.assertTrue(body.closed)
                 self.assertEqual(result[0]["status"], "rate_limited" if code == 429 else "http_error")
+
+
+class RateLimiterTests(unittest.TestCase):
+    def test_rolling_window_100_requests_per_300_seconds(self):
+        from src.semantic_scholar import RateLimiter
+        clock = [0.0]
+        slept = []
+        def fake_monotonic():
+            return clock[0]
+        def fake_sleep(secs):
+            slept.append(secs)
+            clock[0] += secs
+
+        limiter = RateLimiter(
+            min_interval=1.0,
+            window_seconds=300.0,
+            max_requests_per_window=5,  # test với giới hạn nhỏ 5 req / 300s
+            monotonic_fn=fake_monotonic,
+            sleep_fn=fake_sleep,
+        )
+        # Thực hiện 5 request đầu tiên, mỗi request cách nhau 1s
+        for _ in range(5):
+            limiter.wait()
+            clock[0] += 1.0
+
+        # Request thứ 6 tại t=5.0: Phải chờ đến t=300.0 để request thứ 1 rời khỏi cửa sổ 300s!
+        limiter.wait()
+        self.assertGreaterEqual(clock[0], 300.0)
 
 
 if __name__ == "__main__":

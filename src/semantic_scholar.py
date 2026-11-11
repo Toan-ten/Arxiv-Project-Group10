@@ -4,6 +4,7 @@ No requests or environment key reads on import. No Storage or Pipeline writes.
 All S2 consumers share DEFAULT_LIMITER; reference snapshots stay in memory.
 """
 import copy
+from collections import deque
 from contextlib import contextmanager
 from email.utils import parsedate_to_datetime
 import json
@@ -64,23 +65,80 @@ class RateLimiter:
     Interval is measured from response completion, conservatively. request_slot()
     yields postpone(seconds), called while holding the slot to extend cooldown.
     Share the same instance with future references code; do not make one per ID.
+    Enforces min_interval pacing AND rolling window (100 req / 300s by default).
     """
-    def __init__(self, min_interval=1.0):
+    def __init__(
+        self,
+        min_interval=1.0,
+        window_seconds=300.0,
+        max_requests_per_window=100,
+        monotonic_fn=None,
+        sleep_fn=None,
+    ):
         _positive(min_interval, "min_interval")
+        _positive(window_seconds, "window_seconds")
+        _positive(max_requests_per_window, "max_requests_per_window")
         self._min_interval = float(min_interval)
+        self.window_seconds = float(window_seconds)
+        self.max_requests_per_window = int(max_requests_per_window)
+        self._monotonic = monotonic_fn or time.monotonic
+        self._sleep = sleep_fn or time.sleep
         self._lock = Lock()
         self._next_request_at = 0.0
         self._cooldown_until = 0.0
         self._cooldown_status = None
+        self._request_timestamps = deque()
 
     @property
     def min_interval(self):
         return self._min_interval
 
+    def wait(self) -> float:
+        with self._lock:
+            total_slept = 0.0
+            while True:
+                now = self._monotonic()
+                while self._request_timestamps and now - self._request_timestamps[0] >= self.window_seconds:
+                    self._request_timestamps.popleft()
+
+                sleep_needed = 0.0
+                if now < self._next_request_at:
+                    sleep_needed = max(sleep_needed, self._next_request_at - now)
+
+                if len(self._request_timestamps) >= self.max_requests_per_window:
+                    earliest = self._request_timestamps[0]
+                    sleep_needed = max(sleep_needed, (earliest + self.window_seconds) - now)
+
+                if sleep_needed <= 0.0:
+                    break
+
+                self._sleep(sleep_needed)
+                total_slept += sleep_needed
+
+            scheduled = self._monotonic()
+            self._request_timestamps.append(scheduled)
+            self._next_request_at = scheduled + self._min_interval
+            return total_slept
+
     @contextmanager
     def request_slot(self, *, budget=None):
         with self._lock:
-            while (delay := self._next_request_at - time.monotonic()) > 0:
+            while True:
+                now = time.monotonic()
+                while self._request_timestamps and now - self._request_timestamps[0] >= self.window_seconds:
+                    self._request_timestamps.popleft()
+
+                delay = 0.0
+                if (int_delay := self._next_request_at - now) > 0:
+                    delay = max(delay, int_delay)
+                if len(self._request_timestamps) >= self.max_requests_per_window:
+                    earliest = self._request_timestamps[0]
+                    win_delay = (earliest + self.window_seconds) - now
+                    delay = max(delay, win_delay)
+
+                if delay <= 0:
+                    break
+
                 if budget is not None and delay > budget.remaining:
                     raise _WaitBudgetExceeded()
                 started = time.monotonic()
@@ -91,8 +149,11 @@ class RateLimiter:
                     http_metrics.waited("semantic_scholar", elapsed)
                     if budget is not None:
                         budget.remaining -= elapsed
+
             if budget is not None and budget.remaining < 0:
                 raise _WaitBudgetExceeded()
+
+            self._request_timestamps.append(time.monotonic())
 
             def postpone(seconds, *, http_status=None):
                 if (type(seconds) not in (int, float)

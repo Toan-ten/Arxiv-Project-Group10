@@ -12,6 +12,14 @@ from src.pilots import build_pilot_set, build_smoke_set
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
+PILOTS_DIR = CONFIG_DIR / "pilots"
+
+
+def _pilot_file_path(filename: str) -> Path:
+    nested = PILOTS_DIR / filename
+    if nested.exists():
+        return nested
+    return CONFIG_DIR / filename
 
 
 class PilotSetTests(unittest.TestCase):
@@ -104,8 +112,8 @@ class PilotSetTests(unittest.TestCase):
         )
 
     def test_committed_pilot_files_match_builder(self):
-        smoke_path = CONFIG_DIR / "pilot_10.json"
-        pilot_path = CONFIG_DIR / "pilot_500.json"
+        smoke_path = _pilot_file_path("pilot_10.json")
+        pilot_path = _pilot_file_path("pilot_500.json")
 
         smoke = json.loads(smoke_path.read_text(encoding="utf-8"))
         pilot = json.loads(pilot_path.read_text(encoding="utf-8"))
@@ -126,7 +134,7 @@ class PilotSetTests(unittest.TestCase):
         for filename in ("pilot_10.json", "pilot_500.json"):
             with self.subTest(filename=filename):
                 entries = json.loads(
-                    (CONFIG_DIR / filename).read_text(encoding="utf-8")
+                    _pilot_file_path(filename).read_text(encoding="utf-8")
                 )
                 for entry in entries:
                     self.assertEqual(set(entry), expected_fields)
@@ -244,7 +252,7 @@ class PilotSetTests(unittest.TestCase):
         ):
             with self.subTest(filename=filename):
                 expected = json.loads(
-                    (CONFIG_DIR / filename).read_text(encoding="utf-8")
+                    _pilot_file_path(filename).read_text(encoding="utf-8")
                 )
                 for members in (self.members, tuple(self.members), self.members):
                     self.assertEqual(

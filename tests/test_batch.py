@@ -398,6 +398,34 @@ class BatchTests(unittest.TestCase):
         self.opener.open.assert_not_called()
         self.assertEqual(self.logs(), before)
 
+    @patch("src.pipeline._run_s2")
+    def test_batch_resume_with_legacy_s2_config_key(self, mock_s2):
+        """BUG-002: batch.run_batch accepts legacy 's2_config' key on resume."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes((PAIR,))
+        self.run_batch(max_ids=1, s2_config=s2_cfg)
+
+        manifest_path = Path(self.temp.name) / "logs" / "offline-batch" / "batch.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        norm_s2 = data["definition"].pop("s2")
+        data["definition"]["s2_config"] = norm_s2
+        manifest_path.write_text(json.dumps(data), encoding="utf-8")
+
+        self.successes((PAIR,))
+        result = self.run_batch(max_ids=1, resume=True, s2_config=s2_cfg)
+        self.assertEqual(result["status"], "finished")
+
+    @patch("src.pipeline._run_s2")
+    def test_batch_resume_with_changed_s2_config_fails(self, mock_s2):
+        """BUG-002: batch.run_batch rejects resume when s2_config differs."""
+        s2_cfg = {"timeout": 15.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        s2_changed = {"timeout": 25.0, "max_attempts": 1, "min_interval": 1.0, "reference_limit": 50}
+        self.successes((PAIR,))
+        self.run_batch(max_ids=1, s2_config=s2_cfg)
+
+        with self.assertRaisesRegex(batch.BatchError, "definition changed"):
+            self.run_batch(max_ids=1, resume=True, s2_config=s2_changed)
+
 
 if __name__ == "__main__":
     unittest.main()

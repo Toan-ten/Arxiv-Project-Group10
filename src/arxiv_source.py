@@ -18,7 +18,7 @@ CHUNK_SIZE = 64 * 1024
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 MAX_UNPACKED_BYTES = 200 * 1024 * 1024
 MAX_MEMBERS = 10000
-KEPT_SUFFIXES = {".tex", ".bib"}
+KEPT_SUFFIXES = {".tex", ".bib", ".bbl"}
 
 
 class SourceError(Exception):
@@ -53,17 +53,19 @@ def _safe_path(name, is_directory, seen):
     path = PurePosixPath(name)
     if path.is_absolute() or ".." in path.parts or (not path.parts and not is_directory):
         raise SourceError("unsafe_archive", f"Unsafe path: {name!r}")
+    is_kept = (not is_directory) and (path.suffix.lower() in KEPT_SUFFIXES)
     for index, part in enumerate(path.parts):
         if (len(part) > 255 or part.endswith((".", " "))
                 or re.fullmatch(r"CON(?:IN\$|OUT\$)?|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]",
                                 part.split(".")[0].rstrip(" "), re.IGNORECASE)):
             raise SourceError("unsafe_archive", f"Unsafe path: {name!r}")
-        prefix = PurePosixPath(*path.parts[:index + 1]).as_posix()
-        directory = index < len(path.parts) - 1 or is_directory
-        previous = seen.get(prefix.casefold())
-        if previous is not None and (previous != (prefix, directory) or not directory):
-            raise SourceError("unsafe_archive", f"Conflicting path: {name!r}")
-        seen[prefix.casefold()] = (prefix, directory)
+        if is_kept:
+            prefix = PurePosixPath(*path.parts[:index + 1]).as_posix()
+            directory = index < len(path.parts) - 1 or is_directory
+            previous = seen.get(prefix.casefold())
+            if previous is not None and (previous != (prefix, directory) or not directory):
+                raise SourceError("unsafe_archive", f"Conflicting path: {name!r}")
+            seen[prefix.casefold()] = (prefix, directory)
     return path
 
 
@@ -201,6 +203,19 @@ def extract_source(source_path: str | Path, destination: str | Path) -> dict:
         return {**result, "status": "storage_error", "error": str(exc)}
 
 
+def _valid_content_range(header_val: str | None, expected_start: int, total_expected: int) -> tuple[bool, int]:
+    """Validate Content-Range: bytes <start>-<end>/<total> against expected offset and total."""
+    if not header_val:
+        return False, 0
+    m = re.fullmatch(r"bytes\s+([0-9]+)-([0-9]+)/([0-9]+)", header_val.strip(), re.IGNORECASE)
+    if not m:
+        return False, 0
+    start, end, total = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if start != expected_start or total != total_expected or start > end or end >= total_expected:
+        return False, 0
+    return True, (end - start + 1)
+
+
 def download_source(
     mssv: str,
     versioned_id: str,
@@ -226,6 +241,7 @@ def download_source(
     try:
         with tempfile.TemporaryDirectory(prefix="arxiv-download-") as work:
             payload = Path(work) / "source"
+            url = SOURCE_URL + quote(versioned_id, safe="/")
 
             def read_source(response):
                 content_type = response.headers.get("Content-Type", "")
@@ -240,6 +256,10 @@ def download_source(
                     return {**details, "status": "invalid_response", "error": "Invalid Content-Length"}
                 if length is not None and int(length) > MAX_DOWNLOAD_BYTES:
                     return {**details, "status": "size_limit", "error": "Source exceeds the download-size limit"}
+                initial_etag = response.headers.get("ETag")
+                if initial_etag is not None:
+                    initial_etag = initial_etag.strip()
+                extra_attempts = 0
                 try:
                     target = payload.open("wb", buffering=0)
                 except OSError as exc:
@@ -247,16 +267,74 @@ def download_source(
                 try:
                     with target:
                         size = _copy_limited(response, target, MAX_DOWNLOAD_BYTES)
+                    if (
+                        length is not None
+                        and 0 < size < int(length)
+                        and response.headers.get("Accept-Ranges", "").strip().lower() == "bytes"
+                        and (initial_etag is None or not initial_etag.startswith("W/"))
+                    ):
+                        total_expected = int(length)
+                        response.close()
+                        with payload.open("ab", buffering=0) as append_target:
+                            while size < total_expected and extra_attempts < 8:
+                                extra_attempts += 1
+                                expected_start = size
+
+                                def _read_chunk(range_resp, start_off=expected_start):
+                                    if getattr(range_resp, "status", None) != 206:
+                                        return {"status": "range_mismatch", "chunk_bytes": 0}
+                                    resp_etag = range_resp.headers.get("ETag")
+                                    if initial_etag is not None and resp_etag is not None:
+                                        if resp_etag.strip() != initial_etag:
+                                            return {"status": "etag_mismatch", "chunk_bytes": 0}
+                                    ok, expected_chunk = _valid_content_range(
+                                        range_resp.headers.get("Content-Range"),
+                                        start_off,
+                                        total_expected,
+                                    )
+                                    if not ok:
+                                        return {"status": "range_mismatch", "chunk_bytes": 0}
+                                    chunk_read = _copy_limited(
+                                        range_resp, append_target, MAX_DOWNLOAD_BYTES - start_off
+                                    )
+                                    if chunk_read <= 0 or chunk_read > expected_chunk:
+                                        return {"status": "empty_or_overflow_range", "chunk_bytes": chunk_read}
+                                    return {"status": "chunk_ok", "chunk_bytes": chunk_read}
+
+                                range_res = arxiv_client._request_arxiv_range(
+                                    url,
+                                    start_byte=expected_start,
+                                    total_expected=total_expected,
+                                    timeout=timeout,
+                                    user_agent=user_agent,
+                                    attempt_number=1 + extra_attempts,
+                                    read_chunk=_read_chunk,
+                                    max_attempts=max_attempts,
+                                )
+                                extra_attempts += range_res.get("_extra_range_attempts", 0)
+                                if range_res["status"] != "chunk_ok":
+                                    if range_res.get("http_status") in (403, 429) or range_res["status"] in ("http_error", "rate_limited"):
+                                        return {
+                                            "content_type": None,
+                                            "status": range_res["status"],
+                                            "http_status": range_res["http_status"],
+                                            "error": range_res.get("error"),
+                                            "_extra_attempts": extra_attempts,
+                                        }
+                                    break
+                                size = append_target.tell()
+                                if size <= expected_start:
+                                    break
                 except SourceError as exc:
-                    return {**details, "status": exc.status, "error": str(exc)}
+                    return {**details, "status": exc.status, "error": str(exc), "_extra_attempts": extra_attempts}
                 if length is not None and size < int(length):
                     raise IncompleteRead(b"", int(length) - size)
                 if length is not None and size > int(length):
-                    return {**details, "status": "invalid_response", "error": "Body exceeds Content-Length"}
-                return {**details, "status": "downloaded", "downloaded_bytes": size}
+                    return {**details, "status": "invalid_response", "error": "Body exceeds Content-Length", "_extra_attempts": extra_attempts}
+                return {**details, "status": "downloaded", "downloaded_bytes": size, "_extra_attempts": extra_attempts}
 
             response = arxiv_client._request_arxiv(
-                SOURCE_URL + quote(versioned_id, safe="/"), timeout=timeout,
+                url, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
                 accept="application/octet-stream", read_response=read_source,
             )

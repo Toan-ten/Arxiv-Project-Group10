@@ -4,13 +4,17 @@ No requests or output are produced on import. Calls use the existing HTTP
 client; offline callers/tests must provide fake HTTP. Single writer only.
 """
 import copy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
+import json
+import os
+from pathlib import Path
 import re
 import time
 
 from src import arxiv_client, arxiv_source, arxiv_history, semantic_scholar, s2_integration
 from src.storage import CorpusStorage, StorageError, TERMINAL, RETRYABLE
+from src.arxiv_version_page import verify_version_withdrawal
 
 
 class PipelineStopped(RuntimeError):
@@ -24,13 +28,43 @@ class PipelineStopped(RuntimeError):
 class _HttpPolicyStop(Exception):
     """Internal signal to stop the batch for a final 403/429 result."""
 
-    def __init__(self, paper, stage, http_status, version, *, checkpoint_saved=True):
+    def __init__(self, paper, stage, http_status, version, *, checkpoint_saved=True,
+                 attempts=None, retry_wait_budget_seconds=None):
         self.reason = dict(
             type="http_policy", stage=stage, http_status=http_status,
             mssv=paper["mssv"], arxiv_id=paper["arxiv_id"], version=version,
             checkpoint_saved=checkpoint_saved,
         )
+
+
+        if type(attempts) is int and attempts >= 0:
+            self.reason["attempts"] = attempts
+        if (isinstance(retry_wait_budget_seconds, (int, float))
+                and not isinstance(retry_wait_budget_seconds, bool)
+                and math.isfinite(retry_wait_budget_seconds)
+                and retry_wait_budget_seconds > 0):
+            self.reason["retry_wait_budget_seconds"] = float(retry_wait_budget_seconds)
         super().__init__(f"Batch stopped after HTTP {http_status} at {stage}")
+
+
+DISCOVERY_MAX_AGE = timedelta(days=30)
+
+
+def cached_discovery_is_fresh(metadata, *, now=None):
+    """Return whether cached arXiv discovery evidence is valid for 30 days."""
+    provenance = metadata.get("provenance", {}).get("arxiv") if isinstance(metadata, dict) else None
+    retrieved_at = provenance.get("retrieved_at") if isinstance(provenance, dict) else None
+    if not isinstance(retrieved_at, str):
+        return False
+    try:
+        retrieved = datetime.fromisoformat(retrieved_at.replace("Z", "+00:00"))
+        current = now or datetime.now(timezone.utc)
+        if retrieved.tzinfo is None or current.tzinfo is None:
+            return False
+        age = current - retrieved
+        return timedelta(0) <= age <= DISCOVERY_MAX_AGE
+    except (ValueError, TypeError):
+        return False
 
 
 def _inputs(pairs, store, timeout, max_attempts, user_agent):
@@ -79,9 +113,13 @@ def _error(paper, stage, kind, message, version=None):
     ))
 
 
-def _stop_on_http(paper, stage, http_status, version=None):
+def _stop_on_http(paper, stage, http_status, version=None, *, attempts=None,
+                  retry_wait_budget_seconds=None):
     if http_status in (403, 429):
-        raise _HttpPolicyStop(paper, stage, http_status, version)
+        raise _HttpPolicyStop(
+            paper, stage, http_status, version, attempts=attempts,
+            retry_wait_budget_seconds=retry_wait_budget_seconds,
+        )
 
 
 def _checkpoint(paper, manifest):
@@ -100,12 +138,48 @@ def _checkpoint(paper, manifest):
 
 
 def _cached_snapshot(store, paper):
-    provenance = store.read_metadata(paper["mssv"], paper["arxiv_id"])["provenance"]["arxiv"]
+    provenance = store.read_metadata(paper["mssv"], paper["arxiv_id"])["provenance"].get("arxiv")
+    if not isinstance(provenance, dict):
+        return None
     snapshot = provenance.get("snapshot") if isinstance(provenance, dict) else None
-    if (not isinstance(snapshot, dict)
-            or snapshot.get("status") != paper["discovery"]["status"]):
-        raise StorageError("Cached discovery requires matching arXiv provenance and snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    if snapshot.get("status") != paper["discovery"]["status"]:
+        raise StorageError("Cached discovery status conflicts with its arXiv snapshot")
+    # Legacy Kaggle ingestion placed its snapshot in the arXiv provenance
+    # field. Such evidence must be reviewed, never treated as arXiv discovery.
+    if "revised_dates" in snapshot and snapshot.get("http_status") != 200:
+        return None
     return snapshot
+
+
+def _verify_withdrawal_404(store, paper, version, options):
+    """Resolve a source 404 only from the exact official arXiv version page."""
+    started = time.perf_counter()
+    evidence = verify_version_withdrawal(
+        paper["arxiv_id"], version, timeout=options["timeout"],
+        max_attempts=options["max_attempts"], user_agent=options["user_agent"],
+    )
+    paper["source"].setdefault(version, {})["withdrawal_verification"] = {
+        key: evidence.get(key) for key in ("status", "http_status", "attempts", "error", "url")
+    }
+    paper["source"][version]["withdrawal_verification"]["wall_seconds"] = max(
+        0.0, time.perf_counter() - started,
+    )
+    if evidence.get("http_status") in (403, 429):
+        _stop_on_http(paper, "withdrawal_verification", evidence["http_status"], version,
+                      attempts=evidence.get("attempts"))
+    if evidence.get("status") != "confirmed_withdrawn":
+        return None
+    metadata = store.read_metadata(paper["mssv"], paper["arxiv_id"])
+    snapshot = (metadata.get("provenance", {}).get("arxiv") or {}).get("snapshot") or {}
+    evidence["version_ids"] = list(snapshot.get("version_ids") or [])
+    manifest = store.confirm_withdrawn_version(
+        paper["mssv"], paper["arxiv_id"], version, evidence,
+    )
+    _checkpoint(paper, manifest)
+    paper["source"][version]["withdrawal_verification"]["status"] = "confirmed_withdrawn"
+    return manifest
 
 
 def _record_http_result(paper, stage, result, save, version=None):
@@ -140,6 +214,39 @@ def _run_paper(store, paper, options, versions):
         paper["discovery"]["action"] = "cached"
         snapshot = _cached_snapshot(store, paper)
         paper["discovery"].update(wall_seconds=0.0, timing_status="cached")
+        cached_metadata = store.read_metadata(mssv, arxiv_id)
+        if not cached_discovery_is_fresh(cached_metadata):
+            started = time.perf_counter()
+            try:
+                fresh = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
+            finally:
+                paper["discovery"].update(wall_seconds=max(0.0, time.perf_counter() - started),
+                                          timing_status="measured", action="queried")
+            paper["discovery"].update(http_status=fresh.get("http_status"),
+                                      attempts=fresh.get("attempts", 0), error=fresh.get("error"))
+            if fresh.get("http_status") in (403, 429):
+                paper["blocked"]["discovery"] = "refresh_stopped"
+                _error(paper, "discovery", "refresh_stopped", "Fresh discovery blocked by HTTP policy")
+                _stop_on_http(paper, "discovery", fresh.get("http_status"))
+            if (paper["discovery"]["status"] == "not_found" and fresh.get("status") == "not_found"
+                    and fresh.get("http_status") == 200):
+                manifest = store.record_discovery(fresh)
+                _checkpoint(paper, manifest)
+                return True
+            if (fresh.get("status") != "found" or fresh.get("http_status") != 200
+                    or fresh.get("version_status") != "resolved"
+                    or fresh.get("mssv") != mssv or fresh.get("arxiv_id") != arxiv_id):
+                paper["blocked"]["discovery"] = "refresh_unverified"
+                _error(paper, "discovery", "refresh_unverified", "Fresh discovery could not confirm cached paper")
+                return False
+            paper["discovery"]["reverified_at"] = datetime.now(timezone.utc).isoformat()
+            paper["discovery"]["reverified_version_ids"] = list(fresh["version_ids"])
+            if paper["discovery"]["status"] == "not_found":
+                manifest = store.record_discovery(fresh)
+            else:
+                manifest = store.refresh_discovery(fresh)
+            _checkpoint(paper, manifest)
+            snapshot = fresh
     else:
         paper["discovery"]["action"] = "queried"
         started = time.perf_counter()
@@ -179,6 +286,15 @@ def _run_paper(store, paper, options, versions):
     # Also checks orphan destinations for newly discovered versions.
     plan = store.resume(mssv, arxiv_id)
     _checkpoint(paper, plan["manifest"])
+    resolved = False
+    for name in plan.get("verify_withdrawal", []):
+        if _verify_withdrawal_404(store, paper, name, options) is not None:
+            resolved = True
+        else:
+            plan["blocked"][name] = plan["manifest"]["versions"][name]["status"]
+    if resolved:
+        plan = store.resume(mssv, arxiv_id)
+        _checkpoint(paper, plan["manifest"])
     paper["skipped"] = list(plan["skip"])
     for name in plan["skip"]:
         paper["source"][name]["action"] = "skipped"
@@ -204,6 +320,10 @@ def _run_paper(store, paper, options, versions):
             manifest = _record_http_result(
                 paper, "source", result, store.record_source_result, name,
             )
+            if result.get("http_status") == 404:
+                _verify_withdrawal_404(store, paper, name, options)
+                manifest = store.read_manifest(mssv, arxiv_id)
+                _checkpoint(paper, manifest)
         except StorageError as exc:
             # Storage may already have persisted validation_failed.
             manifest = store.read_manifest(mssv, arxiv_id)
@@ -241,6 +361,20 @@ def _run_history(store, paper, options):
     info.update(action="in_progress", status="in_progress",
                 observed_at=datetime.now(timezone.utc).isoformat())
     try:
+        # Candidates never replace discovery; require a fresh successful arXiv
+        # query in this invocation, then accept only a matching history.
+        index_path = os.environ.get("M1_KAGGLE_CANDIDATE_INDEX")
+        if index_path and paper["discovery"].get("action") == "queried" and paper["discovery"].get("http_status") == 200:
+            try:
+                index = json.loads(Path(index_path).read_text(encoding="utf-8"))
+                candidate = index.get("candidates", {}).get(identifier)
+                if (index.get("status") == "complete" and candidate
+                        and re.fullmatch(r"[0-9a-f]{64}", index.get("snapshot_sha256", ""))):
+                    from src.kaggle_candidates import apply_verified_history
+                    apply_verified_history(store, mssv, identifier, candidate, index)
+            except (OSError, ValueError, KeyError, TypeError):
+                # Missing or invalid index leaves arXiv history as the fallback.
+                pass
         result = arxiv_history.enrich_version_history(store, mssv, identifier, **options)
     except StorageError as exc:
         info.update(action="blocked", status="blocked", error=dict(type=type(exc).__name__))
@@ -260,6 +394,8 @@ def _run_history(store, paper, options):
     metadata = store.read_metadata(mssv, identifier)
     provenance = metadata["provenance"]["version_history"]
     info["retrieved_at"] = provenance.get("retrieved_at") if provenance else None
+    if provenance and provenance.get("provider") == "kaggle_snapshot":
+        info["provider"] = "kaggle_snapshot"
     if result["action"] == "cached" and provenance is None:
         discovery = metadata["provenance"]["arxiv"]
         source = discovery.get("field_sources", {}).get("published", discovery)
@@ -276,7 +412,8 @@ def _run_history(store, paper, options):
                                   version, checkpoint_saved=False)
 
 
-def _save_s2_result(store, paper, stage, result, build, save, *, references=False):
+def _save_s2_result(store, paper, stage, result, build, save, *, references=False,
+                    retry_wait_budget_seconds=None):
     """Preserve the HTTP stop signal even when validation/persistence fails."""
     http = s2_integration.http_status(result, references=references)
     try:
@@ -290,7 +427,12 @@ def _save_s2_result(store, paper, stage, result, build, save, *, references=Fals
             ) from None
         raise
     _checkpoint(paper, manifest)
-    _stop_on_http(paper, stage, http)
+    error = result.get("error") or {}
+    attempts = error.get("attempts") if references else result.get("attempts")
+    _stop_on_http(
+        paper, stage, http, attempts=attempts,
+        retry_wait_budget_seconds=retry_wait_budget_seconds,
+    )
 
 
 def _run_s2(store, paper, config, limiter):
@@ -325,6 +467,7 @@ def _run_s2(store, paper, config, limiter):
             store, paper, "s2_metadata", result,
             lambda: s2_integration.metadata_snapshot(metadata, result),
             lambda value: store.save_metadata(mssv, identifier, value),
+            retry_wait_budget_seconds=config.get("max_retry_wait"),
         )
         if result["status"] == "invalid_response":
             paper["blocked"]["s2_metadata"] = "invalid_response"
@@ -357,6 +500,7 @@ def _run_s2(store, paper, config, limiter):
             store, paper, "s2_references", result,
             lambda: s2_integration.reference_result(previous, result),
             lambda value: store.save_references(mssv, identifier, value), references=True,
+            retry_wait_budget_seconds=config.get("max_retry_wait"),
         )
     except StorageError:
         paper["blocked"]["s2_references"] = "invalid_reference_result"
@@ -369,7 +513,7 @@ def _run_s2(store, paper, config, limiter):
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
     user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None,
-    revision_history=True,
+    revision_history=True, should_stop=None,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
@@ -392,11 +536,15 @@ def run_selected(
     raise PipelineStopped with a partial summary. KeyboardInterrupt propagates.
     on_progress(event, summary_copy) runs before/after each paper. Callback
     exceptions propagate immediately and prevent the next HTTP operation.
+    should_stop is checked between papers. A true result returns a resumable
+    session_budget stop without starting another paper or issuing another request.
     """
     if type(revision_history) is not bool:
         raise ValueError("revision_history must be bool")
     if on_progress is not None and not callable(on_progress):
         raise ValueError("on_progress must be callable or None")
+    if should_stop is not None and not callable(should_stop):
+        raise ValueError("should_stop must be callable or None")
     versions = _version_selection(versions)
     store = CorpusStorage(corpus_root, run_id=run_id)
     selected = _inputs(pairs, store, timeout, max_attempts, user_agent)
@@ -407,6 +555,10 @@ def run_selected(
     options = dict(timeout=timeout, max_attempts=max_attempts, user_agent=user_agent)
     summary = dict(run_id=run_id, papers=[], stopped=False)
     for mssv, arxiv_id in selected:
+        if should_stop is not None and should_stop():
+            summary.update(stopped=True, stop_reason={"type": "session_budget",
+                "stage": "before_paper", "message": "Soft session budget reached; checkpoint is resumable."})
+            break
         paper = dict(
             mssv=mssv, arxiv_id=arxiv_id, paper_status=None,
             metadata_status=None, references_status=None,

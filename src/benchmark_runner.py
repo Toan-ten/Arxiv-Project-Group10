@@ -81,8 +81,12 @@ def _locations(corpus_root, log_root, batch_id):
 def _load_evidence(directory, batch_id, corpus):
     value = batch._read(directory / "batch.json")
     _require(value.get("schema_version") == 1 and value.get("batch_id") == batch_id)
-    definition = value["definition"]
+    definition = copy.deepcopy(value["definition"])
     _require(isinstance(definition, dict))
+    if "s2_config" in definition and "s2" not in definition:
+        definition["s2"] = s2_integration.configuration(definition.pop("s2_config"))
+    elif "s2" in definition and definition["s2"] is not None:
+        definition["s2"] = s2_integration.configuration(definition["s2"])
     expected = _definition(
         definition["input_pairs"], corpus, definition["max_ids"],
         definition["versions"], definition["timeout"], definition["max_attempts"],
@@ -260,10 +264,12 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
     )
     # A claimed complete paper must satisfy every contract condition, not just
     # have one successful source version.
-    if manifest["status"] in {"complete", "complete_with_no_tex"}:
+    if manifest["status"] in {"complete", "complete_with_no_tex", "complete_with_withdrawn"}:
         _require(complete)
-        expected = "complete_with_no_tex" if any(
-            v["status"] == "no_tex_source" for v in versions) else "complete"
+        expected = "complete_with_withdrawn" if any(
+            v["status"] == "withdrawn_version" for v in versions) else (
+            "complete_with_no_tex" if any(
+            v["status"] == "no_tex_source" for v in versions) else "complete")
         _require(manifest["status"] == expected)
     return dict(
         mssv=mssv, arxiv_id=identifier, checkpoint_status="verified",
@@ -271,7 +277,7 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
         version_status=manifest["version_status"], versions=versions,
         references_status=references["status"],
         reference_items=len(references["items"]) if references["status"] == "complete" else None,
-        publication_complete=complete and manifest["status"] in {"complete", "complete_with_no_tex"},
+        publication_complete=complete and manifest["status"] in {"complete", "complete_with_no_tex", "complete_with_withdrawn"},
     )
 
 
@@ -507,6 +513,7 @@ def run_benchmark(
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
     disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
+    should_stop=None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
@@ -568,6 +575,7 @@ def run_benchmark(
                 resume=resume, versions=versions, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
                 revision_history=revision_history,
+                should_stop=should_stop,
                 **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:
