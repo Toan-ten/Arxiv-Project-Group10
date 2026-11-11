@@ -228,6 +228,7 @@ __marimo__/
 
 # Local environment overrides
 .env.*
+!/.env.example
 
 # Crawl data and runtime files
 /data/
@@ -237,3 +238,14 @@ __marimo__/
 /checkpoint/
 /logs/
 /outputs/
+/benchmark_results/
+/test_corpus_tmp/
+/raw/
+
+# Local audit reports and generated reports
+/reports/
+/docs/audits/
+
+# Local assignment documents and captured source samples
+/request/
+/docs/contracts/evidence/
