@@ -66,6 +66,8 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                 compile("".join(cell["source"]), f"cell-{index}", "exec")
                 self.assertIsNone(cell["execution_count"])
                 self.assertEqual(cell["outputs"], [])
+        self.assertIn("Đang chạy toàn bộ quy trình M1", self.code[-1])
+        self.assertIn("Đang đọc Colab Secret", self.code[-1])
 
     def test_all_members_use_the_same_full_assignment_configuration(self):
         config = load_config()
@@ -110,12 +112,14 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("thử chuyển đổi cục bộ", self.text)
 
     def test_runtime_pins_match_implementation_commit(self):
-        expected = "ea0d23a1799953686c64dad7ea884e1cd8db0082"
+        expected = "cdfde34b8beaed0afc20c7fb660070987cbec4e3"
         setup = self.code[0]
         self.assertIn(f'M1_RUNTIME_COMMIT = "{expected}"', setup)
         self.assertEqual(len(expected), 40)
         import subprocess
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
+                       cwd=self.root, check=True, capture_output=True)
+        subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
                        cwd=self.root, check=True, capture_output=True)
         for module in ("session_evidence.py", "kaggle_candidates.py", "m1_workflow.py", "bbl_handling.py"):
             self.assertTrue((self.root / "src" / module).is_file())

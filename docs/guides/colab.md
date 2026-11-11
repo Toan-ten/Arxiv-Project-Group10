@@ -9,6 +9,7 @@ Thực hiện các bước trong [hướng dẫn chạy M1](../M1_COLAB_MEMBER_G
 - Dùng MSSV trong `config/group10_id_ranges.json`. Mặc định chạy đủ 50 lô của thành viên; `COHORT_LIMIT` chỉ giới hạn số lô đầu trong cùng luồng.
 - Kaggle chỉ cung cấp dữ liệu ứng viên. arXiv xác nhận bài báo và phiên bản; khi snapshot không dùng được, quy trình tiếp tục bằng arXiv.
 - Khi tải snapshot, ô Colab báo lúc bắt đầu và nhắc trạng thái mỗi 30 giây; thời hạn tải là 60 phút. Nếu dừng thủ công, tiến trình tải bị dừng và tệp tạm được dọn. Lần chạy sau có thể phải tải lại nếu snapshot chưa hoàn tất.
+- Ô 3 in thời điểm bắt đầu và kết thúc từng giai đoạn. Khi tải mã nguồn hoặc lấy dữ liệu S2, ô hiển thị tiến độ theo lô, cập nhật ID đang xét và nhắc trạng thái sau mỗi 30 giây.
 
 ## Dừng và tiếp tục
 
