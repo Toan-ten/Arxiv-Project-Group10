@@ -123,7 +123,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
     def test_runtime_pins_match_implementation_commit(self):
         setup = self.code[0]
         expected = re.search(r'M1_RUNTIME_COMMIT = "([0-9a-f]{40})"', setup).group(1)
-        self.assertEqual(expected, "6aa0a405ca5877e2ca9dc70b9a18d0a60bf6a28e")
+        self.assertEqual(expected, "41c62a3e6b721640b2e395a4590ed2eaea1addbe")
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
