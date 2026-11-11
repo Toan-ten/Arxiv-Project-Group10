@@ -114,6 +114,17 @@ class ReferencesTests(unittest.TestCase):
         self.assertEqual(result["items"][0]["authors"], ["Author One"])
         self.assertEqual(result["items"][0]["raw"], raw)
 
+    def test_raw_only_corpus_id_type_does_not_reject_reference_page(self):
+        raw = reference()
+        raw["citedPaper"]["corpusId"] = "corpus-123"
+        self.outcomes = [page([raw])]
+
+        result = self.fetch()
+
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["items"][0]["raw"], raw)
+        self.assert_contract(result)
+
     def test_multiple_pages_follow_next_and_preserve_order(self):
         raws = [reference("2502.08235"), reference("2508.07872"), reference("hep-th/9901001")]
         self.outcomes = [page(raws[:2], next=2), page(raws[2:], offset=2)]

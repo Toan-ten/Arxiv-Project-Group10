@@ -311,9 +311,11 @@ publication_date, year, venue, s2_paper_id, missing_fields, raw`.
 - `raw` là bản sao đầy đủ của bản ghi quan hệ gốc, giữ publicationVenue,
   contexts, intents, isInfluential và metadata chưa ánh xạ. Không dedupe.
 
-JSON/field có kiểu sai bị coi là response lỗi, không biến thành một reference
-giả. Trang sai offset, JSON hoặc cấu trúc item bị từ chối nguyên trang; mọi
-trang hợp lệ trước đó vẫn giữ. Nếu dữ liệu items trang hiện tại hợp lệ nhưng
+Field được chuẩn hóa hoặc dùng để xác minh danh tính sai kiểu bị coi là response
+lỗi, không biến thành một reference giả. `corpusId` không được chuẩn hóa; giá trị
+nguyên bản của nó nằm trong `raw`, nên kiểu bất thường của trường phụ này không
+làm mất cả trang references. Trang sai offset, JSON hoặc cấu trúc item bị từ chối
+nguyên trang; mọi trang hợp lệ trước đó vẫn giữ. Nếu dữ liệu items trang hiện tại hợp lệ nhưng
 next/total sai, items đó vẫn được giữ và coverage không complete.
 
 ### Các trạng thái lỗi

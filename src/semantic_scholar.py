@@ -497,9 +497,11 @@ def _normalize_reference(raw):
     for name in ("paperId", "title", "venue", "url", "publicationDate"):
         if paper.get(name) is not None and not isinstance(paper[name], str):
             raise _InvalidResponse("invalid_reference_field")
-    for name in ("corpusId", "year"):
-        if paper.get(name) is not None and (type(paper[name]) is not int or paper[name] < 0):
-            raise _InvalidResponse("invalid_reference_field")
+    # corpusId is not part of the normalized M1 reference record. Preserve it
+    # verbatim in raw, but do not reject an otherwise usable page if the API
+    # changes the type of this ancillary field.
+    if paper.get("year") is not None and (type(paper["year"]) is not int or paper["year"] < 0):
+        raise _InvalidResponse("invalid_reference_field")
     for name in ("externalIds", "publicationVenue"):
         if paper.get(name) is not None and not isinstance(paper[name], dict):
             raise _InvalidResponse("invalid_reference_field")
