@@ -223,8 +223,22 @@ def timing_summary(history):
     queried_seconds, paper_seconds = 0.0, 0.0
     query_count, cached_count, observations, unknown_discovery, unknown_paper = 0, 0, 0, 0, 0
     processed_ids = set()
+    paper_intervals = []
     for attempt in history:
         for row in attempt["papers"]:
+            if row["started_at"] is not None:
+                result = row.get("result") or {}
+                discovery = result.get("discovery") or {}
+                revision = result.get("revision_history") or {}
+                paper_intervals.append({"attempt_id": attempt.get("attempt_id"),
+                                        "arxiv_id": row["arxiv_id"],
+                                        "state": row["state"],
+                                        "wall_seconds": row["wall_seconds"],
+                                        "discovery_action": discovery.get("action"),
+                                        "discovery_status": discovery.get("status"),
+                                        "discovery_seconds": discovery.get("wall_seconds"),
+                                        "revision_action": revision.get("action"),
+                                        "revision_seconds": revision.get("wall_seconds")})
             if row["state"] == "processed":
                 processed_ids.add(row["arxiv_id"])
             if row["started_at"] is not None or row["state"] == "processed":
@@ -257,6 +271,7 @@ def timing_summary(history):
         discovery_missing_intervals=unknown_discovery,
         discovery_scope="query_arxiv call including pacing/retry/parsing; excludes cache and Storage writes",
         paper_observations=observations, unique_processed_papers=len(processed_ids),
+        paper_intervals=paper_intervals,
         cohort_papers=cohort, known_paper_wall_seconds=paper_seconds,
         missing_paper_intervals=unknown_paper,
         average_paper_seconds=paper_seconds / cohort if all_processed else None,

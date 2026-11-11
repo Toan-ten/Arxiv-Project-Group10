@@ -19,4 +19,8 @@ Ngân sách phiên mặc định là 10 giờ. Thời gian chờ và thử lại
 
 Quy ước ánh xạ ngày tham khảo và xử lý tệp `.bbl` được nêu trong [hợp đồng dữ liệu](../contracts/source_data_contracts.md).
 
+Các phép đo kích thước nguồn so sánh tổng byte file thường sau giải nén trước lọc với byte file nguồn được giữ; bước lọc cũng loại các file không phải hình. Kích thước archive nén được ghi riêng. Các phiên bản cũ thiếu số đo trước lọc phải giữ trạng thái chưa đo.
+
+Thời gian theo bài gồm khoảng đo source và S2 ghi trong các quan sát; phần chuẩn bị snapshot, sao lưu archive, kiểm toán và xuất bảng là chi phí dùng chung và được báo riêng. Tỷ lệ metadata reference tính trên reference của các danh sách đã hoàn tất, với điều kiện có tiêu đề, tác giả, ngày nộp hoặc công bố và ID Semantic Scholar; arXiv ID không bắt buộc.
+
 Phép đo cuối cần nhật ký các phiên của toàn nhóm và đủ 20.000 vị trí ID. Mẫu kiểm tra không đại diện cho kết quả toàn nhóm. Xem [hướng dẫn tổng hợp benchmark](../operations/benchmark_runner.md).

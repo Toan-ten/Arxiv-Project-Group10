@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -120,6 +121,31 @@ def aggregate(base: Path) -> dict:
     summary["scope"] = "end_to_end_wall_seconds covers each completed session from snapshot preparation through audit, eligible export and size accounting; environment installation and inter-session gaps are excluded; stage intervals separately support diagnostics"
     summary["member_campaign_count"] = len(member_summaries)
     missing_summaries = sorted(set(MEMBERS) - set(member_summaries))
+    paper_rows = []
+    discovery_seconds = []
+    measurement_missing = []
+    for member in MEMBERS:
+        value = member_summaries.get(member, {})
+        paper_metrics = value.get("paper_timings") or {}
+        discovery = value.get("discovery_timings") or {}
+        rows_for_member = paper_metrics.get("papers")
+        seconds = discovery.get("wall_seconds")
+        if (paper_metrics.get("status") != "complete" or not isinstance(rows_for_member, list)
+                or not rows_for_member or discovery.get("status") != "complete"
+                or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0):
+            measurement_missing.append(member)
+            continue
+        paper_rows.extend(rows_for_member)
+        discovery_seconds.append(seconds)
+    ids = [row.get("arxiv_id") for row in paper_rows if isinstance(row, dict)]
+    durations = [row.get("total_seconds") for row in paper_rows if isinstance(row, dict)]
+    measurements_valid = (not measurement_missing and len(ids) == len(paper_rows) and len(set(ids)) == len(ids)
+                          and all(isinstance(aid, str) and aid for aid in ids)
+                          and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in durations))
+    summary["paper_timing_count"] = len(paper_rows)
+    summary["average_paper_seconds"] = sum(durations) / len(durations) if measurements_valid else None
+    summary["discovery_wall_seconds"] = sum(discovery_seconds) if measurements_valid else None
+    summary["paper_and_discovery_measurement_status"] = "complete" if measurements_valid else "incomplete"
     expected_ids = {member: 5000 for member in MEMBERS}
     signature_fields = ("selection_fingerprint", "data_signature", "environment_fingerprint",
                         "starting_state_fingerprint", "measurement_protocol")
@@ -156,7 +182,8 @@ def aggregate(base: Path) -> dict:
     elif summary.get("status") == "measured_intervals":
         summary["end_to_end_complete"] = bool(summary.get("expected_id_count") == 20000
                                                and summary.get("data_signature")
-                                               and summary.get("end_to_end_wall_seconds") is not None)
+                                               and summary.get("end_to_end_wall_seconds") is not None
+                                               and measurements_valid)
     return summary
 
 

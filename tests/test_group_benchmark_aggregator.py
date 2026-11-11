@@ -83,3 +83,31 @@ def test_load_session_envelopes_reports_duplicate_locations(tmp_path: Path) -> N
 
     assert rows == [{}]
     assert errors == [f"duplicate_session_envelope:{session_id}"]
+
+
+def test_group_paper_and_discovery_metrics_require_all_members(tmp_path, monkeypatch):
+    summaries = {}
+    audits = []
+    for index, member in enumerate(aggregator.MEMBERS, start=1):
+        value = _summary(member)
+        value.update(discovery_arm="arxiv_only", selection_fingerprint="group", data_signature="data",
+                     environment_fingerprint="env", starting_state_fingerprint="empty", measurement_protocol="v1",
+                     paper_timings={"status": "complete", "papers": [{"arxiv_id": member, "total_seconds": index}]},
+                     discovery_timings={"status": "complete", "wall_seconds": index})
+        summaries[member] = value
+        audits.append({"stage": "audit", "cohort": 0, "configuration": {"mssv": member},
+                       "execution_status": "returned", "result": {"is_reconciled": True}})
+    monkeypatch.setattr(aggregator, "load_member_summaries", lambda _: (summaries, []))
+    monkeypatch.setattr(aggregator, "load_observations", lambda *_: (audits, []))
+    monkeypatch.setattr(aggregator, "load_session_envelopes", lambda *_: ([], []))
+    monkeypatch.setattr(aggregator, "aggregate_group_observations", lambda *a, **k: {
+        "status": "measured_intervals", "missing_stages": [], "expected_id_count": 20000,
+        "end_to_end_wall_seconds": 20.0,
+    })
+    result = aggregator.aggregate(tmp_path)
+    assert result["average_paper_seconds"] == 2.5
+    assert result["discovery_wall_seconds"] == 10
+    summaries[aggregator.MEMBERS[0]]["paper_timings"]["status"] = "incomplete"
+    result = aggregator.aggregate(tmp_path)
+    assert result["average_paper_seconds"] is None
+    assert not result["end_to_end_complete"]

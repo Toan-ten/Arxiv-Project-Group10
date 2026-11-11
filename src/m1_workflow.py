@@ -666,6 +666,19 @@ def run_m1_member(
                     "discovery_freshness": discovery_freshness,
                 }
 
+                if source_summary.get("interrupted") or (
+                    isinstance(source_stop_reason, dict) and source_stop_reason.get("type") == "interrupted"
+                ):
+                    stop_reason = source_stop_reason or {"type": "interrupted", "stage": "source"}
+                    state_update = {"status": "stopped", "session_id": session_id,
+                                    "source_complete_papers": source_count,
+                                    "source_stop_reason": stop_reason, "stop_reason": stop_reason,
+                                    "updated_at": datetime.now(timezone.utc).isoformat()}
+                    save_campaign_state(campaign_path, campaign, cohort=cohort, update=state_update)
+                    session_cohort_states[str(cohort)] = state_update
+                    _atomic_json(cohort_state_path, {"session_id": session_id, "cohorts": session_cohort_states})
+                    break
+
                 pre_s2 = runner.count_m1_completed_papers(cohort)
                 s2_skip_reason = None
                 integrity_stop = pre_s2.get("integrity_failures", 0) > 0
@@ -923,6 +936,18 @@ def run_m1_member(
             except (OSError, ValueError):
                 envelopes.append({})
         benchmark_summary = summarize_workflow(observations, required, session_envelopes=envelopes)
+        from src.session_evidence import summarize_discovery_timings, summarize_paper_timings
+        found_ids = None
+        if data_complete:
+            try:
+                found_ids = [aid for member, aid in all_pairs
+                             if runner.store.read_manifest(member, aid).get("discovery_status") == "found"]
+            except Exception:
+                found_ids = None
+        benchmark_summary["paper_timings"] = summarize_paper_timings(observations, found_ids)
+        benchmark_summary["discovery_timings"] = summarize_discovery_timings(
+            observations, [aid for _, aid in all_pairs] if data_complete else None
+        )
         benchmark_summary.update(
             session_id=session_id,
             session_ids=campaign.get("session_ids", []),
@@ -964,6 +989,8 @@ def run_m1_member(
                 and not handoff_issues and export_error is None and export_result is not None
                 and campaign.get("starting_state_empty") is True
                 and data_signature is not None
+                and benchmark_summary["paper_timings"]["status"] == "complete"
+                and benchmark_summary["discovery_timings"]["status"] == "complete"
             ),
         )
         benchmark_path = runner.reports_dir / f"benchmark_observed_{campaign['campaign_id']}_{session_id}.json"

@@ -831,6 +831,9 @@ class CorpusStorage:
         attempts, size = result.get("attempts", 0), result.get("downloaded_bytes")
         _require(type(attempts) is int and attempts >= 0, "Invalid source attempts")
         _require(size is None or type(size) is int and size >= 0, "Invalid downloaded size")
+        for field in ("extracted_bytes", "removed_files"):
+            value = result.get(field)
+            _require(value is None or type(value) is int and value >= 0, f"Invalid {field}")
         if status == "withdrawn_version":
             from src.withdrawal_evidence import confirmed_withdrawal
             evidence = result.get("withdrawal_evidence")
@@ -843,7 +846,8 @@ class CorpusStorage:
         record.update(
             status=status, source_status=status, http_status=result.get("http_status"),
             content_type=result.get("content_type"), attempts=attempts,
-            archive_bytes=size if size else None, run_id=self.run_id,
+            archive_bytes=size if size else None, extracted_bytes=result.get("extracted_bytes"),
+            removed_files=result.get("removed_files"), run_id=self.run_id,
             error=None if result["error"] is None else dict(
                 stage="source", type=status, message=str(result["error"])),
         )

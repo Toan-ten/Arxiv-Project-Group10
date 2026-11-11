@@ -811,6 +811,10 @@ def compute_m1_statistics(
     invalid_reference_papers = 0
     total_complete_reference_records = 0
     total_observed_reference_records = 0
+    reference_metadata_complete_records = 0
+    logical_size_papers = 0
+    logical_before_bytes = 0
+    logical_after_bytes = 0
 
     for mssv, arxiv_id in pairs_list:
         try:
@@ -943,6 +947,20 @@ def compute_m1_statistics(
             if audit_res.has_integrity_failure:
                 integrity_failed_papers += 1
 
+            def before_bytes(version):
+                if version.get("status") == "withdrawn_version":
+                    return 0
+                return version.get("extracted_bytes")
+
+            if versions and not audit_res.has_integrity_failure and all(
+                isinstance(version, dict) and version.get("status") in TERMINAL
+                and type(before_bytes(version)) is int and type(version.get("kept_bytes")) is int
+                for version in versions.values()
+            ):
+                logical_size_papers += 1
+                logical_before_bytes += sum(before_bytes(version) for version in versions.values())
+                logical_after_bytes += sum(version["kept_bytes"] for version in versions.values())
+
             # --- A. Source Completion Check ---
             # Decoupled from metadata and references (FIND-REP-A)
             if audit_res.is_source_complete:
@@ -1011,6 +1029,12 @@ def compute_m1_statistics(
                         is_ref_complete = True
                         complete_reference_papers += 1
                         total_complete_reference_records += item_count
+                        reference_metadata_complete_records += sum(
+                            1 for item in items if isinstance(item, dict)
+                            and item.get("title") and item.get("authors")
+                            and (item.get("submission_date") or item.get("publication_date"))
+                            and item.get("s2_paper_id")
+                        )
                     elif ref_st == "partial" or (ref_st == "complete" and not cov_complete):
                         partial_reference_papers += 1
                     elif ref_st == "failed":
@@ -1242,6 +1266,23 @@ def compute_m1_statistics(
         "invalid_references": invalid_reference_papers,  # Compatibility alias
         "total_complete_reference_records": total_complete_reference_records,
         "total_observed_reference_records": total_observed_reference_records,
+        "reference_metadata_complete_records": reference_metadata_complete_records,
+        "reference_metadata_success_rate": (
+            round(reference_metadata_complete_records / total_complete_reference_records * 100.0, 2)
+            if total_complete_reference_records else None
+        ),
+        "reference_metadata_success_definition": (
+            "Percent of items in complete reference lists with nonempty title, authors, "
+            "submission or publication date, and Semantic Scholar ID; arXiv ID is optional"
+        ),
+        "logical_size_measured_papers": logical_size_papers,
+        "average_logical_before_bytes_per_paper": (
+            logical_before_bytes / logical_size_papers if logical_size_papers and logical_size_papers == found_papers else None
+        ),
+        "average_logical_after_bytes_per_paper": (
+            logical_after_bytes / logical_size_papers if logical_size_papers and logical_size_papers == found_papers else None
+        ),
+        "logical_size_scope": "uncompressed regular file bytes before source filtering and kept bytes after filtering; withdrawn versions count as zero",
         # Rates and Averages
         "source_completion_rate": source_completion_rate,
         "metadata_completion_rate": metadata_completion_rate,

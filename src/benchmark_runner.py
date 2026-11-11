@@ -254,6 +254,7 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
             files=len(record["files"]) if valid else None,
             kept_bytes=record["kept_bytes"] if valid else None,
             archive_bytes=record["archive_bytes"] if valid else None,
+            extracted_bytes=record.get("extracted_bytes") if valid else None,
         ))
     if manifest["run_id"] and manifest["run_id"].startswith(batch_id + "-"):
         _require(manifest["run_id"] in known_runs)
@@ -449,6 +450,13 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
         return (p["discovery_status"] == "found" and bool(p["versions"])
                 and all(v["verified"] for v in p["versions"]))
     complete_count = sum(p["publication_complete"] for p in valid)
+    found_sources = [p for p in valid if p["discovery_status"] == "found"]
+    def logical_before(version):
+        return 0 if version["status"] == "withdrawn_version" else version["extracted_bytes"]
+    measured_sources = bool(found_sources) and len(valid) == len(papers) and all(
+        all_ok(p) and all(logical_before(v) is not None and v["kept_bytes"] is not None
+                          for v in p["versions"]) for p in found_sources
+    )
     report["data_coverage"] = dict(
         cohort_papers=len(selection), verified_checkpoints=len(valid),
         invalid_checkpoints=sum(p["checkpoint_status"] == "invalid" for p in papers),
@@ -469,6 +477,19 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
         final_archive_payload_bytes=sum(v["archive_bytes"] for v in terminal
                                         if v["archive_bytes"] is not None),
         missing_archive_size_versions=sum(v["archive_bytes"] is None for v in terminal),
+        logical_before_filter_bytes=sum(v["extracted_bytes"] for v in terminal
+                                        if v["extracted_bytes"] is not None),
+        logical_after_filter_bytes=sum(v["kept_bytes"] for v in terminal
+                                       if v["extracted_bytes"] is not None),
+        missing_logical_before_versions=sum(v["extracted_bytes"] is None for v in terminal),
+        average_logical_before_bytes_per_paper=(
+            sum(logical_before(v) for p in found_sources for v in p["versions"]) / len(found_sources)
+            if measured_sources else None),
+        average_logical_after_bytes_per_paper=(
+            sum(v["kept_bytes"] for p in found_sources for v in p["versions"]) / len(found_sources)
+            if measured_sources else None),
+        logical_size_scope="uncompressed regular member bytes before filtering versus kept source bytes; "
+                           "filtering removes non-source files in addition to figures",
         size_scope="current verified cohort source snapshot, counted once; not traffic or whole-root disk usage",
         reference_items=(sum(p["reference_items"] for p in valid)
                          if len(valid) == len(papers) and all(p["reference_items"] is not None for p in valid)

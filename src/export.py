@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from src.storage import CorpusStorage
 
@@ -91,6 +91,7 @@ def export_references_table(
     *,
     verified_only: bool = True,
     strict: bool = False,
+    conflicts: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict]:
     """Export the official M1 `references` table matching crawling.md schema.
 
@@ -109,7 +110,7 @@ def export_references_table(
       - ref_s2_id (str, nullable)
     """
     rows = []
-    seen = set()
+    seen = {}
     for mssv, arxiv_id in pairs:
         try:
             ref_data = store.read_references(mssv, arxiv_id)
@@ -133,21 +134,29 @@ def export_references_table(
                 if not ref_arxiv or not isinstance(ref_arxiv, str):
                     continue  # Only include citations resolved to an arXiv ID
                 key = (str(arxiv_id), str(ref_arxiv))
-                if key in seen:
-                    continue
-                seen.add(key)
-
                 ref_sub_date = item.get("submission_date") or item.get("publication_date")
                 raw_authors = item.get("authors")
-
-                rows.append({
+                row = {
                     "arxiv_id": str(arxiv_id),
                     "ref_arxiv_id": str(ref_arxiv),
                     "ref_title": item.get("title"),
                     "ref_authors": list(raw_authors) if raw_authors is not None else None,
                     "ref_submission_date": str(ref_sub_date) if ref_sub_date else None,
                     "ref_s2_id": item.get("s2_paper_id"),
-                })
+                }
+                if key not in seen:
+                    seen[key] = row
+                    rows.append(row)
+                    continue
+                existing = seen[key]
+                for field in ("ref_title", "ref_authors", "ref_submission_date", "ref_s2_id"):
+                    old, new = existing[field], row[field]
+                    if old in (None, "", []) and new not in (None, "", []):
+                        existing[field] = new
+                    elif old not in (None, "", []) and new not in (None, "", []) and old != new:
+                        if conflicts is not None:
+                            conflicts.append({"arxiv_id": key[0], "ref_arxiv_id": key[1],
+                                              "field": field, "kept": old, "discarded": new})
         except Exception:
             if strict:
                 raise RuntimeError(f"Reference export failed for arXiv ID {arxiv_id}")
@@ -249,26 +258,19 @@ def export_to_parquet(records: List[Dict], destination: str | Path) -> None:
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
-        if records:
-            table = pa.Table.from_pylist(records)
-        elif "references" in dest.name:
-            table = pa.table({
-                "arxiv_id": pa.array([], type=pa.string()),
-                "ref_arxiv_id": pa.array([], type=pa.string()),
-                "ref_title": pa.array([], type=pa.string()),
-                "ref_authors": pa.array([], type=pa.list_(pa.string())),
-                "ref_submission_date": pa.array([], type=pa.string()),
-                "ref_s2_id": pa.array([], type=pa.string()),
-            })
+        if "references" in dest.name:
+            schema = pa.schema([
+                ("arxiv_id", pa.string()), ("ref_arxiv_id", pa.string()),
+                ("ref_title", pa.string()), ("ref_authors", pa.list_(pa.string())),
+                ("ref_submission_date", pa.string()), ("ref_s2_id", pa.string()),
+            ])
         else:
-            table = pa.table({
-                "arxiv_id": pa.array([], type=pa.string()),
-                "title": pa.array([], type=pa.string()),
-                "authors": pa.array([], type=pa.list_(pa.string())),
-                "submission_date": pa.array([], type=pa.string()),
-                "revised_dates": pa.array([], type=pa.list_(pa.string())),
-                "venue": pa.array([], type=pa.string()),
-            })
+            schema = pa.schema([
+                ("arxiv_id", pa.string()), ("title", pa.string()),
+                ("authors", pa.list_(pa.string())), ("submission_date", pa.string()),
+                ("revised_dates", pa.list_(pa.string())), ("venue", pa.string()),
+            ])
+        table = pa.Table.from_pylist(records, schema=schema)
         pq.write_table(table, dest)
     except ImportError:
         jsonl_path = dest.with_suffix(".jsonl")
@@ -294,7 +296,8 @@ def export_official_datasets(
     out = Path(output_dir)
     pairs = list(pairs)
     papers = export_papers_table(store, pairs, verified_only=True, require_m1_complete=require_m1_complete, strict=True)
-    refs = export_references_table(store, pairs, verified_only=True, strict=True)
+    conflicts: List[Dict[str, Any]] = []
+    refs = export_references_table(store, pairs, verified_only=True, strict=True, conflicts=conflicts)
 
     expected_paper_ids = set()
     if require_m1_complete:
@@ -360,6 +363,9 @@ def export_official_datasets(
         )
 
     out.mkdir(parents=True, exist_ok=True)
+    (out / "reference_conflicts.json").write_text(
+        json.dumps(conflicts, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     if export_parquet:
         export_to_parquet(papers, out / "papers.parquet")
         export_to_parquet(refs, out / "references.parquet")
@@ -380,6 +386,7 @@ def export_official_datasets(
         "is_valid": True,
         "papers_count": len(papers),
         "references_count": len(refs),
+        "reference_conflict_count": len(conflicts),
         "output_dir": str(out),
         "validation": validation,
     }

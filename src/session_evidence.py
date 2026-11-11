@@ -129,8 +129,15 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
     setup and evidence writes; session gaps and unobserved prior work are unknown.
     """
     roots = [runner.corpus_dir]
-    if not runner.scratch_dir.is_relative_to(runner.corpus_dir) and not runner.corpus_dir.is_relative_to(runner.scratch_dir):
-        roots.append(runner.scratch_dir)
+    candidates = [runner.scratch_dir]
+    drive_root = getattr(runner, "drive_root", None)
+    if drive_root is not None:
+        drive_root = Path(drive_root).resolve()
+        candidates.extend([drive_root, drive_root.parent / "shared" / "kaggle_snapshot"])
+    for candidate in candidates:
+        candidate = Path(candidate).resolve()
+        if all(not candidate.is_relative_to(root) and not root.is_relative_to(candidate) for root in roots):
+            roots.append(candidate)
     sampler = ResourceSampler(runner.corpus_dir, disk_roots=roots)
     destination = runner.reports_dir / "stage_observations"
     destination.mkdir(parents=True, exist_ok=True)
@@ -160,9 +167,11 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
                                 "metadata_complete", "references_complete", "fully_enriched", "archive_state",
                                 "is_reconciled", "integrity_failed_papers", "is_cohort_complete",
                                 "snapshot_size_bytes", "corpus_size_bytes", "archive_size_bytes",
-                                "export_size_bytes") if k in result}
+                                "export_size_bytes", "paper_timings") if k in result}
             if isinstance(result.get("fast_runner"), dict):
                 record["result"]["fast_runner"] = result["fast_runner"]
+            if stage == "source" and isinstance(result.get("timing_metrics"), dict):
+                record["result"]["timing_metrics"] = result["timing_metrics"]
         return result
     except BaseException as exc:
         record["execution_status"] = "raised"
@@ -231,6 +240,103 @@ def summarize_observations(records: list[dict]) -> dict:
                 measured_wall_seconds=sum(item[2] for item in intervals) if intervals else None,
                 reason='only observed operation intervals; setup, gaps and other stages are not certified',
                 end_to_end_complete=False)
+
+
+def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | None) -> dict:
+    """Count snapshot/index and unique per-attempt discovery intervals."""
+    import math
+
+    total, seen, processed = 0.0, {}, set()
+    valid, prep_seen = True, False
+    for record in records:
+        stage = record.get("stage")
+        if stage in {"snapshot_prepare", "kaggle_index"}:
+            seconds = record.get("wall_seconds")
+            if record.get("execution_status") != "returned" or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+                valid = False
+            else:
+                total += seconds
+                prep_seen = prep_seen or stage == "snapshot_prepare"
+        if stage != "source":
+            continue
+        timing = (record.get("result") or {}).get("timing_metrics")
+        if not isinstance(timing, dict) or not isinstance(timing.get("paper_intervals"), list):
+            valid = False
+            continue
+        for row in timing["paper_intervals"]:
+            key = (record.get("cohort"), row.get("attempt_id"), row.get("arxiv_id"))
+            if not all(key):
+                valid = False
+                continue
+            if key in seen:
+                if seen[key] != row:
+                    valid = False
+                continue
+            seen[key] = row
+            if row.get("state") == "processed":
+                processed.add(key[2])
+            for action_key, seconds_key in (("discovery_action", "discovery_seconds"),
+                                            ("revision_action", "revision_seconds")):
+                action, seconds = row.get(action_key), row.get(seconds_key)
+                if action == "cached" and seconds is None:
+                    seconds = 0.0
+                if action_key == "revision_action" and row.get("discovery_status") == "not_found" and action in (None, "not_attempted", "skipped"):
+                    continue
+                if action in (None, "not_attempted") or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+                    valid = False
+                else:
+                    total += seconds
+    expected = set(expected_ids) if expected_ids is not None else None
+    complete = bool(expected) and expected <= processed and valid and prep_seen
+    return {"status": "complete" if complete else "incomplete",
+            "wall_seconds": total if complete else None,
+            "known_wall_seconds": total, "missing_ids": sorted(expected - processed) if expected is not None else None,
+            "scope": "snapshot preparation, index, arXiv discovery and version history across attempts; includes waits and retries"}
+
+
+def summarize_paper_timings(records: list[dict], found_ids: list[str] | None) -> dict:
+    """Combine durable source attempts and S2 intervals without double counting resumes."""
+    import math
+
+    source, s2, seen_source, seen_s2, processed = {}, {}, {}, set(), set()
+    valid = True
+    for record in records:
+        result = record.get("result") or {}
+        stage = record.get("stage")
+        if stage == "source":
+            for row in (result.get("timing_metrics") or {}).get("paper_intervals", []):
+                key = (record.get("cohort"), row.get("attempt_id"), row.get("arxiv_id"))
+                seconds = row.get("wall_seconds")
+                if not all(key) or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+                    valid = False
+                    continue
+                if row.get("state") == "processed":
+                    processed.add(key[2])
+                if key in seen_source:
+                    if seen_source[key] != seconds:
+                        valid = False
+                    continue
+                seen_source[key] = seconds
+                source[key[2]] = source.get(key[2], 0.0) + seconds
+        elif stage == "s2":
+            for row in result.get("paper_timings", []):
+                key = (record.get("observation_id"), row.get("arxiv_id"))
+                seconds = row.get("s2_wall_seconds")
+                if not all(key) or key in seen_s2 or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+                    valid = False
+                    continue
+                seen_s2.add(key)
+                s2[key[1]] = s2.get(key[1], 0.0) + seconds
+    found = set(found_ids) if found_ids is not None else None
+    covered = set(source) & set(s2) & processed
+    complete = bool(found) and valid and found <= covered
+    items = [{"arxiv_id": aid, "source_seconds": source[aid], "s2_seconds": s2[aid],
+              "total_seconds": source[aid] + s2[aid]} for aid in sorted(covered & found if found is not None else covered)]
+    return {"status": "complete" if complete else "incomplete", "papers": items,
+            "average_seconds": sum(row["total_seconds"] for row in items) / len(items) if complete else None,
+            "missing_ids": sorted(found - covered) if found is not None else None,
+            "scope": "source paper intervals plus S2 request/processing intervals across recorded attempts; "
+                     "excludes shared setup, snapshot, archive, audit and export overhead"}
 
 
 def summarize_workflow(records: list[dict], required: list[tuple[str, int]], *,

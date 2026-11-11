@@ -23,6 +23,10 @@ COHORT_SIZE = 100
 _CACHED_ASSIGNED_PAIRS: Optional[List[Tuple[str, str]]] = None
 
 
+class RestoreRollbackError(RuntimeError):
+    """A failed restore left the original paper in the named backup directory."""
+
+
 def cohort_pairs(number: int) -> List[Tuple[str, str]]:
     """Return 100 candidate (mssv, arxiv_id) pairs for cohort 1..200."""
     if not isinstance(number, int) or not 1 <= number <= 200:
@@ -796,18 +800,22 @@ class FastProductionRunner:
         batch_stopped = bool(
             interrupted
             or report.get("stopped")
-            or report.get("batch_status") in {"stopped", "failed"}
+            or report.get("batch_status") in {"stopped", "interrupted", "failed"}
             or report.get("execution_status") == "raised"
         )
+        was_interrupted = interrupted or report.get("batch_status") == "interrupted"
+        stop_reason = report.get("stop_reason")
+        if was_interrupted and not stop_reason:
+            stop_reason = {"type": "interrupted", "stage": "source"}
         report["fast_runner"] = {
             "cohort": number,
             "batch_id": batch_id,
             "effective_resume": effective_resume,
             "can_resume": can_resume,
             "s2_enabled": bool(s2_config is not None),
-            "interrupted": interrupted,
+            "interrupted": was_interrupted,
             "stopped": batch_stopped,
-            "stop_reason": report.get("stop_reason"),
+            "stop_reason": stop_reason,
             "completed_papers": completed_final,
             "target_papers": target_limit,
             "newly_completed_papers": newly_done,
@@ -956,7 +964,11 @@ class FastProductionRunner:
 
             attempted_papers += 1
             try:
-                pipeline._run_s2(self.store, paper, cfg, limiter)
+                s2_started = time.perf_counter()
+                try:
+                    pipeline._run_s2(self.store, paper, cfg, limiter)
+                finally:
+                    paper["s2_wall_seconds"] = max(0.0, time.perf_counter() - s2_started)
             except KeyboardInterrupt:
                 stopped = True
                 stop_reason = {"type": "interrupted", "message": "S2 paused by user; cohort checkpoint saved."}
@@ -1036,6 +1048,10 @@ class FastProductionRunner:
             "stopped": stopped,
             "stop_reason": stop_reason,
             "papers": paper_results,
+            "paper_timings": [
+                {"arxiv_id": paper["arxiv_id"], "s2_wall_seconds": paper["s2_wall_seconds"]}
+                for paper in paper_results if "s2_wall_seconds" in paper
+            ],
             "archive_path": str(archive_dest),
         }
 
@@ -1447,18 +1463,19 @@ class FastProductionRunner:
         target_parent.mkdir(parents=True, exist_ok=True)
         stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=str(target_parent)))
         backup_dir = None
+        preserve_backup = False
         try:
             stage_paper = stage_dir / target_folder.name
             shutil.copytree(src_folder, stage_paper)
 
             try:
                 is_l_tgt, is_d_tgt, _ = _inspect_path(target_folder)
-                if not is_l_tgt and is_d_tgt:
-                    backup_dir = Path(tempfile.mkdtemp(prefix=".backup-", dir=str(target_parent)))
-                    backup_paper = backup_dir / target_folder.name
-                    os.replace(target_folder, backup_paper)
-            except Exception:
-                pass
+            except FileNotFoundError:
+                is_l_tgt, is_d_tgt = False, False
+            if not is_l_tgt and is_d_tgt:
+                backup_dir = Path(tempfile.mkdtemp(prefix=".backup-", dir=str(target_parent)))
+                backup_paper = backup_dir / target_folder.name
+                os.replace(target_folder, backup_paper)
 
             os.replace(stage_paper, target_folder)
 
@@ -1466,16 +1483,24 @@ class FastProductionRunner:
                 shutil.rmtree(backup_dir, ignore_errors=True)
             return True
         except Exception:
+            if backup_dir and (backup_dir / target_folder.name).exists() and target_folder.exists():
+                preserve_backup = True
+                raise RestoreRollbackError(
+                    f"Restore failed; original paper preserved at {backup_dir / target_folder.name}"
+                )
             if backup_dir and (backup_dir / target_folder.name).exists() and not target_folder.exists():
                 try:
                     os.replace(backup_dir / target_folder.name, target_folder)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    preserve_backup = True
+                    raise RestoreRollbackError(
+                        f"Restore rollback failed; original paper preserved at {backup_dir / target_folder.name}"
+                    ) from exc
             return False
         finally:
             if stage_dir.exists():
                 shutil.rmtree(stage_dir, ignore_errors=True)
-            if backup_dir and backup_dir.exists():
+            if backup_dir and backup_dir.exists() and not preserve_backup:
                 shutil.rmtree(backup_dir, ignore_errors=True)
 
     def restore_cohort(
@@ -1518,8 +1543,12 @@ class FastProductionRunner:
                         if not is_l_f and is_d_f:
                             if self._safe_replace_paper(legacy_folder, local_folder, expected_arxiv_id=arxiv_id):
                                 restored += 1
+                    except RestoreRollbackError:
+                        raise
                     except Exception:
                         pass
+        except RestoreRollbackError:
+            raise
         except Exception:
             pass
 

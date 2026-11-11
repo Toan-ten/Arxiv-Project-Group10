@@ -82,7 +82,7 @@ def _save_member(source, destination, size):
         raise SourceError("archive_error", "Truncated archive member")
 
 
-def _extract_tar(archive, payload_size, directory):
+def _extract_tar(archive, payload_size, directory, metrics):
     files = []
     seen = {}
     total = 0
@@ -98,15 +98,18 @@ def _extract_tar(archive, payload_size, directory):
         if member.size < 0 or member.offset_data + member.size > payload_size:
             raise SourceError("archive_error", "Truncated or invalid tar member")
         total += member.size
+        metrics["extracted_bytes"] += member.size
         _check_size(count, total)
         if path.suffix.lower() in KEPT_SUFFIXES:
             with archive.extractfile(member) as source:
                 _save_member(source, directory / path, member.size)
             files.append(path.as_posix())
+        else:
+            metrics["removed_files"] += 1
     return files
 
 
-def _extract_zip(payload, directory):
+def _extract_zip(payload, directory, metrics):
     files = []
     seen = {}
     total = 0
@@ -121,6 +124,8 @@ def _extract_zip(payload, directory):
                 raise SourceError("unsafe_archive", f"Links and special files are refused: {member.filename}")
             path = _safe_path(member.orig_filename, member.is_dir(), seen)
             total += member.file_size
+            if not member.is_dir():
+                metrics["extracted_bytes"] += member.file_size
             _check_size(0, total)
             if member.is_dir():
                 continue
@@ -129,18 +134,19 @@ def _extract_zip(payload, directory):
                     _save_member(source, directory / path, member.file_size)
                     files.append(path.as_posix())
                 else:
+                    metrics["removed_files"] += 1
                     if _copy_limited(source, None, member.file_size) != member.file_size:
                         raise SourceError("archive_error", "Truncated ZIP member")
     return files
 
 
-def _extract_payload(payload, directory):
+def _extract_payload(payload, directory, metrics):
     with payload.open("rb") as source:
         head = source.read(CHUNK_SIZE)
     if not head:
         raise SourceError("invalid_response", "Empty source response")
     if head.startswith(b"PK"):
-        return _extract_zip(payload, directory)
+        return _extract_zip(payload, directory, metrics)
     try:
         archive = tarfile.open(payload, mode="r:")
     except tarfile.ReadError as exc:
@@ -148,16 +154,18 @@ def _extract_payload(payload, directory):
             raise SourceError("archive_error", str(exc)) from exc
     else:
         with archive:
-            return _extract_tar(archive, payload.stat().st_size, directory)
+            return _extract_tar(archive, payload.stat().st_size, directory, metrics)
 
     stripped = head.lstrip()
     if stripped.startswith((b"%PDF-", b"%!PS-Adobe-")):
+        metrics.update(extracted_bytes=payload.stat().st_size, removed_files=1)
         return []
     if stripped.lower().startswith((b"<!doctype html", b"<html", b"<?xml", b"<error")):
         raise SourceError("invalid_response", "Received HTML/XML instead of source")
     if b"\x00" not in head and re.search(
         rb"\\(?:documentclass\b|documentstyle\b|begin\s*\{\s*document\s*\}|bye\b)", head
     ):
+        metrics.update(extracted_bytes=payload.stat().st_size, removed_files=0)
         with payload.open("rb") as source:
             _save_member(source, directory / "main.tex", payload.stat().st_size)
         return ["main.tex"]
@@ -184,14 +192,15 @@ def extract_source(source_path: str | Path, destination: str | Path) -> dict:
                 with gzip.open(payload, "rb") as source, unpacked.open("wb") as target:
                     _copy_limited(source, target, MAX_UNPACKED_BYTES)
                 payload = unpacked
-            files = _extract_payload(payload, directory)
+            metrics = {"extracted_bytes": 0, "removed_files": 0}
+            files = _extract_payload(payload, directory, metrics)
             has_tex = any(PurePosixPath(f).suffix.lower() == ".tex" for f in files)
             status = "success" if has_tex else "no_tex_source"
             if files:
                 if destination.exists() or destination.is_symlink():
                     raise SourceError("output_exists", "Destination already exists")
                 directory.rename(destination)
-            return {**result, "status": status, "files": sorted(files)}
+            return {**result, **metrics, "status": status, "files": sorted(files)}
     except SourceError as exc:
         return {**result, "status": exc.status, "error": str(exc)}
     except (tarfile.TarError, zipfile.BadZipFile, gzip.BadGzipFile,

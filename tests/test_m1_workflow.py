@@ -22,6 +22,7 @@ class _Store:
 
 class _FakeRunner:
     source_stop = False
+    source_interrupted = False
     s2_stop = False
     calls: list[tuple] = []
 
@@ -58,8 +59,10 @@ class _FakeRunner:
             kwargs["on_progress"]("paper_finished", summary)
         return {
             "fast_runner": {
-                "stopped": self.source_stop,
-                "stop_reason": {"type": "http_policy", "http_status": 429} if self.source_stop else None,
+                "stopped": self.source_stop or self.source_interrupted,
+                "interrupted": self.source_interrupted,
+                "stop_reason": ({"type": "interrupted", "stage": "source"} if self.source_interrupted
+                                else {"type": "http_policy", "http_status": 429} if self.source_stop else None),
                 "completed_papers": 100,
                 "target_papers": 100,
                 "newly_completed_papers": 0,
@@ -127,6 +130,7 @@ class TestUnifiedWorkflow(unittest.TestCase):
         self.stage_calls = []
         self.runners = []
         _FakeRunner.source_stop = False
+        _FakeRunner.source_interrupted = False
         _FakeRunner.s2_stop = False
 
         def runner_factory(*args, **kwargs):
@@ -274,6 +278,15 @@ class TestUnifiedWorkflow(unittest.TestCase):
         calls = [(call[0], call[1]) for call in self.runners[0].calls if call[0] in {"source", "s2"}]
         self.assertEqual(calls, [("source", 1), ("s2", 1)])
         self.assertEqual(result["stop_reason"]["http_status"], 429)
+
+    def test_source_interruption_stops_before_s2_and_can_resume(self):
+        _FakeRunner.source_interrupted = True
+        result = self.run_pipeline()
+        self.assertEqual(result["stop_reason"]["type"], "interrupted")
+        self.assertNotIn("s2", [call[0] for call in self.runners[0].calls])
+        _FakeRunner.source_interrupted = False
+        self.run_pipeline()
+        self.assertIn("s2", [call[0] for call in self.runners[-1].calls])
 
 
 if __name__ == "__main__":
