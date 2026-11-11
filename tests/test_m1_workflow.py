@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -50,15 +52,30 @@ class _FakeRunner:
 
     def run_cohort(self, cohort, **kwargs):
         self.calls.append(("source", cohort, kwargs))
+        if kwargs.get("on_progress"):
+            summary = {"papers": [{"arxiv_id": f"2501.{cohort:02d}000"}]}
+            kwargs["on_progress"]("paper_started", summary)
+            kwargs["on_progress"]("paper_finished", summary)
         return {
             "fast_runner": {
                 "stopped": self.source_stop,
                 "stop_reason": {"type": "http_policy", "http_status": 429} if self.source_stop else None,
+                "completed_papers": 100,
+                "target_papers": 100,
+                "newly_completed_papers": 0,
             }
         }
 
-    def enrich_cohort_s2(self, cohort, **_kwargs):
+    def enrich_cohort_s2(self, cohort, **kwargs):
         self.calls.append(("s2", cohort))
+        if kwargs.get("on_progress"):
+            kwargs["on_progress"]("paper_started", {
+                "cohort": cohort,
+                "index": 1,
+                "total": 100,
+                "arxiv_id": f"2501.{cohort:02d}000",
+                "attempted_papers": 0,
+            })
         return {
             "status": "returned",
             "attempted_papers": 4,
@@ -217,6 +234,19 @@ class TestUnifiedWorkflow(unittest.TestCase):
         saved_text = "\n".join(path.read_text(encoding="utf-8") for path in (self.root / "drive").rglob("*") if path.is_file())
         self.assertNotIn("kaggle-secret", saved_text)
         self.assertNotIn("s2-secret", saved_text)
+
+    def test_run_prints_stage_and_id_progress_for_notebook_cell(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            self.run_pipeline()
+
+        text = output.getvalue()
+        self.assertIn("Bắt đầu chuẩn bị snapshot Kaggle", text)
+        self.assertIn("Bắt đầu tải mã nguồn và xác minh lịch sử phiên bản lô 1", text)
+        self.assertIn("giai đoạn mã nguồn có trạng thái cuối 100/100 ID", text)
+        self.assertIn("Bắt đầu lấy siêu dữ liệu và tài liệu tham khảo lô 1", text)
+        self.assertIn("S2 đang xét ID 1/100", text)
+        self.assertIn("Bắt đầu kiểm toán dữ liệu", text)
 
     def test_kaggle_fallback_keeps_arxiv_and_s2_path(self):
         with patch.object(m1_workflow, "prepare_snapshot", return_value={

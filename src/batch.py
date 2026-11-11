@@ -11,6 +11,7 @@ import re
 import stat
 import time
 from datetime import datetime, timezone
+from typing import Callable
 from uuid import uuid4
 
 from src import arxiv_client, pipeline, s2_integration, http_metrics
@@ -212,7 +213,7 @@ def run_batch(
     pairs, corpus_root, *, batch_id, max_ids, log_root, resume=False,
     versions=None, timeout=30.0, max_attempts=1,
     user_agent=arxiv_client.USER_AGENT, s2_config=None, revision_history=None,
-    should_stop=None,
+    should_stop=None, on_progress: Callable[[str, dict], None] | None = None,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
@@ -221,7 +222,8 @@ def run_batch(
     Log failures and interrupts propagate. No automatic outer retries.
     revision_history=None enables history for a new batch and inherits an
     existing definition (missing flag means legacy/off). An explicit change
-    requires a new batch_id; no old definition or log is rewritten.
+    requires a new batch_id; no old definition or log is rewritten. If supplied,
+    on_progress(event, summary) runs after each durable paper-boundary update.
     """
     if (not isinstance(batch_id, str) or
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", batch_id) is None or
@@ -234,6 +236,8 @@ def run_batch(
         raise BatchError("resume must be bool")
     if revision_history is not None and type(revision_history) is not bool:
         raise BatchError("revision_history must be bool or None")
+    if on_progress is not None and not callable(on_progress):
+        raise BatchError("on_progress must be callable or None")
     chosen_versions = pipeline._version_selection(versions)
     s2_config = s2_integration.configuration(s2_config)
     store = CorpusStorage(corpus_root)
@@ -344,6 +348,8 @@ def run_batch(
             row.update(state="processed", ended_at=_now(),
                        wall_seconds=max(0.0, time.perf_counter() - paper_starts[index]))
         persist()
+        if on_progress is not None:
+            on_progress(event, copy.deepcopy(summary))
 
     def record_http(event):
         value["arxiv_http_requests"].append(copy.deepcopy(event))

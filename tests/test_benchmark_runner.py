@@ -89,6 +89,19 @@ class BenchmarkRunnerTests(unittest.TestCase):
         self.assertFalse(report["publication_complete"]["all_complete"])
         self.assertEqual(coverage["version_statuses"], {"timeout": 1})
 
+    def test_progress_callback_reaches_batch_inside_benchmark(self):
+        self.successes((PAIR,))
+        events = []
+        result = self.run_adapter(
+            [PAIR], max_ids=1,
+            on_progress=lambda event, summary: events.append(
+                (event, summary["papers"][-1]["arxiv_id"])
+            ),
+        )
+
+        self.assertEqual(result["execution_status"], "returned")
+        self.assertEqual(events, [("paper_started", PAIR[1]), ("paper_finished", PAIR[1])])
+
     def test_stopped_403_and_429_are_not_full_success(self):
         for code in (403, 429):
             with self.subTest(code=code):

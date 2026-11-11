@@ -714,9 +714,12 @@ class TestFastProduction(unittest.TestCase):
         with patch("src.benchmark_runner.run_benchmark", side_effect=fake_run_benchmark), \
              patch("src.benchmark_runner._load", side_effect=fake_load):
             # First run: new batch, resume=False
-            res1 = runner.run_cohort(1, resume=True, s2_config=s2_cfg, max_ids=1)
+            progress = lambda _event, _summary: None
+            res1 = runner.run_cohort(1, resume=True, s2_config=s2_cfg, max_ids=1,
+                                     on_progress=progress)
             self.assertEqual(len(calls), 1)
             self.assertFalse(calls[0]["resume"])
+            self.assertIs(calls[0]["on_progress"], progress)
             first_batch_id = calls[0]["batch_id"]
 
             # Second run: should resume with exact same batch_id and resume=True
@@ -784,10 +787,14 @@ class TestFastProduction(unittest.TestCase):
             },
         }), encoding="utf-8")
 
+        events = []
         with patch("src.arxiv_client.query_arxiv") as mock_arxiv_discovery, \
              patch("src.arxiv_source.download_source") as mock_arxiv_download, \
              patch("src.pipeline._run_s2") as mock_pipeline_s2:
-            res = runner.enrich_cohort_s2(1, max_ids=1)
+            res = runner.enrich_cohort_s2(
+                1, max_ids=1,
+                on_progress=lambda event, state: events.append((event, state["arxiv_id"])),
+            )
             # Must invoke pipeline._run_s2 directly
             self.assertEqual(mock_pipeline_s2.call_count, 1)
             # Must NEVER invoke arXiv discovery or source downloading
@@ -795,6 +802,7 @@ class TestFastProduction(unittest.TestCase):
             mock_arxiv_download.assert_not_called()
             self.assertEqual(res["enriched_papers"], 1)
             self.assertEqual(res["skipped_incomplete"], 0)
+            self.assertEqual(events, [("paper_started", "2508.07872")])
 
         metadata_path = paper_dir / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))

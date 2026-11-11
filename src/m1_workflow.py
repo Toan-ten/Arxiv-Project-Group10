@@ -10,6 +10,7 @@ import platform
 import shutil
 import stat
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -46,6 +47,190 @@ S2_RETRY_POLICY = {
     "backoff_cap": 60.0,
 }
 MIN_FREE_BYTES = 2 * 1024**3
+
+
+class _WorkflowProgress:
+    """Hiển thị giai đoạn hiện tại và nhịp tiến độ cho ô chạy M1."""
+
+    def __init__(self, interval_seconds: float = 30.0):
+        self.interval_seconds = interval_seconds
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+        self._stage = None
+        self._detail = None
+        self._stage_started = None
+        self._session_started = time.monotonic()
+
+    @staticmethod
+    def _print(message: str) -> None:
+        print(f"[M1] {message}", flush=True)
+
+    def start(self, mssv: str, cohorts: list[int], scope: str, budget_seconds: float) -> None:
+        cohort_text = f"{cohorts[0]}..{cohorts[-1]} ({len(cohorts)} lô)" if cohorts else "không có lô"
+        scope_text = (
+            "toàn bộ dải ID được giao"
+            if scope == "member_full_assignment"
+            else "mẫu kiểm tra theo cùng quy trình"
+        )
+        self._print(
+            f"Bắt đầu phiên cho MSSV {mssv}; phạm vi {cohort_text}; "
+            f"chạy {scope_text}; ngân sách {budget_seconds / 3600:g} giờ."
+        )
+        self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._thread.start()
+
+    def _heartbeat(self) -> None:
+        while not self._stop.wait(self.interval_seconds):
+            with self._lock:
+                stage = self._stage
+                detail = self._detail
+                elapsed = time.monotonic() - (self._stage_started or self._session_started)
+            if stage:
+                extra = f"; {detail}" if detail else ""
+                self._print(f"Đang {stage}{extra}; đã chạy {elapsed:.0f} giây.")
+
+    def begin(self, stage: str) -> None:
+        with self._lock:
+            self._stage = stage
+            self._detail = None
+            self._stage_started = time.monotonic()
+        self._print(f"Bắt đầu {stage}.")
+
+    def set_detail(self, detail: str) -> None:
+        with self._lock:
+            self._detail = detail
+
+    def note(self, message: str) -> None:
+        self._print(message)
+
+    def end(
+        self,
+        stage: str,
+        *,
+        result: dict | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        with self._lock:
+            started = self._stage_started or time.monotonic()
+            elapsed = max(0.0, time.monotonic() - started)
+            self._stage = None
+            self._detail = None
+            self._stage_started = None
+        if error is not None:
+            self._print(f"Dừng {stage} sau {elapsed:.1f} giây do {type(error).__name__}.")
+            return
+        detail = _progress_result_detail(result or {})
+        suffix = f"; {detail}" if detail else ""
+        self._print(f"Kết thúc {stage} sau {elapsed:.1f} giây{suffix}.")
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+
+
+def _progress_result_detail(result: dict) -> str | None:
+    """Tóm tắt kết quả thực tế của giai đoạn, không suy diễn trạng thái."""
+    if "snapshot_sha256" in result:
+        source = {"downloaded": "vừa tải", "cached": "bản lưu đã xác minh"}.get(
+            result.get("source"), "không rõ nguồn"
+        )
+        status = "sẵn sàng" if result.get("status") == "ready" else "chuyển sang arXiv"
+        return f"snapshot {status}; nguồn {source}"
+    if result.get("status") == "fallback":
+        reason = {
+            "missing_kaggle_token": "thiếu khóa Kaggle",
+            "snapshot_unavailable": "không có snapshot hợp lệ",
+            "candidate_index_failed": "không lập được chỉ mục ứng viên",
+            "snapshot_prepare_failed": "không chuẩn bị được snapshot",
+        }.get(result.get("reason"), "snapshot không dùng được")
+        return f"{reason}; tiếp tục xác minh bằng arXiv"
+    if isinstance(result.get("index"), dict):
+        index = result["index"]
+        reused = "dùng lại chỉ mục đã có" if result.get("reused") else "đã lập chỉ mục mới"
+        return f"{len(index.get('candidates', {}))} ứng viên; {reused}"
+    fast = result.get("fast_runner")
+    if isinstance(fast, dict):
+        completed = fast.get("completed_papers", 0)
+        target = fast.get("target_papers", 0)
+        stop_reason = fast.get("stop_reason") or {}
+        stopped_text = _stop_reason_text(stop_reason) if fast.get("stopped") else ""
+        status_text = (
+            "đã dừng" + (f": {stopped_text}" if stopped_text else "")
+            if fast.get("stopped")
+            else "đã trả kết quả"
+        )
+        return (
+            f"giai đoạn mã nguồn có trạng thái cuối {completed}/{target} ID; "
+            f"mới đạt trạng thái cuối {fast.get('newly_completed_papers', 0)} ID; "
+            f"trạng thái {status_text}"
+        )
+    if "attempted_papers" in result:
+        stopped = bool(result.get("stopped"))
+        stop_text = _stop_reason_text(result.get("stop_reason") or {}) if stopped else ""
+        status_text = (
+            "đã dừng" + (f": {stop_text}" if stop_text else "")
+            if stopped
+            else "đã trả kết quả"
+        )
+        return (
+            f"đã xử lý S2 với {result.get('attempted_papers', 0)} ID; "
+            f"siêu dữ liệu hoàn tất {result.get('metadata_complete', 0)}; "
+            f"tài liệu tham khảo hoàn tất {result.get('references_complete', 0)}; "
+            f"trạng thái {status_text}"
+        )
+    if "is_reconciled" in result:
+        return (
+            f"đối chiếu {'đạt' if result.get('is_reconciled') else 'chưa đạt'}; "
+            f"lỗi toàn vẹn {result.get('integrity_failed_papers', 0)}; "
+            f"ID chưa xử lý {result.get('unprocessed_papers', 'chưa xác định')}"
+        )
+    if result.get("status") == "skipped":
+        reasons = {
+            "integrity_failure": "phát hiện lỗi toàn vẹn",
+            "already_m1_complete": "lô đã đạt M1",
+            "m1_audit_incomplete": "kiểm toán chưa đạt",
+        }
+        return f"bỏ qua vì {reasons.get(result.get('reason'), 'không đủ điều kiện')}"
+    if result.get("archive_state") in {"m1_handoff_verified", "handoff_verified"}:
+        return "archive đã được xác minh"
+    return None
+
+
+def _stop_reason_text(reason: dict) -> str:
+    status = reason.get("http_status")
+    if status in {403, 429}:
+        return f"dịch vụ trả HTTP {status}"
+    if reason.get("type") == "session_budget":
+        return "đã chạm ngân sách phiên"
+    if reason.get("type") == "integrity_failure":
+        return "phát hiện lỗi toàn vẹn"
+    if reason.get("type") == "interrupted":
+        return "đã tạm dừng thủ công"
+    return "cần xem lý do dừng trong kết quả cuối"
+
+
+def _stage_label(stage: str, cohort: int, cohort_position: int, cohort_count: int) -> str:
+    labels = {
+        "snapshot_prepare": "chuẩn bị snapshot Kaggle",
+        "kaggle_index": "lập chỉ mục ứng viên Kaggle",
+        "log_backup": "sao lưu log phiên trước",
+        "archive_backup": f"sao lưu archive lô {cohort}",
+        "restore": f"khôi phục checkpoint lô {cohort}",
+        "source": f"tải mã nguồn và xác minh lịch sử phiên bản lô {cohort}",
+        "s2_restore": f"khôi phục checkpoint trước khi lấy dữ liệu S2 lô {cohort}",
+        "s2": f"lấy siêu dữ liệu và tài liệu tham khảo lô {cohort}",
+        "handoff_audit": f"kiểm tra archive bàn giao lô {cohort}",
+        "audit": "kiểm toán dữ liệu",
+        "dataset_export": "xuất dữ liệu đã qua kiểm toán",
+        "audit_signature": "tính dấu vân tay dữ liệu",
+        "size_accounting": "đo kích thước dữ liệu",
+    }
+    label = labels.get(stage, stage)
+    if cohort and stage in {"archive_backup", "restore", "source", "s2_restore", "s2", "handoff_audit"}:
+        label += f" ({cohort_position}/{cohort_count} lô)"
+    return label
 
 
 def _commit_id() -> str | None:
@@ -201,6 +386,42 @@ def run_m1_member(
     handoff_issues: list[str] = []
     envelope = None
 
+    progress = _WorkflowProgress()
+
+    def observe_with_progress(stage: str, cohort: int, operation, **kwargs):
+        position = cohorts.index(cohort) + 1 if cohort in cohorts else 0
+        label = _stage_label(stage, cohort, position, len(cohorts))
+        progress.begin(label)
+        kwargs.pop("session_id", None)
+        try:
+            result = observe_stage(
+                runner, stage, cohort, operation, session_id=session_id, **kwargs
+            )
+        except BaseException as exc:
+            progress.end(label, error=exc)
+            raise
+        progress.end(label, result=result if isinstance(result, dict) else None)
+        return result
+
+    def source_progress(event: str, summary: dict) -> None:
+        papers = summary.get("papers") or []
+        if not papers:
+            return
+        index = len(papers)
+        paper = papers[-1]
+        arxiv_id = paper.get("arxiv_id", "không rõ ID")
+        progress.set_detail(f"đã xử lý {index}/{len(cohort_pairs(active_cohort))} ID; ID hiện tại {arxiv_id}")
+        if event == "paper_finished" and (index % 10 == 0 or index == len(cohort_pairs(active_cohort))):
+            progress.note(f"Lô {active_cohort}: đã xử lý {index}/{len(cohort_pairs(active_cohort))} ID trong lượt này.")
+
+    def s2_progress(_event: str, state: dict) -> None:
+        index = state.get("index", 0)
+        total = state.get("total", 0)
+        arxiv_id = state.get("arxiv_id", "không rõ ID")
+        progress.set_detail(f"đang xét ID {index}/{total}: {arxiv_id}")
+        if index and (index == 1 or index % 10 == 0 or index == total):
+            progress.note(f"Lô {state.get('cohort')}: S2 đang xét ID {index}/{total}.")
+
     annotate_session_envelope(
         envelope_path,
         mssv=mssv,
@@ -210,10 +431,10 @@ def run_m1_member(
         expected_id_count=sum(len(cohort_pairs(cohort)) for cohort in cohorts),
     )
     try:
+        progress.start(mssv, cohorts, scope, budget_seconds)
         try:
             snapshot_token = kaggle_token.strip() if kaggle_token and kaggle_token.strip() else None
-            snapshot_result = observe_stage(
-                runner,
+            snapshot_result = observe_with_progress(
                 "snapshot_prepare",
                 0,
                 lambda: prepare_snapshot(
@@ -236,8 +457,7 @@ def run_m1_member(
             if kaggle_evidence.get("status") == "ready":
                 pairs = [pair for cohort in cohorts for pair in cohort_pairs(cohort)]
                 index_started = time.perf_counter()
-                index_observation = observe_stage(
-                    runner,
+                index_observation = observe_with_progress(
                     "kaggle_index",
                     0,
                     lambda: reuse_or_build_index(
@@ -340,8 +560,7 @@ def run_m1_member(
         if any(runner.logs_dir.iterdir()):
             backup_path = runner.drive_root / "evidence_backups" / session_id / "logs"
             backup_path.parent.mkdir(parents=True, exist_ok=True)
-            observe_stage(
-                runner,
+            observe_with_progress(
                 "log_backup",
                 0,
                 lambda: shutil.copytree(runner.logs_dir, backup_path),
@@ -370,8 +589,7 @@ def run_m1_member(
                         f"yêu cầu tối thiểu {MIN_FREE_BYTES} byte."
                     )
                 if any(path.exists() for path in sidecars):
-                    backup = observe_stage(
-                        runner,
+                    backup = observe_with_progress(
                         "archive_backup",
                         cohort,
                         lambda: runner.backup_cohort_archive(cohort, require_sidecars=True),
@@ -382,15 +600,13 @@ def run_m1_member(
                         if not backup_file.is_file() or runner._compute_sha256(backup_file) != backup["archive_sha256"]:
                             raise RuntimeError(f"Bản sao lưu archive lô {cohort} không khớp SHA-256.")
                 else:
-                    observe_stage(
-                        runner,
+                    observe_with_progress(
                         "archive_backup",
                         cohort,
                         lambda: {"status": "empty"},
                         session_id=session_id,
                     )
-                restored = observe_stage(
-                    runner,
+                restored = observe_with_progress(
                     "restore",
                     cohort,
                     lambda: runner.restore_cohort(cohort, require_manifest=any(path.exists() for path in sidecars)),
@@ -405,8 +621,8 @@ def run_m1_member(
                     update={"status": "source_running", "session_id": session_id,
                             "updated_at": datetime.now(timezone.utc).isoformat()},
                 )
-                source_result = observe_stage(
-                    runner,
+                active_cohort = cohort
+                source_result = observe_with_progress(
                     "source",
                     cohort,
                     lambda: runner.run_cohort(
@@ -415,8 +631,8 @@ def run_m1_member(
                         revision_history=True,
                         s2_config=None,
                         should_stop=budget.should_stop,
+                        on_progress=source_progress,
                     ),
-                    session_id=session_id,
                     configuration={
                         "run_scope": scope,
                         "resume": True,
@@ -459,15 +675,13 @@ def run_m1_member(
                     s2_skip_reason = "already_m1_complete"
                 if s2_skip_reason:
                     s2_result = {"status": "skipped", "reason": s2_skip_reason, "stopped": False}
-                    observe_stage(
-                        runner,
+                    observe_with_progress(
                         "s2_restore",
                         cohort,
                         lambda: {"status": "returned"},
                         session_id=session_id,
                     )
-                    observe_stage(
-                        runner,
+                    observe_with_progress(
                         "s2",
                         cohort,
                         lambda: s2_result,
@@ -482,23 +696,21 @@ def run_m1_member(
                         update={"status": "s2_running", "session_id": session_id,
                                 "updated_at": datetime.now(timezone.utc).isoformat()},
                     )
-                    observe_stage(
-                        runner,
+                    observe_with_progress(
                         "s2_restore",
                         cohort,
                         lambda: runner.restore_cohort(cohort, require_manifest=True),
                         session_id=session_id,
                     )
-                    s2_result = observe_stage(
-                        runner,
+                    s2_result = observe_with_progress(
                         "s2",
                         cohort,
                         lambda: runner.enrich_cohort_s2(
                             cohort,
                             s2_config=s2_config,
                             should_stop=budget.should_stop,
+                            on_progress=s2_progress,
                         ),
-                        session_id=session_id,
                         configuration={
                             "run_scope": scope,
                             "authenticated": bool(s2_key),
@@ -541,6 +753,19 @@ def run_m1_member(
                 save_campaign_state(campaign_path, campaign, cohort=cohort, update=state_update)
                 session_cohort_states[str(cohort)] = state_update
                 _atomic_json(cohort_state_path, {"session_id": session_id, "cohorts": session_cohort_states})
+                s2_status_text = {
+                    "complete": "hoàn tất",
+                    "partial": "chưa đủ dữ liệu",
+                    "stopped": "đã dừng",
+                    "skipped": "đã bỏ qua",
+                }.get(s2_status, s2_status)
+                progress.note(
+                    f"Lô {cohort}: giai đoạn mã nguồn có trạng thái cuối {source_count}/100 ID; "
+                    f"S2 {s2_status_text}; M1 đủ chuẩn {final_state.get('found_m1_complete', 0)} bài, "
+                    f"xác nhận không tìm thấy {final_state.get('confirmed_not_found', 0)} ID, "
+                    f"chưa xử lý {final_state.get('unprocessed', 0)} ID, "
+                    f"lỗi toàn vẹn {final_state.get('integrity_failures', 0)}."
+                )
 
                 if integrity_stop:
                     stop_reason = {"type": "integrity_failure", "cohort": cohort}
@@ -574,8 +799,7 @@ def run_m1_member(
         handoff_results: dict[int, dict] = {}
         for cohort in cohorts:
             try:
-                handoff = observe_stage(
-                    runner,
+                handoff = observe_with_progress(
                     "handoff_audit",
                     cohort,
                     lambda: verify_cohort_handoff(runner, cohort),
@@ -599,8 +823,7 @@ def run_m1_member(
             )
             return _compute_statistics(runner, all_pairs, commit, scope)
 
-        audit_stats = observe_stage(
-            runner,
+        audit_stats = observe_with_progress(
             "audit",
             0,
             run_data_audit,
@@ -622,8 +845,7 @@ def run_m1_member(
         export_dir = drive_root / "final_output" / session_id
         if export_eligible:
             try:
-                export_result = observe_stage(
-                    runner,
+                export_result = observe_with_progress(
                     "dataset_export",
                     0,
                     lambda: _export_datasets(runner, all_pairs, export_dir),
@@ -633,8 +855,7 @@ def run_m1_member(
             except Exception as exc:
                 export_error = {"type": type(exc).__name__, "message": _redact(str(exc), safe_secrets)}
         else:
-            observe_stage(
-                runner,
+            observe_with_progress(
                 "dataset_export",
                 0,
                 lambda: {"status": "skipped", "reason": "m1_audit_incomplete"},
@@ -645,8 +866,7 @@ def run_m1_member(
         data_signature_expected = data_complete and reconciled and not integrity_failed
         data_signature = None
         if data_signature_expected:
-            data_signature = observe_stage(
-                runner,
+            data_signature = observe_with_progress(
                 "audit_signature",
                 0,
                 lambda: fingerprint_complete_corpus(runner.store, all_pairs),
@@ -658,8 +878,7 @@ def run_m1_member(
         archive_size_bytes = sum(archive_sizes) if all(
             size is not None for size in archive_sizes
         ) else None
-        size_measurement = observe_stage(
-            runner,
+        size_measurement = observe_with_progress(
             "size_accounting",
             0,
             lambda: {
@@ -824,6 +1043,7 @@ def run_m1_member(
                           "message": _redact(str(exc), safe_secrets)}
         raise
     finally:
+        progress.close()
         if envelope is None:
             try:
                 _close_session(envelope_path, started_monotonic, outcome, outcome_detail)

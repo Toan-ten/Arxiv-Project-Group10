@@ -84,6 +84,19 @@ class BatchTests(unittest.TestCase):
             self.assertFalse((self.paper_path(pair) / "v2").exists())
         self.assertEqual(self.attempts(), [result])
 
+    def test_optional_progress_callback_reports_paper_boundaries(self):
+        self.successes((PAIR,))
+        events = []
+        result = self.run_batch(
+            [PAIR], max_ids=1,
+            on_progress=lambda event, summary: events.append(
+                (event, summary["papers"][-1]["arxiv_id"])
+            ),
+        )
+
+        self.assertEqual(result["status"], "finished")
+        self.assertEqual(events, [("paper_started", PAIR[1]), ("paper_finished", PAIR[1])])
+
     def test_limit_uses_first_n_and_never_adds_replacements(self):
         self.outcomes = [Response(b'<feed xmlns="http://www.w3.org/2005/Atom" xmlns:o="http://a9.com/-/spec/opensearch/1.1/"><o:totalResults>0</o:totalResults></feed>', "application/atom+xml")]
         result = self.run_batch(max_ids=1)

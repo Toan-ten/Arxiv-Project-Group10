@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 import re
 import tarfile
@@ -726,10 +726,13 @@ class FastProductionRunner:
         s2_config: Optional[dict] = None,
         max_ids: Optional[int] = None,
         should_stop=None,
+        on_progress: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> dict:
         """Execute one cohort (100 papers) with SSD acceleration, backoff retries, Drive sync, and revision history."""
         if should_stop is not None and not callable(should_stop):
             raise ValueError("should_stop must be callable or None")
+        if on_progress is not None and not callable(on_progress):
+            raise ValueError("on_progress must be callable or None")
         self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
         target_limit = min(max_ids, len(pairs)) if max_ids is not None else len(pairs)
@@ -772,6 +775,7 @@ class FastProductionRunner:
                     s2_config=s2_config,
                     revision_history=revision_history,
                     should_stop=should_stop,
+                    **({"on_progress": on_progress} if on_progress is not None else {}),
                 )
         except KeyboardInterrupt:
             interrupted = True
@@ -805,6 +809,7 @@ class FastProductionRunner:
             "stopped": batch_stopped,
             "stop_reason": report.get("stop_reason"),
             "completed_papers": completed_final,
+            "target_papers": target_limit,
             "newly_completed_papers": newly_done,
             "elapsed_seconds": elapsed,
             "avg_seconds_per_paper": avg_seconds,
@@ -819,6 +824,7 @@ class FastProductionRunner:
         s2_config: Optional[dict] = None,
         max_ids: Optional[int] = None,
         should_stop=None,
+        on_progress: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> dict:
         """Enrich a completed cohort with Semantic Scholar metadata and references.
 
@@ -828,6 +834,8 @@ class FastProductionRunner:
         """
         if should_stop is not None and not callable(should_stop):
             raise ValueError("should_stop must be callable or None")
+        if on_progress is not None and not callable(on_progress):
+            raise ValueError("on_progress must be callable or None")
         already_done = self.count_completed_papers(number)
         if already_done == 0:
             self.restore_cohort(number)
@@ -864,13 +872,22 @@ class FastProductionRunner:
         stop_reason = None
         paper_results = []
 
-        for mssv, arxiv_id in pairs:
+        for index, (mssv, arxiv_id) in enumerate(pairs, start=1):
             if should_stop is not None and should_stop():
                 stopped = True
                 stop_reason = {"type": "session_budget", "stage": "s2_before_paper",
                                "message": "Soft session budget reached; S2 checkpoint is resumable."}
                 self._archive_cohort(number, self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz")
                 break
+            if on_progress is not None:
+                on_progress("paper_started", {
+                    "cohort": number,
+                    "index": index,
+                    "total": len(pairs),
+                    "mssv": mssv,
+                    "arxiv_id": arxiv_id,
+                    "attempted_papers": attempted_papers,
+                })
             folder_key = arxiv_id_to_folder_key(arxiv_id)
             paper_dir = self.corpus_dir / folder_key
             try:

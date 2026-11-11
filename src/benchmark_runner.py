@@ -12,6 +12,7 @@ import platform
 from pathlib import Path
 import re
 import subprocess
+from typing import Callable
 from uuid import uuid4
 
 from src import arxiv_client, batch, benchmark, pipeline, s2_integration, http_metrics
@@ -513,7 +514,7 @@ def run_benchmark(
     experiment_id=None, resume=False, versions=None, timeout=30.0,
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
     disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
-    should_stop=None,
+    should_stop=None, on_progress: Callable[[str, dict], None] | None = None,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
@@ -521,10 +522,12 @@ def run_benchmark(
     produce a failed execution report then re-raise the original exception.
     Historical attempts have logs only, not retroactively measured RAM/time.
     revision_history follows Batch: enabled for new definitions, inherited on
-    resume. Sampling and wall time enclose the automatic history step.
+    resume. Sampling and wall time enclose the automatic history step. The
+    optional progress callback is forwarded to Batch after durable updates.
     """
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
     _require(revision_history is None or type(revision_history) is bool)
+    _require(on_progress is None or callable(on_progress))
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
     sampling = sampling_config(corpus, sample_interval, disk_interval, disk_roots)
     previous, existing = [], None
@@ -576,6 +579,7 @@ def run_benchmark(
                 max_attempts=max_attempts, user_agent=user_agent,
                 revision_history=revision_history,
                 should_stop=should_stop,
+                **({"on_progress": on_progress} if on_progress is not None else {}),
                 **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:
