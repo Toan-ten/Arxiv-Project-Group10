@@ -1,6 +1,6 @@
 # Xử lý ID trong thư viện
 
-`src.pipeline` xử lý danh sách `(mssv, arxiv_id)` theo thứ tự, xác minh discovery, tải source, lấy lịch sử phiên bản và tùy chọn gọi S2. Module không tự mở rộng dải ID. Notebook M1 gọi `run_m1_member()` để chạy quy trình thống nhất; các API thấp hơn phục vụ kiểm thử và phát triển module.
+`src.pipeline` xử lý danh sách `(mssv, arxiv_id)` theo thứ tự ở tầng thư viện. `src.m1_phases` cung cấp API vận hành riêng `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()` với cùng lựa chọn/fingerprint và checkpoint độc lập. Notebook gọi từng API để có thể chạy lại một pha hoặc chạy S2 trước arXiv. `run_m1_member()` vẫn là wrapper tương thích, thực hiện arXiv → S2 → kiểm toán trong một lời gọi.
 
 ## Kiểm thử ngoại tuyến trên Windows PowerShell
 

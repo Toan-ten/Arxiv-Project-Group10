@@ -118,7 +118,10 @@ def aggregate(base: Path) -> dict:
         summary["end_to_end_complete"] = False
     summary["observation_errors"] = errors
     summary["observed_interval_count"] = len(rows)
-    summary["scope"] = "end_to_end_wall_seconds covers each completed session from snapshot preparation through audit, eligible export and size accounting; environment installation and inter-session gaps are excluded; stage intervals separately support diagnostics"
+    summary["scope"] = ("end_to_end_wall_seconds sums each completed sequential phase session, including audit/export; "
+                         "environment installation and inter-session gaps are excluded. RAM is sampled process RSS; "
+                         "disk is sampled logical regular-file bytes under the disjoint roots recorded per stage; "
+                         "sampled peaks may miss short-lived spikes. Stage intervals separately support diagnostics.")
     summary["member_campaign_count"] = len(member_summaries)
     missing_summaries = sorted(set(MEMBERS) - set(member_summaries))
     paper_rows = []
@@ -146,6 +149,73 @@ def aggregate(base: Path) -> dict:
     summary["average_paper_seconds"] = sum(durations) / len(durations) if measurements_valid else None
     summary["discovery_wall_seconds"] = sum(discovery_seconds) if measurements_valid else None
     summary["paper_and_discovery_measurement_status"] = "complete" if measurements_valid else "incomplete"
+    size_rows = [member_summaries.get(member, {}).get("logical_size_metrics") for member in MEMBERS]
+    size_valid = all(
+        isinstance(row, dict)
+        and type(row.get("logical_size_measured_papers")) is int
+        and row["logical_size_measured_papers"] >= 0
+        and isinstance(row.get("logical_size_scope"), str)
+        for row in size_rows
+    )
+    if size_valid and len({row["logical_size_scope"] for row in size_rows}) != 1:
+        size_valid = False
+    size_count = sum(row["logical_size_measured_papers"] for row in size_rows) if size_valid else 0
+    before_values = [row.get("average_logical_before_bytes_per_paper") for row in size_rows] if size_valid else []
+    after_values = [row.get("average_logical_after_bytes_per_paper") for row in size_rows] if size_valid else []
+    if size_valid:
+        size_valid = all(
+            (count == 0 and before is None and after is None)
+            or (count > 0 and type(before) in (int, float) and math.isfinite(before) and before >= 0
+                and type(after) in (int, float) and math.isfinite(after) and after >= 0)
+            for count, before, after in zip(
+                (row["logical_size_measured_papers"] for row in size_rows), before_values, after_values
+            )
+        )
+    if size_valid:
+        summary["logical_size_metrics"] = {
+            "status": "complete" if size_count else "not_applicable_no_found_source",
+            "logical_size_measured_papers": size_count,
+            "average_logical_before_bytes_per_paper": (
+                sum(row["logical_size_measured_papers"] * row["average_logical_before_bytes_per_paper"]
+                    for row in size_rows) / size_count if size_count else None
+            ),
+            "average_logical_after_bytes_per_paper": (
+                sum(row["logical_size_measured_papers"] * row["average_logical_after_bytes_per_paper"]
+                    for row in size_rows) / size_count if size_count else None
+            ),
+            "logical_size_scope": size_rows[0]["logical_size_scope"],
+        }
+    else:
+        summary["logical_size_metrics"] = {"status": "incomplete"}
+        summary["status"] = "incomplete"
+        summary["active_seconds"] = None
+        summary["end_to_end_complete"] = False
+    reference_rows = [member_summaries.get(member, {}).get("reference_metadata_success") for member in MEMBERS]
+    reference_valid = all(
+        isinstance(row, dict)
+        and type(row.get("complete_records")) is int
+        and type(row.get("eligible_records")) is int
+        and 0 <= row["complete_records"] <= row["eligible_records"]
+        and isinstance(row.get("definition"), str)
+        for row in reference_rows
+    )
+    if reference_valid and len({row["definition"] for row in reference_rows}) == 1:
+        reference_successes = sum(row["complete_records"] for row in reference_rows)
+        reference_eligible = sum(row["eligible_records"] for row in reference_rows)
+        summary["reference_metadata_success"] = {
+            "status": "complete" if reference_eligible else "not_applicable_no_complete_references",
+            "complete_records": reference_successes,
+            "eligible_records": reference_eligible,
+            "success_rate_percent": (
+                100.0 * reference_successes / reference_eligible if reference_eligible else None
+            ),
+            "definition": reference_rows[0]["definition"],
+        }
+    else:
+        summary["reference_metadata_success"] = {"status": "incomplete"}
+        summary["status"] = "incomplete"
+        summary["active_seconds"] = None
+        summary["end_to_end_complete"] = False
     expected_ids = {member: 5000 for member in MEMBERS}
     signature_fields = ("selection_fingerprint", "data_signature", "environment_fingerprint",
                         "starting_state_fingerprint", "measurement_protocol")
@@ -153,6 +223,9 @@ def aggregate(base: Path) -> dict:
         for member, value in member_summaries.items():
             if (len(value.get("cohorts", [])) != 50 or value.get("expected_id_count") != 5000
                     or value.get("data_signature") is None
+                    or not value.get("starting_state_fingerprint")
+                    or not value.get("measurement_protocol")
+                    or not value.get("runtime_commit")
                     or value.get("end_to_end_complete") is not True
                     or not value.get("campaign_id")
                     or value.get("discovery_arm") in {None, "unknown", "mixed_or_unknown"}):
@@ -172,6 +245,12 @@ def aggregate(base: Path) -> dict:
                 ).hexdigest()
         arms_by_member = {member: member_summaries[member].get("discovery_arm") for member in MEMBERS}
         summary["member_discovery_arms"] = arms_by_member
+        runtime_commits = {member_summaries[member].get("runtime_commit") for member in MEMBERS}
+        summary["runtime_commits"] = sorted(commit for commit in runtime_commits if commit)
+        if len(runtime_commits) != 1 or None in runtime_commits:
+            summary["status"] = "incomplete"
+            summary["active_seconds"] = None
+            summary["end_to_end_complete"] = False
         arms = {arm for arm in arms_by_member.values() if arm is not None}
         summary["discovery_arm"] = next(iter(arms)) if len(arms) == 1 else "mixed_fallback"
     if missing_summaries or errors:

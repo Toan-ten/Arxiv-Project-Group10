@@ -161,15 +161,17 @@ def test_group_observation_rollup_requires_stage_coverage_and_separates_session_
                         "sum_sample_bytes": 10, "sampled_peak_bytes": 10},
                 "disk": {"status": "collected", "sampled_peak_bytes": 20}}
     rows = []
-    for index, stage in enumerate(("snapshot_prepare", "archive_backup", "restore", "source",
-                                   "s2_restore", "s2", "handoff_audit", "audit")):
-        second = index + (20 if index >= 4 else 0)
-        rows.append({"observation_id": str(index), "session_id": "s1" if index < 4 else "s2",
-                     "stage": stage, "cohort": 0 if stage in {"snapshot_prepare", "audit"} else 1,
+    stages = (("source", "s1", 1, 1), ("s2", "s2", 24, 1), ("audit", "s2", 26, 0))
+    for index, (stage, session_id, second, cohort) in enumerate(stages):
+        result_payload = ({"is_reconciled": True, "integrity_failed_papers": 0}
+                          if stage == "audit" else {"status": "source_complete" if stage == "source" else "complete"})
+        rows.append({"observation_id": str(index), "session_id": session_id,
+                     "stage": stage, "cohort": cohort,
                      "started_at": f"2026-01-01T00:00:{second:02d}+00:00",
                      "finished_at": f"2026-01-01T00:00:{second + 1:02d}+00:00",
                      "wall_seconds": 1.0, "execution_status": "returned", "resources": resource,
-                     "result": {}})
+                     "configuration": {"mssv": "m"} if stage == "audit" else {},
+                     "result": result_payload})
     envelopes = [
         {"session_id": "s1", "started_at": "2026-01-01T00:00:00+00:00",
          "finished_at": "2026-01-01T00:00:04+00:00", "wall_seconds": 4.0, "status": "finished"},
@@ -179,7 +181,7 @@ def test_group_observation_rollup_requires_stage_coverage_and_separates_session_
     result = aggregate_group_observations(rows, members=["m"], cohorts_by_member={"m": [1]},
                                           session_envelopes=envelopes)
     assert result["status"] == "measured_intervals"
-    assert result["known_active_seconds"] == 8
+    assert result["known_active_seconds"] == 3
     assert result["session_gaps_seconds"] == 20
     assert result["end_to_end_wall_seconds"] == 8
     assert result["end_to_end_complete"] is False

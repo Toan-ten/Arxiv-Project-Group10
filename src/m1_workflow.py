@@ -326,7 +326,7 @@ def _select_cohorts(mssv: str, cohort_limit: int | None) -> tuple[list[int], lis
     return assigned, selected, scope
 
 
-def run_m1_member(
+def _run_m1_member_monolithic(
     mssv: str,
     *,
     drive_root: str | Path,
@@ -1110,3 +1110,15 @@ def _export_datasets(runner: FastProductionRunner, pairs: list[tuple[str, str]],
         output_dir=output_dir,
         require_m1_complete=True,
     )
+
+
+# Public entry points use independent, fingerprinted phase checkpoints. The
+# former combined implementation stays private for reproducible comparison of
+# old audit logs; operational callers use the sequential compatibility wrapper.
+from src.m1_phases import (  # noqa: E402
+    build_member_selection,
+    run_m1_arxiv_member,
+    run_m1_audit_member,
+    run_m1_member,
+    run_m1_s2_member,
+)

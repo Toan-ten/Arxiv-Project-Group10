@@ -1,21 +1,20 @@
 # Vận hành M1 trên Colab
 
-Thực hiện các bước trong [hướng dẫn chạy M1](../M1_COLAB_MEMBER_GUIDE.md). Sổ tay dùng một luồng bắt buộc cho mọi thành viên: chuẩn bị ứng viên Kaggle, xác minh qua arXiv, tải mã nguồn từng phiên bản, thu thập lịch sử phiên bản, lấy siêu dữ liệu và tài liệu tham khảo từ Semantic Scholar, rồi kiểm toán.
+Thực hiện các bước trong [hướng dẫn chạy M1](../M1_COLAB_MEMBER_GUIDE.md). Notebook dùng danh sách ID tất định theo MSSV, chia 50 cohort × 100 ID, với ba bước vận hành: arXiv, Semantic Scholar, kiểm toán/đối soát.
 
 ## Điều kiện chạy
 
-Notebook ghim runtime `d5279dc2cc667d13e688ab76d3044e3d9ecf905a`. Commit runtime phải có trên remote mà notebook clone trước khi chạy Colab. Khi cập nhật runtime, commit mã trước, đổi pin notebook sang SHA đó, rồi chạy lại toàn bộ các ô trên một runtime Colab mới.
+Notebook ghim một commit runtime cụ thể. Commit runtime phải có trên remote mà notebook clone trước khi chạy Colab. Khi cập nhật runtime, commit mã trước, đổi pin notebook sang SHA đó trong commit notebook kế tiếp, rồi chạy lại cell cấu hình trên runtime Colab mới.
 
 - Chọn CPU; mỗi corpus chỉ có một tiến trình ghi.
-- Lưu `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` trong Colab Secrets. Không chép khóa vào mã hoặc báo cáo.
-- Dùng MSSV trong `config/group10_id_ranges.json`. Mặc định chạy đủ 50 lô của thành viên; `COHORT_LIMIT` chỉ giới hạn số lô đầu trong cùng luồng.
-- Kaggle chỉ cung cấp dữ liệu ứng viên. arXiv xác nhận bài báo và phiên bản; khi snapshot không dùng được, quy trình tiếp tục bằng arXiv.
-- Khi tải snapshot, ô Colab báo lúc bắt đầu và nhắc trạng thái mỗi 30 giây; thời hạn tải là 60 phút. Nếu dừng thủ công, tiến trình tải bị dừng và tệp tạm được dọn. Lần chạy sau có thể phải tải lại nếu snapshot chưa hoàn tất.
-- Ô 3 in thời điểm bắt đầu và kết thúc từng giai đoạn. Khi tải mã nguồn hoặc lấy dữ liệu S2, ô hiển thị tiến độ theo lô, cập nhật ID đang xét và nhắc trạng thái sau mỗi 30 giây.
+- Dùng MSSV trong `config/group10_id_ranges.json`. Mặc định xử lý đủ 50 lô; `COHORT_LIMIT=1` dành cho pilot 100 ID và tự dùng root Drive/local riêng.
+- Cell arXiv xác minh ID, lịch sử phiên bản và tải source. Cell S2 truy vấn cùng danh sách ID độc lập, kể cả khi arXiv chưa chạy. Cell kiểm toán yêu cầu fingerprint khớp và xác minh checkpoint trước khi nhập S2 vào corpus.
+- Lưu `SEMANTIC_SCHOLAR_API_KEY` trong Colab Secrets. Không chép khóa vào mã hoặc báo cáo. arXiv không cần khóa Kaggle để thực hiện discovery trực tiếp theo ID.
+- Các pha ghi checkpoint riêng, còn khóa writer theo MSSV ngăn nhiều runtime cùng ghi vào một phạm vi. Chạy arXiv → S2 → kiểm toán theo thứ tự mặc định; có thể chạy S2 trước nếu cần.
 
 ## Dừng và tiếp tục
 
-Ngân sách phiên mặc định là 10 giờ. Thời gian chờ và thử lại API được tính vào thời gian xử lý. Khi chạm ngân sách hoặc gặp lỗi chính sách, quy trình lưu checkpoint và kết thúc lượt chạy. Sau khi dịch vụ ổn định, chạy lại sổ tay với cùng MSSV, phạm vi và Drive. Không gửi yêu cầu liên tục trong lúc API còn giới hạn.
+Ngân sách mỗi cell mặc định là 10 giờ. Thời gian chờ và thử lại API được tính vào runtime. Stop, hết ngân sách, lỗi mạng hoặc 403/429 giữ checkpoint của đúng pha; sau khi dịch vụ ổn định, chạy lại cell đó với cùng MSSV, phạm vi và Drive. S2 `not_found` chỉ là kết quả S2, không xác nhận arXiv không tồn tại. Nếu một pha chưa có đủ bằng chứng hoặc checkpoint không tương thích, kiểm toán chặn xuất bảng.
 
 ## Dữ liệu đầu ra
 
@@ -23,6 +22,6 @@ Quy ước ánh xạ ngày tham khảo và xử lý tệp `.bbl` được nêu t
 
 Các phép đo kích thước nguồn so sánh tổng byte file thường sau giải nén trước lọc với byte file nguồn được giữ; bước lọc cũng loại các file không phải hình. Kích thước archive nén được ghi riêng. Các phiên bản cũ thiếu số đo trước lọc phải giữ trạng thái chưa đo.
 
-Thời gian theo bài gồm khoảng đo source và S2 ghi trong các quan sát; phần chuẩn bị snapshot, sao lưu archive, kiểm toán và xuất bảng là chi phí dùng chung và được báo riêng. Tỷ lệ metadata reference tính trên reference của các danh sách đã hoàn tất, với điều kiện có tiêu đề, tác giả, ngày nộp hoặc công bố và ID Semantic Scholar; arXiv ID không bắt buộc.
+Thời gian source/S2 được ghi riêng từng cohort và từng phiên; retry/delay nằm trong thời gian pha. Tổng runtime cộng các phiên chạy tuần tự, loại khoảng nghỉ giữa phiên và không đếm lại paper chỉ được đọc từ checkpoint. RAM và disk có phạm vi ghi trong từng stage observation. Nếu không có số đo đáng tin cậy, báo thiếu thay vì ước tính.
 
 Phép đo cuối cần nhật ký các phiên của toàn nhóm và đủ 20.000 vị trí ID. Mẫu kiểm tra không đại diện cho kết quả toàn nhóm. Xem [hướng dẫn tổng hợp benchmark](../operations/benchmark_runner.md).

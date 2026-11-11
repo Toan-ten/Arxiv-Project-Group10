@@ -66,8 +66,11 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                 compile("".join(cell["source"]), f"cell-{index}", "exec")
                 self.assertIsNone(cell["execution_count"])
                 self.assertEqual(cell["outputs"], [])
-        self.assertIn("Đang chạy toàn bộ quy trình M1", self.code[-1])
-        self.assertIn("Đang đọc Colab Secret", self.code[-1])
+        self.assertEqual(len(self.code), 4)
+        joined = "\n".join(self.code)
+        for stage in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member"):
+            self.assertIn(stage, joined)
+        self.assertIn("userdata.get", joined)
 
     def test_all_members_use_the_same_full_assignment_configuration(self):
         config = load_config()
@@ -75,7 +78,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         for mssv in config:
             cohorts = member_cohort_range(mssv)
             self.assertEqual(len(cohorts), 50)
-        source = self.code[1]
+        source = self.code[0]
         self.assertIn('MSSV = ""', source)
         self.assertIn("COHORT_LIMIT = None", source)
         self.assertNotIn('MSSV = "24120260"', self.text)
@@ -86,20 +89,26 @@ class TestUnifiedNotebookContract(unittest.TestCase):
             self.assertNotIn(forbidden, self.text)
         workflow_path = self.root / "src" / "m1_workflow.py"
         workflow = workflow_path.read_text(encoding="utf-8")
-        for fragment in ("prepare_snapshot", "reuse_or_build_index", "revision_history=True",
-                         "runner.enrich_cohort_s2", "verify_cohort_handoff", "compute_m1_statistics",
-                         "export_official_datasets", "summarize_workflow", "SessionBudget"):
+        for fragment in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member",
+                         "_process_s2_cohort", "_preflight_merge", "_merge_s2",
+                         "verify_cohort_handoff", "compute_m1_statistics", "export_official_datasets",
+                         "SessionBudget", "selection_fingerprint"):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, workflow)
-        self.assertEqual(sum("run_m1_member(" in cell for cell in self.code), 1)
+                self.assertIn(fragment, workflow + (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8"))
+        self.assertEqual(sum("run_m1_arxiv_member(" in cell for cell in self.code), 1)
+        self.assertEqual(sum("run_m1_s2_member(" in cell for cell in self.code), 1)
+        self.assertEqual(sum("run_m1_audit_member(" in cell for cell in self.code), 1)
         self.assertNotIn("runner.run_cohort", self.text)
         self.assertNotIn("runner.enrich_cohort_s2", self.text)
         self.assertNotIn("prepare_snapshot", self.text)
         self.assertNotIn("export_official_datasets", self.text)
-        self.assertLess(workflow.index("runner.run_cohort("), workflow.index("runner.enrich_cohort_s2("))
-        self.assertLess(workflow.index("runner.enrich_cohort_s2("), workflow.index("def run_data_audit"))
-        self.assertIn("audit_bbl_sources", workflow)
-        self.assertIn("arXiv xác nhận bài báo và phiên bản", self.text)
+        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        self.assertIn("s2_config=None", phases)
+        self.assertIn("def run_m1_member", phases)
+        self.assertIn("run_m1_arxiv_member(", phases)
+        self.assertIn("run_m1_s2_member(", phases)
+        self.assertIn("audit_bbl_sources", phases)
+        self.assertIn("arXiv là nguồn xác nhận bài và phiên bản", self.text)
         self.assertIn("COHORT_LIMIT = None", self.text)
 
     def test_data_handling_rules_live_in_the_data_contract(self):
@@ -112,11 +121,9 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("thử chuyển đổi cục bộ", self.text)
 
     def test_runtime_pins_match_implementation_commit(self):
-        expected = "d5279dc2cc667d13e688ab76d3044e3d9ecf905a"
         setup = self.code[0]
-        self.assertIn(f'M1_RUNTIME_COMMIT = "{expected}"', setup)
-        self.assertEqual(len(expected), 40)
-        import subprocess
+        expected = re.search(r'M1_RUNTIME_COMMIT = "([0-9a-f]{40})"', setup).group(1)
+        self.assertEqual(expected, "eebb8891265e02e56e7c04141131912335b35bf6")
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
@@ -126,20 +133,21 @@ class TestUnifiedNotebookContract(unittest.TestCase):
 
     def test_s2_and_audit_are_mandatory_and_fail_closed(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
-        self.assertIn("runner.enrich_cohort_s2", workflow)
-        self.assertIn("export_eligible = reconciled and not integrity_failed and data_complete and not handoff_issues", workflow)
-        self.assertIn('"handoff_status": "verified" if handoff_verified', workflow)
+        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        self.assertIn("_preflight_merge", phases)
+        self.assertIn("if data_complete:", phases)
+        self.assertIn('"handoff_status": "verified" if audit_result.get("is_reconciled") else "blocked"', phases)
         self.assertNotIn("if True:", self.text)
 
     def test_colab_s2_429_retry_is_bounded_and_benchmark_visible(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
-        self.assertIn('"max_attempts": 8', workflow)
-        self.assertIn('"max_retry_wait": 600.0', workflow)
-        self.assertIn('"backoff_base": 3.0', workflow)
-        self.assertIn('"backoff_cap": 60.0', workflow)
-        self.assertIn('**S2_RETRY_POLICY', workflow)
-        self.assertIn('"s2_stop_reason"', workflow)
-        self.assertIn("should_stop=budget.should_stop", workflow)
+        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        self.assertIn('"max_attempts": 8', phases)
+        self.assertIn('"max_retry_wait": 600.0', phases)
+        self.assertIn('"backoff_base": 3.0', phases)
+        self.assertIn('"backoff_cap": 60.0', phases)
+        self.assertIn('"http_status": http_status', phases)
+        self.assertIn("stop_reason", phases)
 
 
 

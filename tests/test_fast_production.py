@@ -1251,7 +1251,7 @@ shutil.rmtree(target2)
         self.assertIn("COLAB_TPU_ADDR", text)
         self.assertIn("M1_RUNTIME_COMMIT", text)
         self.assertIn("if current_head != M1_RUNTIME_COMMIT", text)
-        self.assertIn("m1_workflow.py", text)
+        self.assertIn("m1_workflow", text)
         self.assertNotIn('MSSV = "24120260"', text)
         self.assertNotIn("BENCHMARK_ARM", text)
 
@@ -1263,13 +1263,15 @@ shutil.rmtree(target2)
         notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
         text = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         workflow = (repo_root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
+        phases = (repo_root / "src" / "m1_phases.py").read_text(encoding="utf-8")
         self.assertEqual(len(list((repo_root / "notebooks").glob("*.ipynb"))), 1)
         for member in load_config():
             self.assertEqual(len(member_cohort_range(member)), 50)
-        for stage in ("prepare_snapshot", "revision_history=True", "runner.enrich_cohort_s2",
-                      "verify_cohort_handoff", "summarize_workflow"):
-            self.assertIn(stage, workflow)
-        self.assertEqual(text.count("run_m1_member("), 1)
+        for stage in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member",
+                      "selection_fingerprint", "verify_cohort_handoff", "_preflight_merge"):
+            self.assertIn(stage, workflow + phases)
+        for stage in ("run_m1_arxiv_member(", "run_m1_s2_member(", "run_m1_audit_member("):
+            self.assertEqual(text.count(stage), 1)
         self.assertNotIn("runner.run_cohort", text)
         self.assertNotIn("runner.enrich_cohort_s2", text)
         self.assertIn("COHORT_LIMIT = None", text)

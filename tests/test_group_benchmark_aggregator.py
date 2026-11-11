@@ -92,8 +92,17 @@ def test_group_paper_and_discovery_metrics_require_all_members(tmp_path, monkeyp
         value = _summary(member)
         value.update(discovery_arm="arxiv_only", selection_fingerprint="group", data_signature="data",
                      environment_fingerprint="env", starting_state_fingerprint="empty", measurement_protocol="v1",
+                     runtime_commit="commit",
                      paper_timings={"status": "complete", "papers": [{"arxiv_id": member, "total_seconds": index}]},
-                     discovery_timings={"status": "complete", "wall_seconds": index})
+                     discovery_timings={"status": "complete", "wall_seconds": index},
+                     logical_size_metrics={"logical_size_measured_papers": 1,
+                                           "average_logical_before_bytes_per_paper": 100 * index,
+                                           "average_logical_after_bytes_per_paper": 80 * index,
+                                           "logical_size_scope": "regular files before/after filtering"},
+                     reference_metadata_success={"complete_records": 1,
+                                                 "eligible_records": 2,
+                                                 "success_rate_percent": 50.0,
+                                                 "definition": "nonempty metadata fields"})
         summaries[member] = value
         audits.append({"stage": "audit", "cohort": 0, "configuration": {"mssv": member},
                        "execution_status": "returned", "result": {"is_reconciled": True}})
@@ -107,6 +116,9 @@ def test_group_paper_and_discovery_metrics_require_all_members(tmp_path, monkeyp
     result = aggregator.aggregate(tmp_path)
     assert result["average_paper_seconds"] == 2.5
     assert result["discovery_wall_seconds"] == 10
+    assert result["logical_size_metrics"]["average_logical_before_bytes_per_paper"] == 250
+    assert result["logical_size_metrics"]["average_logical_after_bytes_per_paper"] == 200
+    assert result["reference_metadata_success"]["success_rate_percent"] == 50.0
     summaries[aggregator.MEMBERS[0]]["paper_timings"]["status"] = "incomplete"
     result = aggregator.aggregate(tmp_path)
     assert result["average_paper_seconds"] is None

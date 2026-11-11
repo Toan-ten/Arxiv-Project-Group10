@@ -247,7 +247,7 @@ def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | N
     import math
 
     total, seen, processed = 0.0, {}, set()
-    valid, prep_seen = True, False
+    valid = True
     for record in records:
         stage = record.get("stage")
         if stage in {"snapshot_prepare", "kaggle_index"}:
@@ -256,7 +256,6 @@ def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | N
                 valid = False
             else:
                 total += seconds
-                prep_seen = prep_seen or stage == "snapshot_prepare"
         if stage != "source":
             continue
         timing = (record.get("result") or {}).get("timing_metrics")
@@ -287,11 +286,11 @@ def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | N
                 else:
                     total += seconds
     expected = set(expected_ids) if expected_ids is not None else None
-    complete = bool(expected) and expected <= processed and valid and prep_seen
+    complete = bool(expected) and expected <= processed and valid
     return {"status": "complete" if complete else "incomplete",
             "wall_seconds": total if complete else None,
             "known_wall_seconds": total, "missing_ids": sorted(expected - processed) if expected is not None else None,
-            "scope": "snapshot preparation, index, arXiv discovery and version history across attempts; includes waits and retries"}
+            "scope": "arXiv discovery and version history across observed attempts; includes waits and retries; Kaggle preparation is not included"}
 
 
 def summarize_paper_timings(records: list[dict], found_ids: list[str] | None) -> dict:
@@ -347,13 +346,26 @@ def summarize_workflow(records: list[dict], required: list[tuple[str, int]], *,
     recorded repeats count toward active wall time. Session gaps are excluded.
     """
     timing = summarize_observations(records)
+
+    def completed_observation(record: dict) -> bool:
+        if record.get('execution_status') != 'returned':
+            return False
+        result = record.get('result') or {}
+        stage = record.get('stage')
+        if result.get('stopped') or (result.get('fast_runner') or {}).get('stopped'):
+            return False
+        if stage == 'source' and result.get('status') is not None:
+            return result.get('status') == 'source_complete'
+        if stage == 's2' and result.get('status') is not None:
+            return result.get('status') == 'complete'
+        if stage == 'audit' and 'is_reconciled' in result:
+            return result.get('is_reconciled') is True
+        if result.get('status') == 'failed':
+            return False
+        return result.get('status') != 'fallback' or stage == 'snapshot_prepare'
+
     observed = {(r.get('stage'), r.get('cohort')) for r in records
-                if r.get('execution_status') == 'returned'
-                and ((r.get('result') or {}).get('status') != 'failed')
-                and ((r.get('result') or {}).get('status') != 'fallback'
-                     or r.get('stage') == 'snapshot_prepare')
-                and not (r.get('result') or {}).get('stopped')
-                and not ((r.get('result') or {}).get('fast_runner') or {}).get('stopped')}
+                if completed_observation(r)}
     missing = sorted(set(required) - observed)
     import math
     ram_samples = []
@@ -418,7 +430,7 @@ def summarize_workflow(records: list[dict], required: list[tuple[str, int]], *,
                                               for prev, cur in zip(rows, rows[1:]))
         summary['session_count'] = len(rows)
         summary['session_gap_scope'] = 'elapsed gap between completed session envelopes; excluded from runtime'
-        summary['end_to_end_scope'] = 'session wall time from snapshot preparation through audit, eligible export and size accounting; excludes environment installation and inter-session gaps'
+        summary['end_to_end_scope'] = 'sum of sequential phase session wall times through audit; excludes environment installation and inter-session gaps'
     return summary
 
 
@@ -444,16 +456,28 @@ def compare_workflows(left: dict, right: dict) -> dict:
 def aggregate_group_observations(records: list[dict], *, members: list[str],
                                  cohorts_by_member: dict[str, list[int]],
                                  session_envelopes: list[dict] | None = None) -> dict:
-    """Aggregate all required Colab stage intervals, retaining gaps separately."""
+    """Aggregate source/S2/audit intervals for the new sequential M1 workflow."""
     required = []
     for member in members:
         for cohort in cohorts_by_member[member]:
-            required.extend((stage, cohort) for stage in
-                            ('archive_backup', 'restore', 'source', 's2_restore', 's2', 'handoff_audit'))
-        required.append(('audit', 0))
-    # Snapshot preparation is shared, but at least one durable observation is required.
-    required.append(('snapshot_prepare', 0))
+            required.extend((stage, cohort) for stage in ('source', 's2'))
+    required.append(('audit', 0))
     summary = summarize_workflow(records, required)
+    audited_members = {
+        (record.get('configuration') or {}).get('mssv')
+        for record in records
+        if record.get('stage') == 'audit'
+        and record.get('cohort') == 0
+        and record.get('execution_status') == 'returned'
+        and (record.get('result') or {}).get('is_reconciled') is True
+        and (record.get('result') or {}).get('integrity_failed_papers', 0) == 0
+    }
+    missing_audits = sorted(set(members) - audited_members)
+    if missing_audits:
+        summary['missing_stages'].extend([['audit', 0, member] for member in missing_audits])
+        summary['status'] = 'incomplete'
+        summary['active_seconds'] = None
+        summary['end_to_end_complete'] = False
     starts = {}
     ends = {}
     for row in records:
@@ -532,11 +556,12 @@ def fingerprint_complete_corpus(store: Any, pairs: list[tuple[str, str]]) -> str
     import hashlib
     from src.storage_integrity import audit_paper_integrity
 
-    if not pairs or len(set(pairs)) != len(pairs):
+    normalized_pairs = [tuple(pair) for pair in pairs]
+    if not normalized_pairs or len(set(normalized_pairs)) != len(normalized_pairs):
         return None
     rows = []
     try:
-        for mssv, arxiv_id in sorted(pairs):
+        for mssv, arxiv_id in sorted(normalized_pairs):
             audit = audit_paper_integrity(store, mssv, arxiv_id)
             if audit.has_integrity_failure:
                 return None

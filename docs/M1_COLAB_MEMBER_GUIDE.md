@@ -5,15 +5,18 @@ Mọi thành viên dùng [sổ tay M1](../notebooks/m1_pipeline_thu_thap_va_kiem
 ## Cách chạy
 
 1. Mở sổ tay trong Colab, chọn CPU và kết nối Google Drive.
-2. Chạy ô thiết lập. Sổ tay checkout commit đã ghim, kiểm tra mã nguồn rồi cài thư viện.
-3. Nhập MSSV. Giữ `COHORT_LIMIT = None` để chạy đủ 5.000 ID; đặt giới hạn nhỏ hơn để chạy mẫu trên cùng quy trình.
-4. Trong Colab Secrets, thêm `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY`, rồi bật Notebook access.
-5. Chạy ô M1. Sổ tay tự thực hiện source, lịch sử phiên bản, S2, lưu checkpoint và kiểm toán.
+2. Ở cell cấu hình, nhập MSSV và giữ `COHORT_LIMIT = None` để chạy đủ 5.000 ID. Dùng `1` cho pilot 100 ID; chế độ này tự dùng root Drive/local riêng với corpus đầy đủ.
+3. Chạy cell cấu hình để checkout commit runtime đã ghim, cài thư viện và tạo fingerprint của danh sách.
+4. Chạy cell arXiv để xác minh ID, lịch sử phiên bản và source.
+5. Trong Colab Secrets, thêm `SEMANTIC_SCHOLAR_API_KEY`, bật Notebook access rồi chạy cell S2. S2 có thể chạy trước arXiv; nó dùng checkpoint độc lập.
+6. Sau khi hai pha đủ bằng chứng, chạy cell kiểm toán/đối soát. Bảng chỉ được xuất nếu phạm vi đạt M1.
 
 ## Khi phiên dừng
 
-Lỗi 403/429, hết ngân sách phiên hoặc lỗi toàn vẹn sẽ dừng lượt chạy và lưu trạng thái có thể tiếp tục. Với 429, chờ dịch vụ ổn định rồi chạy lại sổ tay bằng cùng MSSV, phạm vi và thư mục Drive. Không xóa checkpoint và không chạy hai tiến trình cùng ghi một corpus.
+Stop, lỗi mạng, hết ngân sách hoặc 403/429 giữ checkpoint của đúng pha. Chờ dịch vụ ổn định rồi chạy lại cell tương ứng bằng cùng MSSV, phạm vi và Drive. Không xóa checkpoint và không chạy hai tiến trình cùng ghi một MSSV. Nếu S2 chạy trước arXiv, kiểm toán sẽ chờ source; S2 `not_found` không được dùng để kết luận arXiv không tồn tại.
 
 ## Đọc kết quả
 
-`handoff_status = verified` xác nhận lô đã qua kiểm tra bàn giao. Nếu trạng thái là `blocked`, xem `audit`, `stop_reason` và báo cáo trong Drive. `source_complete` chỉ nói về mã nguồn; M1 còn cần metadata và references đầy đủ. Xem [quy trình M1](operations/m1_production.md) để hiểu các trạng thái.
+Cell arXiv chỉ xác nhận trạng thái source. Cell S2 chỉ xác nhận metadata/references S2. Cell kiểm toán ghi fingerprint, lỗi, xung đột, số liệu và trạng thái xuất; khi bị chặn, xem báo cáo `m1_audit_*.json` trong Drive.
+
+Pilot 100 ID không đại diện cho benchmark cuối. Benchmark cần chạy CPU Colab trên đủ 20.000 ID của nhóm, giữ log từng phiên và cộng thời gian retry/delay; khoảng nghỉ giữa phiên được loại khỏi runtime. Xem [quy trình M1](operations/m1_production.md) và [hướng dẫn benchmark](operations/benchmark_runner.md).

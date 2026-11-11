@@ -1,6 +1,6 @@
 # Điều phối lô trong thư viện
 
-`src.batch` xử lý tuần tự một danh sách ID và lưu nhật ký bền vững. Notebook M1 gọi `run_m1_member()` để điều phối toàn bộ quy trình. Các API bên dưới phục vụ kiểm thử và phát triển thư viện, không phải điểm vào vận hành M1.
+`src.batch` xử lý tuần tự một danh sách ID và lưu nhật ký bền vững. Notebook M1 gọi các API pha riêng `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`; `run_m1_member()` giữ vai trò wrapper tương thích cho lệnh cũ. Các API batch bên dưới vẫn phục vụ kiểm thử và phát triển thư viện.
 
 ## Giao diện gọi và dữ liệu đầu vào
 
@@ -25,7 +25,7 @@ giữ nguyên thứ tự. Hàm này hỗ trợ kiểm thử tập con, không th
 dùng chung, retry hữu hạn, version selection và chính sách 403/429. Mặc định của
 Batch Runner là `max_attempts=1`; Pipeline gọi trực tiếp vẫn giữ mặc định cũ.
 
-Lớp điều phối mức thấp cho phép `s2_config=None` để kiểm thử arXiv-only; dictionary bật S2 và được lưu trong run definition. Sổ tay M1 Colab luôn cung cấp cấu hình S2, vì thiếu metadata hoặc references thì chưa đạt M1.
+Lớp điều phối mức thấp cho phép `s2_config=None` để kiểm thử arXiv-only; dictionary bật S2 và được lưu trong run definition. Notebook M1 hiện chạy arXiv và S2 trong hai pha độc lập; thiếu metadata hoặc references thì chưa đạt M1.
 Đổi cấu hình hoặc bật S2 trên batch cũ cần batch_id mới. Logs arXiv-only vẫn đọc
 được. Xem [S2 integration](s2_integration.md); giữ hai progress callbacks hiện có.
 

@@ -1,6 +1,6 @@
 # Tích hợp Semantic Scholar
 
-Tài liệu này mô tả lớp thư viện nối Semantic Scholar với hợp đồng lưu trữ v2. Notebook M1 luôn chạy giai đoạn này; thiếu siêu dữ liệu hoặc tài liệu tham khảo thì bài báo chưa đạt M1. Các tham số của API mức thấp chỉ phục vụ kiểm thử và phát triển, không tạo quy trình vận hành khác. Xem [hợp đồng dữ liệu](../contracts/source_data_contracts.md).
+Tài liệu này mô tả lớp thư viện nối Semantic Scholar với hợp đồng lưu trữ v2. Notebook M1 có cell S2 độc lập; nó truy vấn danh sách ID được giao mà không cần arXiv source đã chạy. Bằng chứng S2 được giữ ở staging riêng và chỉ được nhập vào corpus v2 sau kiểm toán đối soát. Thiếu siêu dữ liệu hoặc references cần thiết thì paper chưa đạt M1. Xem [hợp đồng dữ liệu](../contracts/source_data_contracts.md).
 
 ## Vai trò của S2 trong M1
 

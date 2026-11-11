@@ -131,7 +131,8 @@ def audit_cohort_archive_payload(
     6. no_tex_source contract is enforced (no .tex files, only .bib/.bbl, 0 kept bytes if empty).
     7. success versions contain at least one .tex file.
     8. Zero unmanaged files exist in any paper directory.
-    9. not_found papers have valid empty version contract and zero extra files.
+    9. not_found papers have valid empty version contract and only the standard
+       manifest/metadata/references checkpoint files.
     """
     pairs = cohort_pairs(number)
     expected_folders = {arxiv_id_to_folder_key(aid): (mssv, aid) for mssv, aid in pairs}
@@ -338,7 +339,7 @@ def audit_cohort_archive_payload(
                         raise ValueError(f"Paper {aid} has invalid not_found contract")
                     for p_member in files_by_paper.get(folder_name, set()):
                         rel_to_paper = "/".join(p_member.parts[1:])
-                        if rel_to_paper != "manifest.json":
+                        if rel_to_paper not in {"manifest.json", "metadata.json", "references.json"}:
                             raise ValueError(f"not_found Paper {aid} contains unmanaged file: {p_member.as_posix()}")
                     confirmed_not_found += 1
                     included_ids.append(aid)
