@@ -140,7 +140,6 @@ def _progress_result_detail(result: dict) -> str | None:
         return f"snapshot {status}; nguồn {source}"
     if result.get("status") == "fallback":
         reason = {
-            "missing_kaggle_token": "thiếu khóa Kaggle",
             "snapshot_unavailable": "không có snapshot hợp lệ",
             "candidate_index_failed": "không lập được chỉ mục ứng viên",
             "snapshot_prepare_failed": "không chuẩn bị được snapshot",
@@ -331,8 +330,8 @@ def _run_m1_member_monolithic(
     *,
     drive_root: str | Path,
     local_root: str | Path,
-    kaggle_token: str | None = None,
-    semantic_scholar_api_key: str | None = None,
+    kaggle_token: str,
+    semantic_scholar_api_key: str,
     cohort_limit: int | None = None,
     budget_seconds: float = SESSION_BUDGET_SECONDS,
 ) -> dict:
@@ -341,6 +340,10 @@ def _run_m1_member_monolithic(
     ``cohort_limit`` chỉ thu hẹp số lô đầu tiên của dải thành viên; các giai
     đoạn, kiểm tra, lưu checkpoint và tiêu chí bàn giao vẫn giữ nguyên.
     """
+    kaggle_token = _require_m1_secret(kaggle_token, "KAGGLE_API_TOKEN")
+    semantic_scholar_api_key = _require_m1_secret(
+        semantic_scholar_api_key, "SEMANTIC_SCHOLAR_API_KEY",
+    )
     mssv = mssv.strip() if isinstance(mssv, str) else mssv
     assigned_cohorts, cohorts, scope = _select_cohorts(mssv, cohort_limit)
     session_id = uuid.uuid4().hex
@@ -433,13 +436,12 @@ def _run_m1_member_monolithic(
     try:
         progress.start(mssv, cohorts, scope, budget_seconds)
         try:
-            snapshot_token = kaggle_token.strip() if kaggle_token and kaggle_token.strip() else None
             snapshot_result = observe_with_progress(
                 "snapshot_prepare",
                 0,
                 lambda: prepare_snapshot(
                     drive_root.parent / "shared" / "kaggle_snapshot",
-                    token=snapshot_token,
+                    token=kaggle_token,
                 ),
                 session_id=session_id,
                 configuration={"snapshot_scope": "shared_cache", "accelerator": "CPU"},
@@ -498,6 +500,12 @@ def _run_m1_member_monolithic(
             }
             index_path = None
 
+        if not index_path:
+            raise RuntimeError(
+                "M1 yêu cầu snapshot và index Kaggle hợp lệ; "
+                "đã dừng trước khi bắt đầu discovery arXiv."
+            )
+
         if prior_index is not None:
             os.environ.pop("M1_KAGGLE_CANDIDATE_INDEX", None)
         if index_path:
@@ -505,14 +513,10 @@ def _run_m1_member_monolithic(
         else:
             os.environ.pop("M1_KAGGLE_CANDIDATE_INDEX", None)
 
-        s2_key = semantic_scholar_api_key.strip() if semantic_scholar_api_key and semantic_scholar_api_key.strip() else None
-        if s2_key:
-            os.environ["SEMANTIC_SCHOLAR_API_KEY"] = s2_key
-            os.environ["S2_API_KEY"] = s2_key
-        else:
-            os.environ.pop("SEMANTIC_SCHOLAR_API_KEY", None)
-            os.environ.pop("S2_API_KEY", None)
-        s2_pacing = 1.0 if s2_key else 3.0
+        s2_key = semantic_scholar_api_key
+        os.environ["SEMANTIC_SCHOLAR_API_KEY"] = s2_key
+        os.environ["S2_API_KEY"] = s2_key
+        s2_pacing = 1.0
         s2_config = {
             "timeout": 30.0,
             **S2_RETRY_POLICY,
@@ -1163,6 +1167,7 @@ def _export_datasets(runner: FastProductionRunner, pairs: list[tuple[str, str]],
 # triển khai gộp cũ được giữ ở phạm vi riêng để có thể so sánh lại
 # nhật ký kiểm toán cũ; bên gọi vận hành dùng wrapper tương thích chạy tuần tự.
 from src.m1_phases import (  # noqa: E402
+    _required_m1_secret,
     build_member_selection,
     run_m1_arxiv_member,
     run_m1_audit_member,

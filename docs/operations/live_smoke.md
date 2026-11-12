@@ -53,6 +53,9 @@ Có thể lưu key một lần trong `.env` tại root theo
 Các lần chạy sau tự đọc file; biến môi trường đã đặt luôn được ưu tiên.
 Nếu biến Windows cũ đang sai, xem hướng dẫn gỡ biến ở liên kết trên.
 
+Live Smoke là công cụ chẩn đoán độc lập và có thể kiểm tra client không xác thực.
+Pha S2 của quy trình M1 Colab có chính sách riêng: khóa là bắt buộc.
+
 Kiểm tra đã nạp key mà không hiển thị secret hoặc gọi API:
 
 ```powershell

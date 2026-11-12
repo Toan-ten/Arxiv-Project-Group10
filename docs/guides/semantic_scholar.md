@@ -156,6 +156,10 @@ Thứ tự ưu tiên:
 3. Thiếu file, thiếu biến hoặc giá trị rỗng: client tiếp tục không có key.
    Truy cập không key có thể bị hạn chế; không coi đó là key đã được cấu hình.
 
+Quy tắc trên áp dụng cho client Semantic Scholar dùng độc lập và các phép thử
+không thuộc M1. Entry point M1 Colab kiểm tra `SEMANTIC_SCHOLAR_API_KEY` bắt buộc
+trước khi tạo checkpoint; M1 không gửi request khi thiếu khóa.
+
 Key sai định dạng bị từ chối bằng lỗi cố định, không in giá trị và không âm
 thầm đổi sang key khác. Chỉ gửi header `x-api-key` khi có key hợp lệ về định dạng.
 Kiểm tra này không xác thực quyền truy cập API hay phát hiện mọi ký tự gõ sai.

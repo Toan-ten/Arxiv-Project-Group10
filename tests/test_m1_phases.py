@@ -165,7 +165,10 @@ class TestIndependentS2Phase(unittest.TestCase):
         self.temp.cleanup()
 
     def run_s2(self, **options):
-        settings = {"budget_seconds": 60}
+        settings = {
+            "budget_seconds": 60,
+            "semantic_scholar_api_key": "offline-s2-fixture-key",
+        }
         settings.update(options)
         return m1_phases.run_m1_s2_member(
             MSSV,
@@ -174,6 +177,13 @@ class TestIndependentS2Phase(unittest.TestCase):
             cohort_limit=1,
             **settings,
         )
+
+    def test_s2_requires_key_before_creating_phase_state(self):
+        with patch.object(m1_phases, "FastProductionRunner") as runner_class:
+            with self.assertRaisesRegex(ValueError, "SEMANTIC_SCHOLAR_API_KEY"):
+                self.run_s2(semantic_scholar_api_key=" ")
+        runner_class.assert_not_called()
+        self.assertFalse((self.drive / "reports").exists())
 
     def _failed_references_429(self, arxiv_id):
         return {
@@ -200,7 +210,7 @@ class TestIndependentS2Phase(unittest.TestCase):
         }
 
     def test_s2_before_arxiv_stops_on_429_then_resumes_without_arxiv_or_duplicate_ids(self):
-        with patch.object(semantic_scholar, "_key_from_environment", return_value=None):
+        with patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"):
             first = self.run_s2()
             self.assertTrue(first["stopped"])
             self.assertEqual(first["stop_reason"]["http_status"], 429)
@@ -246,7 +256,7 @@ class TestIndependentS2Phase(unittest.TestCase):
 
         with (
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
             patch.object(m1_phases.random, "uniform", return_value=300.0),
             patch.object(m1_phases.time, "sleep") as sleep,
         ):
@@ -287,7 +297,7 @@ class TestIndependentS2Phase(unittest.TestCase):
 
     def test_bounded_auto_resume_after_metadata_429_retries_only_unfinished_metadata(self):
         with (
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
             patch.object(m1_phases.random, "uniform", return_value=300.0),
             patch.object(m1_phases.time, "sleep") as sleep,
         ):
@@ -318,7 +328,7 @@ class TestIndependentS2Phase(unittest.TestCase):
 
         with (
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
             patch.object(m1_phases.random, "uniform", return_value=300.0),
             patch.object(m1_phases.time, "sleep"),
         ):
@@ -338,7 +348,7 @@ class TestIndependentS2Phase(unittest.TestCase):
 
         with (
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
             patch.object(m1_phases.time, "sleep") as sleep,
         ):
             result = self.run_s2(auto_resume_429=True, budget_seconds=3600)
@@ -359,7 +369,7 @@ class TestIndependentS2Phase(unittest.TestCase):
         with (
             patch.object(semantic_scholar, "RateLimiter", return_value=limiter),
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
             patch.object(m1_phases.random, "uniform", return_value=300.0),
             patch.object(m1_phases.time, "sleep") as sleep,
         ):
@@ -377,7 +387,7 @@ class TestIndependentS2Phase(unittest.TestCase):
             patch.object(semantic_scholar, "fetch_metadata", return_value=[
                 _metadata(self.first_id, found=False),
             ]),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
         ):
             with self.assertRaisesRegex(m1_phases.M1PhaseError, "batch không khớp"):
                 self.run_s2()
@@ -401,7 +411,7 @@ class TestIndependentS2Phase(unittest.TestCase):
 
         with (
             patch.object(semantic_scholar, "fetch_metadata", side_effect=fetch_metadata),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
         ):
             result = self.run_s2()
         self.assertFalse(result["stopped"])
@@ -414,7 +424,7 @@ class TestIndependentS2Phase(unittest.TestCase):
         self.assertEqual(len([name for name in saved["files"] if name.endswith("metadata.json")]), 100)
 
     def test_checkpoint_checksum_mismatch_fails_closed_and_preserves_file(self):
-        with patch.object(semantic_scholar, "_key_from_environment", return_value=None):
+        with patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"):
             self.first_response_is_429 = False
             self.run_s2()
         checkpoint = (
@@ -426,7 +436,7 @@ class TestIndependentS2Phase(unittest.TestCase):
         evidence = checkpoint.parent / "papers" / relative
         evidence.write_text("{}\n", encoding="utf-8")
         before = evidence.read_bytes()
-        with patch.object(semantic_scholar, "_key_from_environment", return_value=None):
+        with patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"):
             with self.assertRaisesRegex(m1_phases.M1PhaseError, "Checksum"):
                 self.run_s2()
         self.assertEqual(evidence.read_bytes(), before)
@@ -464,7 +474,7 @@ class TestIndependentS2Phase(unittest.TestCase):
             patch.object(semantic_scholar, "RateLimiter", return_value=object()),
             patch.object(semantic_scholar, "fetch_metadata", side_effect=fetch_metadata),
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
         ):
             first = self.run_s2()
             self.assertTrue(first["stopped"])
@@ -516,6 +526,23 @@ class TestArxivAndAuditGates(unittest.TestCase):
         self.assertEqual(runner.store.read_manifest(member, arxiv_id)["discovery_status"], "not_found")
 
     def test_arxiv_phase_never_calls_s2_and_never_claims_m1(self):
+        snapshot = self.base / "snapshot.json"
+        snapshot.write_bytes(b"verified snapshot fixture")
+        snapshot_sha = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+        index_root = self.drive / "kaggle_indices"
+        index_root.mkdir(parents=True)
+        index_path = index_root / "candidate-index.json"
+        index_path.write_text(json.dumps({"snapshot_sha256": snapshot_sha}), encoding="utf-8")
+        prepared = {
+            "status": "ready", "source": "cached", "snapshot_path": str(snapshot),
+            "snapshot_sha256": snapshot_sha, "downloaded_at": STAMP,
+            "provider_updated_at": None,
+        }
+        indexed = {
+            "index_path": str(index_path), "reused": True,
+            "index": {"snapshot_sha256": snapshot_sha, "candidates": {}, "diagnostics": {}},
+            "candidate_count": 0, "snapshot_size_bytes": len(snapshot.read_bytes()),
+        }
         with (
             patch.object(FastProductionRunner, "run_cohort", return_value={
                 "fast_runner": {"stopped": False, "stop_reason": None},
@@ -523,6 +550,8 @@ class TestArxivAndAuditGates(unittest.TestCase):
             patch.object(FastProductionRunner, "count_source_completed_papers", return_value=100),
             patch.object(m1_phases, "_mark_archive_arxiv_only"),
             patch.object(semantic_scholar, "fetch_metadata", side_effect=AssertionError("S2 must stay separate")),
+            patch("src.kaggle_candidates.prepare_snapshot", return_value=prepared),
+            patch("src.kaggle_candidates.reuse_or_build_index", return_value=indexed),
         ):
             result = m1_phases.run_m1_arxiv_member(
                 MSSV,
@@ -530,11 +559,46 @@ class TestArxivAndAuditGates(unittest.TestCase):
                 local_root=self.local,
                 cohort_limit=1,
                 budget_seconds=60,
+                kaggle_token="offline-kaggle-fixture-token",
             )
         self.assertEqual(result["source_complete_papers"], 100)
         self.assertFalse(result["m1_complete"])
         saved = json.loads(Path(result["checkpoint_root"]).joinpath("cohort_0151.json").read_text())
         self.assertEqual(saved["status"], "source_complete")
+        self.assertEqual(saved["kaggle_status"], "ready")
+        self.assertEqual(saved["kaggle_session_id"], result["session_id"])
+
+    def test_arxiv_requires_kaggle_key_before_creating_phase_state(self):
+        with patch.object(m1_phases, "FastProductionRunner") as runner_class:
+            with self.assertRaisesRegex(ValueError, "KAGGLE_API_TOKEN"):
+                m1_phases.run_m1_arxiv_member(
+                    MSSV, drive_root=self.drive, local_root=self.local,
+                    cohort_limit=1, kaggle_token=" ",
+                )
+        runner_class.assert_not_called()
+        self.assertFalse((self.drive / "reports").exists())
+
+    def test_arxiv_stops_without_discovery_when_required_kaggle_snapshot_is_unavailable(self):
+        with (
+            patch("src.kaggle_candidates.prepare_snapshot", return_value={
+                "status": "fallback", "reason": "kaggle_download_failed",
+            }),
+            patch.object(FastProductionRunner, "run_cohort") as run_cohort,
+        ):
+            result = m1_phases.run_m1_arxiv_member(
+                MSSV, drive_root=self.drive, local_root=self.local,
+                cohort_limit=1, budget_seconds=60,
+                kaggle_token="offline-kaggle-fixture-token",
+            )
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["stop_reason"], {
+            "type": "required_source_unavailable",
+            "stage": "kaggle_snapshot_or_index",
+            "reason": "kaggle_download_failed",
+        })
+        self.assertEqual(result["kaggle"]["status"], "unavailable")
+        self.assertEqual(result["cohorts"], {})
+        run_cohort.assert_not_called()
 
     def test_arxiv_phase_does_not_preserve_m1_archive_certification_from_cached_s2(self):
         runner = FastProductionRunner(local_root=self.local, drive_root=self.drive)
@@ -563,6 +627,10 @@ class TestArxivAndAuditGates(unittest.TestCase):
             )
         self.assertFalse(result["is_reconciled"])
         self.assertEqual(result["export_status"], "blocked")
+        self.assertEqual(result["kaggle_source_issues"], [{
+            "cohort": self.cohort,
+            "issue": "required_kaggle_provenance_missing",
+        }])
         self.assertFalse(result["s2_issues"] == [])
         export.assert_not_called()
 
@@ -607,12 +675,13 @@ class TestArxivAndAuditGates(unittest.TestCase):
             patch.object(semantic_scholar, "RateLimiter", return_value=object()),
             patch.object(semantic_scholar, "fetch_metadata", side_effect=fetch_metadata),
             patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
         ):
             s2_result = m1_phases.run_m1_s2_member(
                 MSSV,
                 drive_root=self.drive,
                 local_root=self.local,
+                semantic_scholar_api_key="offline-s2-fixture-key",
                 cohort_limit=1,
                 budget_seconds=120,
             )
@@ -656,6 +725,39 @@ class TestArxivAndAuditGates(unittest.TestCase):
                 "error": None,
             })
 
+        kaggle_session_id = "f" * 32
+        snapshot_sha = "a" * 64
+        index_root = self.drive / "kaggle_indices"
+        index_root.mkdir(parents=True, exist_ok=True)
+        index_path = index_root / "audit-fixture-index.json"
+        index_path.write_text(json.dumps({"snapshot_sha256": snapshot_sha}), encoding="utf-8")
+        index_sha = hashlib.sha256(index_path.read_bytes()).hexdigest()
+        runner.reports_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_json(runner.reports_dir / f"kaggle_preparation_{kaggle_session_id}.json", {
+            "session_id": kaggle_session_id,
+            "status": "ready",
+            "snapshot_sha256": snapshot_sha,
+            "index_sha256": index_sha,
+            "index_path": str(index_path),
+        })
+        phase_root = m1_phases._persist_selection(self.drive, self.selection)
+        source_state_path = phase_root / "arxiv" / f"cohort_{self.cohort:04d}.json"
+        source_state_path.parent.mkdir(parents=True, exist_ok=True)
+        source_state = m1_phases._source_state_manifest(
+            source_state_path, self.selection, self.cohort,
+        )
+        source_state.update(
+            status="source_complete",
+            source_complete_papers=100,
+            expected_count=100,
+            kaggle_status="ready",
+            kaggle_snapshot_sha256=snapshot_sha,
+            kaggle_index_sha256=index_sha,
+            kaggle_session_id=kaggle_session_id,
+            kaggle_policy_version="m1-kaggle-reconcile-v2",
+        )
+        m1_phases._write_json(source_state_path, source_state)
+
         result = m1_phases.run_m1_audit_member(
             MSSV,
             drive_root=self.drive,
@@ -665,6 +767,7 @@ class TestArxivAndAuditGates(unittest.TestCase):
         )
         self.assertTrue(result["is_reconciled"], json.dumps({
             "source_issues": result.get("source_issues"),
+            "kaggle_source_issues": result.get("kaggle_source_issues"),
             "s2_issues": result.get("s2_issues"),
             "merge_conflicts": result.get("merge_conflicts"),
             "statistics": result.get("statistics"),

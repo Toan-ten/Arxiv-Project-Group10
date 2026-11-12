@@ -8,12 +8,12 @@
 4. Để xử lý đủ 5.000 vị trí ID, đặt `COHORT_LIMIT = None`. Đặt `COHORT_LIMIT = 1` để chạy thử một lô 100 ID. Lượt chạy thử dùng thư mục lưu trữ riêng; không dùng chung thư mục đó với lượt đầy đủ.
 5. Chạy ô cấu hình. Ô này kiểm tra SHA môi trường chạy, cài gói phụ thuộc, tạo danh sách ID và in dấu vân tay của phạm vi. Ghi lại SHA, dấu vân tay và đường dẫn Drive trong nhật ký phiên.
 
-Có thể thêm `KAGGLE_API_TOKEN` vào Colab Secrets và bật quyền truy cập notebook để tải bản chụp Kaggle. Không dán khóa vào notebook, Drive hoặc nhật ký. Bản chụp và chỉ mục hợp lệ trong bộ nhớ đệm vẫn có thể được dùng khi không có khóa; nếu không có dữ liệu Kaggle hợp lệ, pha arXiv tiếp tục bằng API trực tiếp.
+Trước khi chạy, thêm cả `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi bật quyền truy cập notebook. Notebook kiểm tra hai khóa trước khi gắn Drive hoặc gọi API. Không dán khóa vào notebook, Drive hay nhật ký. Khóa Kaggle vẫn bắt buộc khi snapshot đã có trong bộ nhớ đệm.
 
 ## 2. Chạy ba pha
 
-1. Chạy ô arXiv. Pha này xác nhận danh sách ID bằng Atom theo lô tối đa 20 ID, đối chiếu bản chụp Kaggle nếu có, rồi tải mã nguồn riêng cho từng phiên bản. Khi dữ liệu Kaggle lệch, kết quả arXiv được ưu tiên và bằng chứng sai khác được lưu theo ID.
-2. Thêm `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, bật quyền truy cập notebook rồi chạy ô S2. Siêu dữ liệu được lấy theo lô tối đa 50 ID; tài liệu tham khảo được phân trang riêng cho từng bài. Nếu không có khóa, API có thể áp dụng hạn mức khác.
+1. Chạy ô arXiv. Pha này yêu cầu snapshot và index Kaggle hợp lệ, xác nhận danh sách ID bằng Atom theo lô tối đa 20 ID, đối chiếu lịch sử rồi tải mã nguồn riêng cho từng phiên bản. Khi snapshot hoặc index không sẵn sàng, pha dừng trước discovery; pipeline không chuyển sang đường arXiv-only.
+2. Chạy ô S2. Siêu dữ liệu được lấy theo lô tối đa 50 ID; tài liệu tham khảo được phân trang riêng cho từng bài. M1 dừng nếu thiếu khóa S2 và không gửi request ẩn danh.
 3. Chạy ô kiểm toán/đối soát sau khi arXiv và S2 đã ghi đủ bằng chứng. Kiểm toán xác minh phạm vi, định danh, xuất xứ, mã kiểm tra và trạng thái phân trang trước khi hợp nhất dữ liệu và xuất bảng.
 
 Mặc định, sổ tay chạy arXiv, S2 rồi kiểm toán. Có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha. S2 `not_found` chỉ mô tả kết quả tìm kiếm ở Semantic Scholar; trạng thái này không xác nhận ID arXiv không tồn tại.

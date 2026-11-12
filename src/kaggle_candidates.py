@@ -406,16 +406,19 @@ def apply_verified_history(store, mssv: str, arxiv_id: str, candidate: dict,
     return arxiv_history._cached(store.read_metadata(mssv, arxiv_id))
 
 
-def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict:
+def prepare_snapshot(cache_dir: str | Path, *, token: str) -> dict:
     """Tái sử dụng snapshot hợp lệ hoặc tải tệp tạm bằng Kaggle CLI.
 
-    Hiển thị trạng thái tải định kỳ mà không in thông tin xác thực. Snapshot
-    hiện có không bị ghi đè nếu bản tải mới lỗi hoặc chưa được xác minh.
+    Yêu cầu token ngay cả khi có snapshot cache hợp lệ. Hiển thị trạng thái tải
+    mà không in thông tin xác thực; snapshot cũ không bị ghi đè khi tải lỗi.
     """
     import subprocess
     import sys
     import zipfile
 
+    if not isinstance(token, str) or not token.strip():
+        raise ValueError("KAGGLE_API_TOKEN là bắt buộc để chuẩn bị snapshot.")
+    token = token.strip()
     root = Path(cache_dir)
     root.mkdir(parents=True, exist_ok=True)
     path = root / 'arxiv-metadata-oai-snapshot.json'
@@ -451,16 +454,11 @@ def prepare_snapshot(cache_dir: str | Path, *, token: str | None = None) -> dict
             return dict(status='fallback', reason='invalid_existing_cache', download_seconds=None,
                         validation_seconds=time.monotonic()-overall_started,
                         snapshot_prepare_seconds=time.monotonic()-overall_started)
-    if not token or not token.strip():
-        print('Kaggle: chưa có token; chuyển sang xác minh trực tiếp bằng arXiv.', flush=True)
-        return dict(status='fallback', reason='missing_kaggle_token', download_seconds=None,
-                    validation_seconds=None,
-                    snapshot_prepare_seconds=time.monotonic()-overall_started)
     try:
         with tempfile.TemporaryDirectory(prefix='.kaggle-', dir=root) as tmp:
             temporary = Path(tmp)
             env = os.environ.copy()
-            env['KAGGLE_API_TOKEN'] = token.strip()
+            env['KAGGLE_API_TOKEN'] = token
             download_started = time.monotonic()
             command = [sys.executable, '-c', 'from kaggle.cli import main; main()', 'datasets', 'download',
                        '-d', 'Cornell-University/arxiv', '-f', path.name, '-p', str(temporary)]

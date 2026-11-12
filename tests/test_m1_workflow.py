@@ -77,6 +77,7 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
             self.assertEqual(kwargs["cohort_limit"], 1)
             self.assertGreater(kwargs["budget_seconds"], 0)
         self.assertEqual(self.calls[1][2]["semantic_scholar_api_key"], "s2-key")
+        self.assertEqual(self.calls[0][2]["kaggle_token"], "unused")
         self.assertEqual(result["selection_fingerprint"], "same-selection")
         self.assertEqual(result["handoff_status"], "verified")
         self.assertEqual(result["export"], {"status": "exported"})

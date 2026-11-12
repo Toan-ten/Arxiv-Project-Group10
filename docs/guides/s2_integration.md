@@ -23,7 +23,7 @@ S2 dùng Semantic Scholar Graph API: metadata qua `POST /graph/v1/paper/batch` v
 
 Pha M1 gom tối đa 50 ID chưa có metadata hợp lệ vào một request. Trước khi ghi bằng chứng, response phải có đúng số phần tử, đúng thứ tự và ID arXiv khớp từng vị trí. Sau đó điểm khôi phục được lưu riêng theo ID. Nếu response của cả lô không hợp lệ hoặc quá lớn, pha chia nhỏ lô để cô lập lỗi; sai số phần tử hoặc sai thứ tự sẽ chặn việc ghi bằng chứng. ID lỗi vẫn chưa hoàn tất và được thử lại khi tiếp tục. References được phân trang riêng theo từng bài. Cấu hình thực tế và số request metadata được ghi trong quan sát phiên.
 
-Notebook đọc khóa từ Colab Secret `SEMANTIC_SCHOLAR_API_KEY` và gửi qua header `x-api-key`. Không ghi khóa vào mã nguồn notebook, điểm khôi phục hoặc báo cáo. Nếu không có khóa, request không xác thực có thể chịu hạn mức khác.
+Notebook yêu cầu Colab Secret `SEMANTIC_SCHOLAR_API_KEY` trước khi bắt đầu M1 và gửi khóa qua header `x-api-key`. Nếu thiếu khóa hoặc không đọc được Secret, pha S2 dừng trước khi tạo checkpoint hay gửi request. M1 không gửi request ẩn danh. Không ghi khóa vào mã nguồn notebook, điểm khôi phục hoặc báo cáo.
 
 ## Kiểm tra metadata và references
 

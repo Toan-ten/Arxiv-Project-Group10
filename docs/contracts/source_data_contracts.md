@@ -16,13 +16,13 @@ Khi ghép dữ liệu từ nhiều nguồn, dùng ID arXiv gốc. Chỉ gán met
 
 Pha arXiv của notebook M1 làm mới danh sách ID bằng Atom API theo lô tối đa 20 ID. Parser chỉ nhận entry khớp chính xác ID được yêu cầu. ID bị thiếu hoặc phản hồi chưa xác định được sẽ được truy vấn riêng để cô lập lỗi.
 
-Snapshot Kaggle là nguồn tùy chọn để lập chỉ mục ứng viên và hỗ trợ lịch sử phiên bản. Nó không thay thế kết quả discovery arXiv hiện hành. Nếu bản ghi Kaggle thiếu hoặc lệch danh sách phiên bản/ngày so với arXiv, pipeline dùng kết quả arXiv và lưu bằng chứng sai khác. Khi không có token hoặc snapshot/index hợp lệ, pipeline tiếp tục bằng đường arXiv trực tiếp. Mỗi phiên bản vẫn được tải riêng từ endpoint có hậu tố phiên bản.
+Trong luồng M1, `KAGGLE_API_TOKEN` là thông tin xác thực bắt buộc. Snapshot Kaggle hợp lệ và index tương ứng phải sẵn sàng trước khi discovery bắt đầu; nếu không, pha dừng thay vì chuyển sang đường arXiv-only. Snapshot lập chỉ mục ứng viên và hỗ trợ lịch sử phiên bản, nhưng không thay thế kết quả discovery arXiv hiện hành. Nếu bản ghi Kaggle thiếu hoặc lệch danh sách phiên bản/ngày so với arXiv, pipeline dùng kết quả arXiv và lưu bằng chứng sai khác. Mỗi phiên bản vẫn được tải riêng từ endpoint có hậu tố phiên bản.
 
 Feed rỗng hợp lệ tạo trạng thái `not_found`. Lỗi HTTP, mạng, XML hoặc phản hồi không khớp được ghi thành trạng thái lỗi riêng. Metadata arXiv lưu tiêu đề, tác giả, ngày nộp ban đầu, ngày cập nhật và danh sách phiên bản khi nguồn cung cấp; không suy ra ngày hoặc phiên bản còn thiếu từ nguồn khác.
 
 ## 3. Semantic Scholar
 
-Metadata bài báo và tài liệu tham khảo được truy vấn trong pha S2 độc lập với arXiv. Lỗi S2 hoặc trạng thái S2 `not_found` không làm thay đổi kết luận arXiv. Tài liệu tham khảo được phân trang đến khi có bằng chứng trang cuối; trạng thái một phần hoặc lỗi không được xem là danh sách đầy đủ.
+Metadata bài báo và tài liệu tham khảo được truy vấn trong pha S2 độc lập với arXiv. M1 yêu cầu `SEMANTIC_SCHOLAR_API_KEY` và không gửi request ẩn danh; client Semantic Scholar dùng riêng ngoài M1 vẫn hỗ trợ chế độ không khóa. Lỗi S2 hoặc trạng thái S2 `not_found` không làm thay đổi kết luận arXiv. Tài liệu tham khảo được phân trang đến khi có bằng chứng trang cuối; trạng thái một phần hoặc lỗi không được xem là danh sách đầy đủ.
 
 Corpus giữ mọi mục tài liệu tham khảo quan sát được, kể cả mục thiếu arXiv ID hoặc thông tin bài báo. Bảng xuất `references` chỉ gồm mục có arXiv ID theo lược đồ. `paperId` lấy từ Semantic Scholar; không dùng `corpusId` thay thế.
 
@@ -60,8 +60,8 @@ Nếu cùng phiên bản có `.bib` hoặc lệnh `bibitem`, loại `.bbl` khỏ
 
 Thao tác chuyển đổi không sửa manifest hay checksum nguồn. Pipeline ghi riêng quyết định chính sách vào manifest; checksum các tệp nguồn gốc được giữ nguyên. Chỉ mục ngoài corpus lưu đường dẫn tương đối và checksum để M2 có thể truy xuất artifact.
 
-## 6. Bản chụp Kaggle tùy chọn và dữ liệu lịch sử
+## 6. Bản chụp Kaggle bắt buộc trong M1 và dữ liệu lịch sử
 
-Luồng M1 ba pha có thể tải hoặc tái sử dụng bản chụp Kaggle, xác minh SHA-256 và dựng chỉ mục theo danh sách ID được chọn. Bản chụp và chỉ mục có provenance riêng; chúng hỗ trợ đối chiếu danh sách ID và lịch sử phiên bản, không thay thế xác nhận arXiv hoặc tải mã nguồn riêng cho từng phiên bản.
+Luồng M1 ba pha phải có Colab Secret `KAGGLE_API_TOKEN`. Pipeline tải hoặc tái sử dụng bản chụp Kaggle, xác minh SHA-256 và dựng chỉ mục theo danh sách ID được chọn. Bản chụp và chỉ mục có provenance riêng; chúng hỗ trợ đối chiếu danh sách ID và lịch sử phiên bản, không thay thế xác nhận arXiv hoặc tải mã nguồn riêng cho từng phiên bản. Việc tái sử dụng cache không miễn yêu cầu cấu hình khóa.
 
-Khi Kaggle không sẵn có, pipeline dùng đường arXiv trực tiếp. Các trường Kaggle cũ trong điểm khôi phục chỉ được công nhận nếu đáp ứng chính sách provenance hiện hành. Dữ liệu lịch sử thiếu provenance vẫn được giữ để đối chiếu nhưng không tự được nâng thành bằng chứng mới.
+Khi Kaggle không sẵn có hoặc index không hợp lệ, pha M1 dừng trước khi gọi Atom discovery và giữ nguyên checkpoint đã có. Kiểm toán chỉ chấp nhận source checkpoint có trạng thái Kaggle `ready`, SHA snapshot/index hợp lệ và bằng chứng index khớp checksum. Các trường Kaggle cũ trong điểm khôi phục không đủ provenance không được xem là tuân thủ chính sách mới; cần chạy lại pha arXiv để ghi bằng chứng mới. Dữ liệu cũ vẫn được giữ để đối chiếu.

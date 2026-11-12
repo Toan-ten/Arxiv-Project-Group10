@@ -11,9 +11,9 @@ Kho mã này chứa quy trình thu thập và kiểm toán dữ liệu arXiv c�
 Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
 
 1. Mở sổ tay bằng Colab và chọn CPU.
-2. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
-3. Chạy ô arXiv để xác minh ID, phiên bản và tải mã nguồn.
-4. Thêm `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, bật quyền truy cập notebook rồi chạy ô S2.
+2. Thêm `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi cấp quyền truy cập cho notebook.
+3. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
+4. Chạy ô arXiv để xác minh ID, phiên bản và tải mã nguồn; sau đó chạy ô S2.
 5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
 
 Chỉ trạng thái `handoff_status = verified` mới xác nhận lô đạt điều kiện bàn giao. Một phiên dừng, mã nguồn đã tải xong hoặc báo cáo đã đối chiếu không tự chứng minh M1 hoàn tất.
@@ -32,8 +32,9 @@ Cấu hình JSON là nguồn duy nhất để tạo các cặp thành viên–ID
 ## Dữ liệu và trạng thái
 
 - arXiv xác nhận bài báo và danh sách phiên bản. Quy trình tải mã nguồn riêng cho từng phiên bản, giữ các tệp `.tex`, `.bib`, `.bbl` và loại tệp nhị phân khỏi kho dữ liệu.
-- Pha arXiv xác nhận ID và phiên bản bằng Atom theo lô tối đa 20 ID. Bản chụp Kaggle là nguồn tùy chọn để lập chỉ mục ứng viên và đối chiếu lịch sử; khi thiếu hoặc lệch, quy trình dùng kết quả arXiv. Mỗi phiên bản vẫn được tải riêng từ endpoint arXiv có mã phiên bản.
+- Pha arXiv yêu cầu `KAGGLE_API_TOKEN` và snapshot/index Kaggle hợp lệ trước khi discovery bắt đầu. Atom xác nhận ID và phiên bản theo lô tối đa 20 ID; mỗi phiên bản vẫn được tải riêng từ endpoint arXiv có mã phiên bản. Snapshot hoặc index không sẵn sàng sẽ dừng pha, không chuyển sang đường arXiv-only.
 - Semantic Scholar cung cấp siêu dữ liệu và tài liệu tham khảo theo trang trong pha riêng. Trạng thái S2 `not_found` không kết luận arXiv không tồn tại; lỗi API không được xem là danh sách tài liệu tham khảo rỗng.
+- Pha S2 yêu cầu `SEMANTIC_SCHOLAR_API_KEY`; M1 không gửi request S2 ẩn danh.
 - Điểm khôi phục, manifest và mã kiểm tra giúp tiếp tục sau khi phiên dừng. Lỗi toàn vẹn hoặc dữ liệu M1 còn thiếu sẽ chặn bàn giao.
 
 Kho dữ liệu dùng hợp đồng lưu trữ v2. Cấu trúc, xuất xứ và ý nghĩa các trường được mô tả trong [hợp đồng lưu trữ](docs/contracts/corpus_storage_contract.md) và [hợp đồng dữ liệu nguồn](docs/contracts/source_data_contracts.md).

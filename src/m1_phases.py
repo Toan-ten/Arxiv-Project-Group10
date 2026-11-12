@@ -53,6 +53,23 @@ class M1PhaseError(RuntimeError):
     """A phase checkpoint is absent, incompatible, or fails verification."""
 
 
+def _required_m1_secret(value: Any, name: str) -> str:
+    """Kiểm tra khóa M1 mà không đưa giá trị khóa vào thông báo lỗi."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"M1 yêu cầu Colab Secret `{name}` có giá trị. "
+            "Hãy thêm Secret và cấp quyền truy cập cho notebook."
+        )
+    secret = value.strip()
+    if "\r" in secret or "\n" in secret or "\x00" in secret:
+        raise ValueError(f"Colab Secret `{name}` có định dạng không hợp lệ.")
+    if name == "SEMANTIC_SCHOLAR_API_KEY" and (
+        not secret.isascii() or any(ord(char) < 33 or ord(char) > 126 for char in secret)
+    ):
+        raise ValueError(f"Colab Secret `{name}` có định dạng không hợp lệ.")
+    return secret
+
+
 def build_member_selection(mssv: str, cohort_limit: int | None = None) -> dict:
     """Build the deterministic member selection shared by all M1 phases."""
     if not isinstance(mssv, str) or not mssv.strip():
@@ -280,15 +297,12 @@ def _member_writer_lock(drive_root: Path, selection: dict):
 
 
 @contextmanager
-def _api_key_environment(api_key: str | None):
+def _api_key_environment(api_key: str):
     names = ("SEMANTIC_SCHOLAR_API_KEY", "S2_API_KEY")
     previous = {name: os.environ.get(name) for name in names}
-    value = api_key.strip() if isinstance(api_key, str) and api_key.strip() else None
+    value = _required_m1_secret(api_key, "SEMANTIC_SCHOLAR_API_KEY")
     for name in names:
-        if value is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = value
+        os.environ[name] = value
     try:
         yield value
     finally:
@@ -356,6 +370,13 @@ def _source_state_manifest(path: Path, selection: dict, cohort: int) -> dict:
             or any(char not in "0123456789abcdef" for char in value)
         ):
             raise M1PhaseError(f"Checksum Kaggle trong checkpoint arXiv sai: {path}")
+    kaggle_session_id = saved.get("kaggle_session_id")
+    if kaggle_session_id is not None and (
+        not isinstance(kaggle_session_id, str)
+        or len(kaggle_session_id) != 32
+        or any(char not in "0123456789abcdef" for char in kaggle_session_id)
+    ):
+        raise M1PhaseError(f"Mã phiên Kaggle trong checkpoint sai định dạng: {path}")
     policy = saved.get("kaggle_policy_version")
     if policy is not None and policy != "m1-kaggle-reconcile-v2":
         raise M1PhaseError(f"Phiên bản chính sách Kaggle trong checkpoint không được hỗ trợ: {path}")
@@ -381,6 +402,60 @@ def _source_state_manifest(path: Path, selection: dict, cohort: int) -> dict:
         ):
             raise M1PhaseError(f"Chính sách auto-resume 429 không hợp lệ: {path}")
     return saved
+
+
+def _kaggle_source_provenance_issue(
+    runner: FastProductionRunner, state: dict, cohort: int,
+) -> dict | None:
+    """Xác minh checkpoint source dẫn chiếu snapshot và index Kaggle bắt buộc."""
+    session_id = state.get("kaggle_session_id")
+    snapshot_sha = state.get("kaggle_snapshot_sha256")
+    index_sha = state.get("kaggle_index_sha256")
+    if (
+        state.get("kaggle_status") != "ready"
+        or state.get("kaggle_policy_version") != "m1-kaggle-reconcile-v2"
+        or not isinstance(session_id, str)
+        or len(session_id) != 32
+        or any(char not in "0123456789abcdef" for char in session_id)
+        or not isinstance(snapshot_sha, str)
+        or len(snapshot_sha) != 64
+        or any(char not in "0123456789abcdef" for char in snapshot_sha)
+        or not isinstance(index_sha, str)
+        or len(index_sha) != 64
+        or any(char not in "0123456789abcdef" for char in index_sha)
+    ):
+        return {"cohort": cohort, "issue": "required_kaggle_provenance_missing"}
+
+    preparation_path = runner.reports_dir / f"kaggle_preparation_{session_id}.json"
+    try:
+        preparation = _read_json(preparation_path)
+        if (
+            not isinstance(preparation, dict)
+            or preparation.get("session_id") != session_id
+            or preparation.get("status") != "ready"
+            or preparation.get("snapshot_sha256") != snapshot_sha
+            or preparation.get("index_sha256") != index_sha
+            or not isinstance(preparation.get("index_path"), str)
+        ):
+            raise ValueError("preparation evidence mismatch")
+        index_path_text = preparation["index_path"]
+        index_path = Path(index_path_text).expanduser()
+        index_root = runner.drive_root / "kaggle_indices"
+        resolved_root = index_root.resolve()
+        resolved_index = index_path.resolve(strict=True)
+        if (
+            index_path.is_symlink()
+            or not resolved_index.is_file()
+            or not resolved_index.is_relative_to(resolved_root)
+            or _sha256_file(resolved_index) != index_sha
+        ):
+            raise ValueError("index checksum mismatch")
+        index = _read_json(resolved_index)
+        if index.get("snapshot_sha256") != snapshot_sha:
+            raise ValueError("index snapshot mismatch")
+    except (OSError, ValueError, TypeError, KeyError, M1PhaseError):
+        return {"cohort": cohort, "issue": "required_kaggle_provenance_invalid"}
+    return None
 
 
 def _mark_archive_arxiv_only(runner: FastProductionRunner, cohort: int) -> None:
@@ -554,20 +629,21 @@ def run_m1_arxiv_member(
     *,
     drive_root: str | Path,
     local_root: str | Path,
+    kaggle_token: str,
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
-    kaggle_token: str | None = None,
     auto_resume_429: bool = False,
     auto_resume_429_max_per_cohort: int = 1,
     auto_resume_429_max_per_session: int = 2,
     auto_resume_429_cooldown_min_seconds: float = 300.0,
     auto_resume_429_cooldown_max_seconds: float = 600.0,
 ) -> dict:
-    """Verify assigned IDs and archive every source version, without S2.
+    """Xác minh ID được giao và lưu mã nguồn của mọi phiên bản, không chạy S2.
 
-    Bounded automatic resume is opt-in and applies only to a checkpointed HTTP
-    429 during discovery. All other stop conditions retain the existing flow.
+    Tự tiếp tục có giới hạn chỉ áp dụng cho HTTP 429 ở discovery khi checkpoint
+    đã được xác minh. Snapshot và index Kaggle hợp lệ phải sẵn sàng trước đó.
     """
+    kaggle_token = _required_m1_secret(kaggle_token, "KAGGLE_API_TOKEN")
     retry_policy = _auto_resume_429_policy(
         auto_resume_429,
         auto_resume_429_max_per_cohort,
@@ -607,7 +683,7 @@ def run_m1_arxiv_member(
             "M1_KAGGLE_EVIDENCE_SESSION",
         )
     }
-    kaggle_evidence: dict[str, Any] = {"status": "fallback", "reason": "not_prepared"}
+    kaggle_evidence: dict[str, Any] = {"status": "unavailable", "reason": "not_prepared"}
     index_path = None
     cohort_results = {}
     stopped = False
@@ -619,15 +695,16 @@ def run_m1_arxiv_member(
             _record_session(phase_root, selection, session_id, "arxiv")
             _ensure_starting_state(runner, phase_root, selection)
             validate_discrepancy_checkpoints(discrepancy_checkpoint_root, evidence_root)
-            token = kaggle_token.strip() if isinstance(kaggle_token, str) and kaggle_token.strip() else None
             snapshot_result = observe_stage(
                 runner, "snapshot_prepare", 0,
-                lambda: prepare_snapshot(kaggle_cache, token=token),
+                lambda: prepare_snapshot(kaggle_cache, token=kaggle_token),
                 session_id=session_id,
                 configuration={"snapshot_scope": "shared_cache", "accelerator": "CPU"},
             )
             kaggle_evidence = {key: value for key, value in snapshot_result.items()
                                if key not in {"snapshot_path", "token"}}
+            if snapshot_result.get("status") != "ready":
+                kaggle_evidence["status"] = "unavailable"
             if snapshot_result.get("status") == "ready":
                 try:
                     selected_pairs = [tuple(pair) for pair in selection["pairs"]]
@@ -663,7 +740,7 @@ def run_m1_arxiv_member(
                     )
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     index_path = None
-                    kaggle_evidence.update(status="fallback", reason="candidate_index_failed",
+                    kaggle_evidence.update(status="unavailable", reason="candidate_index_failed",
                                            error_type=type(exc).__name__)
             prep_path = runner.reports_dir / f"kaggle_preparation_{session_id}.json"
             try:
@@ -672,7 +749,7 @@ def run_m1_arxiv_member(
                 # Chỉ dùng Kaggle khi xuất xứ của dữ liệu đã được ghi bền vững.
                 index_path = None
                 kaggle_evidence = {
-                    **kaggle_evidence, "status": "fallback",
+                    **kaggle_evidence, "status": "unavailable",
                     "reason": "kaggle_preparation_evidence_not_persisted",
                 }
             if index_path:
@@ -706,7 +783,14 @@ def run_m1_arxiv_member(
                 kaggle_provider_updated_at=kaggle_evidence.get("provider_updated_at"),
                 auto_resume_429_policy=retry_policy,
             )
-            for cohort in selection["cohorts"]:
+            if index_path is None:
+                stopped = True
+                stop_reason = {
+                    "type": "required_source_unavailable",
+                    "stage": "kaggle_snapshot_or_index",
+                    "reason": kaggle_evidence.get("reason", "snapshot_unavailable"),
+                }
+            for cohort in (selection["cohorts"] if index_path is not None else []):
                 state_path = phase_root / "arxiv" / f"cohort_{cohort:04d}.json"
                 _ensure_directory(state_path.parent, drive)
                 state = _source_state_manifest(state_path, selection, cohort)
@@ -714,6 +798,7 @@ def run_m1_arxiv_member(
                     kaggle_status=kaggle_evidence.get("status"),
                     kaggle_snapshot_sha256=kaggle_evidence.get("snapshot_sha256"),
                     kaggle_index_sha256=kaggle_evidence.get("index_sha256"),
+                    kaggle_session_id=session_id,
                     kaggle_policy_version="m1-kaggle-reconcile-v2" if index_path else None,
                 )
                 if budget.should_stop():
@@ -1397,7 +1482,7 @@ def _process_s2_cohort(
     selection: dict,
     cohort: int,
     phase_root: Path,
-    s2_key: str | None,
+    s2_key: str,
     budget: SessionBudget,
     session_id: str,
 ) -> dict:
@@ -1662,7 +1747,7 @@ def run_m1_s2_member(
     *,
     drive_root: str | Path,
     local_root: str | Path,
-    semantic_scholar_api_key: str | None = None,
+    semantic_scholar_api_key: str,
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
     auto_resume_429: bool = False,
@@ -1671,7 +1756,10 @@ def run_m1_s2_member(
     auto_resume_429_cooldown_min_seconds: float = 300.0,
     auto_resume_429_cooldown_max_seconds: float = 600.0,
 ) -> dict:
-    """Collect S2 metadata/references, optionally resuming bounded 429 stops."""
+    """Lấy metadata/references S2; có thể tự tiếp tục hữu hạn sau HTTP 429."""
+    semantic_scholar_api_key = _required_m1_secret(
+        semantic_scholar_api_key, "SEMANTIC_SCHOLAR_API_KEY",
+    )
     retry_policy = _auto_resume_s2_429_policy(
         auto_resume_429,
         auto_resume_429_max_per_cohort,
@@ -2351,6 +2439,7 @@ def run_m1_audit_member(
         from src.kaggle_candidates import validate_discrepancy_checkpoints
 
         source_issues = []
+        kaggle_source_issues = []
         source_states = {}
         discrepancy_checkpoint_root = phase_root / "arxiv" / "kaggle_discrepancy_checkpoints"
         discrepancy_evidence_root = phase_root / "arxiv" / "kaggle_discrepancies"
@@ -2381,9 +2470,12 @@ def run_m1_audit_member(
                     "status", "source_complete_papers", "expected_count",
                     "archive_sha256", "stop_reason", "updated_at",
                     "kaggle_status", "kaggle_snapshot_sha256",
-                    "kaggle_index_sha256", "kaggle_policy_version",
+                    "kaggle_index_sha256", "kaggle_policy_version", "kaggle_session_id",
                 )
             }
+            kaggle_issue = _kaggle_source_provenance_issue(runner, state, cohort)
+            if kaggle_issue is not None:
+                kaggle_source_issues.append(kaggle_issue)
             # Tiếp tục và xác minh mọi archive đã có trong phạm vi này.
             runner.restore_cohort(cohort)
             for member, arxiv_id in cohort_pairs(cohort):
@@ -2409,7 +2501,10 @@ def run_m1_audit_member(
         if not source_issues and not s2_issues and len(s2_evidence) == selection["expected_count"]:
             preflight_issues = _preflight_merge(runner, selection, s2_evidence)
             merge_conflicts.extend(preflight_issues)
-        issues = source_issues + s2_issues + preflight_issues + kaggle_evidence_issues
+        issues = (
+            source_issues + kaggle_source_issues + s2_issues
+            + preflight_issues + kaggle_evidence_issues
+        )
         merged_ids = []
         if not issues:
             if budget.should_stop():
@@ -2515,6 +2610,7 @@ def run_m1_audit_member(
             "scope": selection["scope"],
             "expected_id_count": selection["expected_count"],
             "source_issues": source_issues,
+            "kaggle_source_issues": kaggle_source_issues,
             "source_checkpoints": source_states,
             "kaggle_evidence": kaggle_evidence_summary,
             "kaggle_evidence_issues": kaggle_evidence_issues,
@@ -2580,12 +2676,16 @@ def run_m1_member(
     *,
     drive_root: str | Path,
     local_root: str | Path,
-    kaggle_token: str | None = None,
-    semantic_scholar_api_key: str | None = None,
+    kaggle_token: str,
+    semantic_scholar_api_key: str,
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
 ) -> dict:
-    """Backward-compatible sequential source → S2 → audit M1 entry point."""
+    """Điểm vào tương thích, chạy tuần tự source → S2 → kiểm toán M1."""
+    kaggle_token = _required_m1_secret(kaggle_token, "KAGGLE_API_TOKEN")
+    semantic_scholar_api_key = _required_m1_secret(
+        semantic_scholar_api_key, "SEMANTIC_SCHOLAR_API_KEY",
+    )
     started = time.monotonic()
 
     def remaining_budget() -> float:
@@ -2595,6 +2695,7 @@ def run_m1_member(
         mssv,
         drive_root=drive_root,
         local_root=local_root,
+        kaggle_token=kaggle_token,
         cohort_limit=cohort_limit,
         budget_seconds=remaining_budget(),
     )

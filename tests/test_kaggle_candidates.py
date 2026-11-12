@@ -174,8 +174,9 @@ def test_cache_rejects_mismatched_checksum_without_overwrite(tmp_path):
     assert 'secret' not in str(result)
 
 
-def test_missing_kaggle_token_falls_back(tmp_path):
-    assert prepare_snapshot(tmp_path)['reason']=='missing_kaggle_token'
+def test_missing_kaggle_token_is_rejected_before_cache_access(tmp_path):
+    with pytest.raises(ValueError, match='KAGGLE_API_TOKEN là bắt buộc'):
+        prepare_snapshot(tmp_path, token=' ')
 
 
 class TestCandidatesPipeline(HistoryIntegrationTests):
@@ -316,7 +317,7 @@ def test_snapshot_download_and_reuse_offline(tmp_path, capsys):
     assert 'private-token' not in output
     assert 'private-token' not in json.dumps(first)
     assert 'private-token' not in (tmp_path/'snapshot.manifest.json').read_text()
-    second=prepare_snapshot(tmp_path)
+    second=prepare_snapshot(tmp_path, token='private-token')
     assert second['source']=='cached' and second['snapshot_sha256']==first['snapshot_sha256']
 
 

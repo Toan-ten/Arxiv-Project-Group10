@@ -22,7 +22,7 @@ Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhậ
 
 ### arXiv và Kaggle
 
-Pha arXiv chuẩn bị snapshot và index Kaggle khi bộ nhớ đệm hợp lệ hoặc Colab Secret `KAGGLE_API_TOKEN` có sẵn. Nếu thiếu token, snapshot hoặc index hợp lệ, pha tiếp tục bằng API arXiv trực tiếp. SHA-256 snapshot, thời điểm tải và thời điểm cập nhật do nhà cung cấp công bố (nếu có) được lưu riêng. Giá trị `snapshot_time="unknown"` không được suy ra từ thời điểm tải. Index Kaggle chỉ cung cấp ứng viên lịch sử; nó không thay thế kết quả Atom hiện hành.
+Pha arXiv yêu cầu Colab Secret `KAGGLE_API_TOKEN` ngay cả khi snapshot hợp lệ đã có trong bộ nhớ đệm. Pha xác minh snapshot và index Kaggle trước khi bắt đầu discovery; nếu snapshot/index không sẵn sàng hoặc không ghi được bằng chứng chuẩn bị, pha dừng và không chuyển sang đường arXiv-only. SHA-256 snapshot, thời điểm tải và thời điểm cập nhật do nhà cung cấp công bố (nếu có) được lưu riêng. Giá trị `snapshot_time="unknown"` không được suy ra từ thời điểm tải. Index Kaggle chỉ cung cấp ứng viên lịch sử; Atom vẫn xác nhận inventory hiện hành và source từng phiên bản vẫn được tải riêng.
 
 Mỗi lượt arXiv làm mới discovery và gửi tối đa 20 ID cùng thành viên trong `id_list` của Atom API. Parser chỉ nhận entry khớp chính xác ID đã yêu cầu. ID bị thiếu, phản hồi sai hoặc chưa xác định được sẽ được truy vấn riêng. Nhật ký tiến độ ghi trước và sau mỗi request Atom: dải ID, số ID, HTTP status, lượt thử, thời gian và số entry còn cần xác minh. Pha tải mã nguồn báo tiến độ mỗi 10 bài rồi tổng kết theo lô.
 
@@ -40,7 +40,7 @@ Trong cùng môi trường chạy, hash snapshot vừa xác minh được dùng 
 
 ### Semantic Scholar
 
-Pha S2 in trạng thái ban đầu và số lượng metadata/references đã có ở mỗi lô, tiến độ theo nhóm 10 ID, cùng thời gian, số request và kết quả của từng lô metadata. Notebook bật cơ chế tự tiếp tục có giới hạn sau HTTP 429 ở metadata/references: tối đa một lần mỗi lô và hai lần mỗi phiên. Chỉ tiếp tục sau khi điểm khôi phục được xác minh, thời gian chờ 5–10 phút hoàn tất và ngân sách còn đủ; vẫn tôn trọng `Retry-After`. HTTP 403, điểm khôi phục lỗi, hết ngân sách và lỗi khác vẫn làm pha dừng. Nhật ký không chứa nội dung references hoặc thông tin xác thực. Thời gian references, metadata, ghi điểm khôi phục và chờ được lưu trong số liệu pha.
+Pha S2 yêu cầu Colab Secret `SEMANTIC_SCHOLAR_API_KEY` và không gửi request ẩn danh. Pha in trạng thái ban đầu và số lượng metadata/references đã có ở mỗi lô, tiến độ theo nhóm 10 ID, cùng thời gian, số request và kết quả của từng lô metadata. Notebook bật cơ chế tự tiếp tục có giới hạn sau HTTP 429 ở metadata/references: tối đa một lần mỗi lô và hai lần mỗi phiên. Chỉ tiếp tục sau khi điểm khôi phục được xác minh, thời gian chờ 5–10 phút hoàn tất và ngân sách còn đủ; vẫn tôn trọng `Retry-After`. HTTP 403, điểm khôi phục lỗi, hết ngân sách và lỗi khác vẫn làm pha dừng. Nhật ký không chứa nội dung references hoặc thông tin xác thực. Thời gian references, metadata, ghi điểm khôi phục và chờ được lưu trong số liệu pha.
 
 Semantic Scholar được truy vấn bằng Graph API. Corpus giữ mọi mục references quan sát được, kể cả mục không có arXiv ID; bảng xuất chỉ giữ mục đáp ứng lược đồ. Theo Q&A môn học, `ref_submission_date` có thể lấy từ `publicationDate` của Semantic Scholar. Provenance phải ghi nguồn của ngày này; không được diễn giải nó thành ngày nộp arXiv đã xác minh.
 
