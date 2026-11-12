@@ -74,11 +74,11 @@ class FakeResponse:
     def __exit__(self, *args):
         self.closed = True
 
-    def read(self):
+    def read(self, size=None):
         self.clock.now += self.duration
         if self.read_error is not None:
             raise self.read_error
-        return self.body
+        return self.body if size is None else self.body[:size]
 
 
 class ArxivClientTests(unittest.TestCase):

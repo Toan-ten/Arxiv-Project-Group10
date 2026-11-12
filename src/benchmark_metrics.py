@@ -51,7 +51,7 @@ def directory_bytes(root):
         except FileNotFoundError:
             if path == Path(root):
                 return 0
-            raise  # A disappearing entry makes this scan incomplete.
+            raise  # Entry biến mất trong lúc quét khiến kết quả chưa đầy đủ.
         if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
             raise OSError("Unsafe disk entry")
         if stat.S_ISDIR(info.st_mode):
@@ -76,7 +76,7 @@ def _ram_reader():
                 except psutil.NoSuchProcess:
                     if process is parent:
                         raise
-                    # The child exited between enumeration and observation.
+                    # Tiến trình con đã thoát giữa lúc liệt kê và lúc ghi nhận.
             return total
         return read_tree, "psutil", "current process and observed recursive descendants (sum RSS)"
     if sys.platform.startswith("linux"):
@@ -86,6 +86,19 @@ def _ram_reader():
         return read_self, "proc_self_statm", "current process only; descendants not collected"
     def unavailable():
         raise ImportError("RSS backend unavailable")
+    return unavailable, "unavailable", "not_collected"
+
+
+def _system_ram_reader():
+    """Return a reader for host-wide RAM usage, separate from crawler RSS."""
+    if psutil is not None:
+        def read_system():
+            return int(psutil.virtual_memory().used)
+        return read_system, "psutil", "whole host; virtual_memory().used, includes unrelated processes"
+
+    def unavailable():
+        raise ImportError("system RAM backend unavailable")
+
     return unavailable, "unavailable", "not_collected"
 
 
@@ -121,7 +134,7 @@ class _Series:
             initial_bytes=self.initial, final_bytes=self.final,
             sampled_peak_bytes=self.peak,
             average_bytes=self.total / self.count if self.count else None,
-            average_method="arithmetic mean of valid RSS observations; not time weighted",
+            average_method="arithmetic mean of valid sampled bytes; not time weighted",
             first_sample_seconds=self.first, last_sample_seconds=self.last,
         )
 
@@ -133,14 +146,19 @@ class ResourceSampler:
     are sampled as well. Disk byte totals are logical sizes, not allocated blocks.
     """
     def __init__(self, corpus_root, *, sample_interval=0.1, disk_interval=30.0,
-                 disk_roots=None, ram_reader=None, disk_reader=None, clock=None):
+                 disk_roots=None, ram_reader=None, system_ram_reader=None,
+                 disk_reader=None, clock=None):
         self.config = sampling_config(corpus_root, sample_interval, disk_interval, disk_roots)
         read_ram, self.ram_source, self.ram_scope = _ram_reader()
+        read_system_ram, self.system_ram_source, self.system_ram_scope = _system_ram_reader()
         self.read_ram = read_ram if ram_reader is None else ram_reader
+        self.read_system_ram = (
+            read_system_ram if system_ram_reader is None else system_ram_reader
+        )
         self.read_disk = directory_bytes if disk_reader is None else disk_reader
         self.clock = time.perf_counter if clock is None else clock
         self.started = self.clock()
-        self.ram, self.disk = _Series(), _Series()
+        self.ram, self.system_ram, self.disk = _Series(), _Series(), _Series()
         self.final_corpus_bytes = None
         self._stop = threading.Event()
         self._threads = []
@@ -151,6 +169,13 @@ class ResourceSampler:
             self.ram.add(value, self.clock() - self.started)
         except Exception as exc:
             self.ram.failed("backend_missing" if isinstance(exc, ImportError) else "ram_read_failed")
+        try:
+            value = self.read_system_ram()
+            self.system_ram.add(value, self.clock() - self.started)
+        except Exception as exc:
+            self.system_ram.failed(
+                "backend_missing" if isinstance(exc, ImportError) else "ram_read_failed"
+            )
 
     def sample_disk(self, *, final=False):
         sizes, failed = {}, False
@@ -195,17 +220,26 @@ class ResourceSampler:
         for thread, is_ram in self._threads:
             if is_ram:
                 thread.join()
-        self.sample_ram()  # Avoid waiting for a potentially slow disk scan first.
+        self.sample_ram()  # Không chờ quét ổ đĩa có thể chậm trước bước này.
         for thread, is_ram in self._threads:
             if not is_ram:
                 thread.join()
         self.sample_disk(final=True)
 
     def report(self):
-        ram, disk = self.ram.report(), self.disk.report()
+        ram = self.ram.report()
+        system_ram = self.system_ram.report()
+        disk = self.disk.report()
         ram.update(source=self.ram_source, scope=self.ram_scope,
                    backend_version=getattr(psutil, "__version__", None) if self.ram_source == "psutil" else None,
                    peak_method="sampled maximum, not absolute OS high-water mark")
+        system_ram.update(
+            source=self.system_ram_source,
+            scope=self.system_ram_scope,
+            backend_version=(getattr(psutil, "__version__", None)
+                             if self.system_ram_source == "psutil" else None),
+            peak_method="sampled maximum of host-wide used RAM; not absolute OS high-water mark",
+        )
         disk.update(
             roots=self.config["disk_roots"], corpus_root=self.config["corpus_root"],
             scope="logical regular-file bytes under disjoint listed roots only",
@@ -215,7 +249,8 @@ class ResourceSampler:
         )
         disk.pop("average_method")
         disk.pop("average_bytes")
-        return dict(schema_version=2, sampling=self.config, ram=ram, disk=disk)
+        return dict(schema_version=2, sampling=self.config, ram=ram,
+                    system_ram=system_ram, disk=disk)
 
 
 def timing_summary(history):
@@ -258,8 +293,8 @@ def timing_summary(history):
             elif discovery.get("action") == "cached":
                 cached_count += 1
             elif row["state"] not in {"pending"}:
-                # Interrupted before the final callback: no evidence whether a
-                # Discovery call was started; never silently infer zero seconds.
+                # Bị ngắt trước callback cuối; không có bằng chứng để biết
+                # lượt gọi discovery đã bắt đầu hay chưa; không tự xem thời gian là 0.
                 unknown_discovery += 1
     cohort = len(history[0]["papers"]) if history else 0
     all_processed = bool(cohort) and len(processed_ids) == cohort and not unknown_paper

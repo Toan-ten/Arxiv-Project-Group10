@@ -93,6 +93,12 @@ class RateLimiter:
     def min_interval(self):
         return self._min_interval
 
+    @property
+    def cooldown_remaining_seconds(self):
+        """Return the active provider Retry-After cooldown, if one is recorded."""
+        with self._lock:
+            return max(0.0, self._cooldown_until - time.monotonic())
+
     def wait(self) -> float:
         with self._lock:
             total_slept = 0.0
@@ -178,7 +184,7 @@ DEFAULT_LIMITER = RateLimiter()
 
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Never send credentials to a redirect target or issue an unpaced GET.
+        # Không gửi thông tin xác thực theo redirect hoặc phát GET không qua giãn cách.
         return None
 
 
@@ -201,8 +207,8 @@ def _retry_after(value):
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             seconds = parsed.timestamp() - time.time()
-        # An overflowing positive integer is a very long valid delay, not
-        # an absent header. Keep it beyond any practical wait budget.
+        # Số nguyên dương quá lớn vẫn là thời gian chờ hợp lệ rất dài, không phải
+        # header bị thiếu; giữ giá trị này lớn hơn mọi ngân sách chờ thực tế.
         if not math.isfinite(seconds) and value.isascii() and value.isdigit():
             return sys.float_info.max
         return max(0.0, seconds) if math.isfinite(seconds) else 0.0
@@ -211,7 +217,7 @@ def _retry_after(value):
 
 
 def _key_from_environment():
-    # Keep the existing integration boundary; resolve the optional root .env lazily.
+    # Giữ nguyên ranh giới tích hợp; chỉ đọc tệp .env tùy chọn ở thư mục gốc khi cần.
     return get_semantic_scholar_api_key()
 
 def _json_object(pairs):
@@ -265,7 +271,7 @@ def _read_json(response, limit):
 def _validate_batch(value, identifiers, require_arxiv_identity=True):
     if not isinstance(value, list) or len(value) != len(identifiers):
         raise _InvalidResponse("invalid_batch_length_or_structure")
-    # Validate the entire chunk before assigning even its first record.
+    # Kiểm tra toàn bộ lô trước khi gán bản ghi đầu tiên.
     for requested, paper in zip(identifiers, value):
         if paper is None:
             continue
@@ -349,8 +355,8 @@ def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter
                             http_status = None
                             raise _InvalidResponse("invalid_http_status")
                         if http_status != 200:
-                            # This diagnostic exception owns a buffer even with fp=None.
-                            # Close it before response.__exit__ can replace the error.
+                            # Exception chẩn đoán này vẫn giữ một bộ đệm kể cả khi fp=None.
+                            # Đóng bộ đệm trước khi response.__exit__ có thể thay thế lỗi.
                             with HTTPError(url, http_status, "S2 HTTP failure", response.headers, None) as failure:
                                 raise failure
                         delay = _retry_after(response.headers.get("Retry-After"))
@@ -358,7 +364,7 @@ def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter
                         if key is not None and _contains_secret(value, key):
                             raise _InvalidResponse("response_contains_secret")
                         payload = validate(value)
-                status = "found"  # Validated payload; caller assigns its stage/item status.
+                status = "found"  # Payload đã được kiểm tra; bên gọi gán trạng thái pha/mục.
             except HTTPError as exc:
                 http_status = exc.code
                 try:
@@ -371,20 +377,20 @@ def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter
                         exc.close()
                     except Exception:
                         if http_status == 429:
-                            # A cleanup failure must never hide the stop signal.
+                            # Lỗi dọn dẹp không được che khuất tín hiệu dừng.
                             status, error, retry = "rate_limited", "http_429", False
                         else:
                             status, error, retry = "http_error", "transport_error", False
             except _InvalidResponse as exc:
-                status, error = "invalid_response", str(exc)  # Only our fixed codes.
+                status, error = "invalid_response", str(exc)  # Chỉ dùng các mã lỗi cố định của chương trình.
             except (URLError, OSError, HTTPException) as exc:
                 reason = exc.reason if isinstance(exc, URLError) else exc
                 status = "timeout" if isinstance(reason, TimeoutError) else "http_error"
                 error = "timeout" if status == "timeout" else "network_error"
                 retry = not isinstance(reason, ssl.SSLError)
             except Exception:
-                # A transport/header implementation may include credentials in
-                # exception text. Do not stringify or chain that exception.
+                # Lớp vận chuyển/header có thể đưa thông tin xác thực vào
+                # nội dung exception; không chuyển exception thành chuỗi hoặc gắn chuỗi lỗi đó.
                 status, error, retry = "http_error", "transport_error", False
             if http_status == 429 and status != "rate_limited":
                 status, error, retry = "rate_limited", "http_429", False
@@ -497,9 +503,9 @@ def _normalize_reference(raw):
     for name in ("paperId", "title", "venue", "url", "publicationDate"):
         if paper.get(name) is not None and not isinstance(paper[name], str):
             raise _InvalidResponse("invalid_reference_field")
-    # corpusId is not part of the normalized M1 reference record. Preserve it
-    # verbatim in raw, but do not reject an otherwise usable page if the API
-    # changes the type of this ancillary field.
+    # corpusId không thuộc bản ghi reference M1 đã chuẩn hóa. Giữ nguyên trường này
+    # trong raw; không từ chối trang vẫn dùng được chỉ vì API
+    # đổi kiểu dữ liệu của trường phụ này.
     if paper.get("year") is not None and (type(paper["year"]) is not int or paper["year"] < 0):
         raise _InvalidResponse("invalid_reference_field")
     for name in ("externalIds", "publicationVenue"):
@@ -557,7 +563,7 @@ def _normalize_reference(raw):
 
 
 def _reference_page(value, offset, limit):
-    # Reject a bad page atomically; never drop its bad item and shift the rest.
+    # Từ chối nguyên trang lỗi; không bỏ một mục rồi làm lệch vị trí các mục sau.
     if not isinstance(value, dict) or not isinstance(value.get("data"), list):
         raise _InvalidResponse("invalid_references_page")
     if type(value.get("offset")) is not int or value["offset"] != offset:
@@ -750,14 +756,14 @@ def _reconcile_resume(previous, current):
         conflict = "resume_prefix_truncated"
     if conflict is None and len(new_items) >= len(old_items):
         return current
-    # Do not mutate the caller's snapshot or stitch data from two traversals.
+    # Không sửa bản chụp của bên gọi hoặc ghép dữ liệu từ hai lượt duyệt.
     preserved = copy.deepcopy(previous)
     preserved["status"] = "partial" if old_items else "failed"
     preserved["coverage"]["complete"] = False
     if conflict is not None:
         preserved["coverage"]["continuation"] = None
     if current["error"] is not None:
-        # In particular, never replace a final 429 with a resume diagnostic.
+        # Đặc biệt, không thay kết quả 429 cuối cùng bằng chẩn đoán tiếp tục.
         preserved["error"] = copy.deepcopy(current["error"])
         if conflict is not None:
             preserved["error"]["resume_reason"] = conflict

@@ -1,9 +1,18 @@
 """Offline qualification of snapshot candidates and arXiv confirmation."""
 import json
+import hashlib
 from pathlib import Path
+import pytest
 from unittest.mock import patch
 
-from src.kaggle_candidates import build_candidate_index, prepare_snapshot
+from src.kaggle_candidates import (
+    build_candidate_index,
+    compare_candidate_to_discovery,
+    file_sha256,
+    prepare_snapshot,
+    persist_discrepancy_evidence,
+    validate_discrepancy_checkpoint,
+)
 from test_pipeline_history import HistoryIntegrationTests, PAIR
 import test_pipeline as fx
 
@@ -29,6 +38,132 @@ def test_index_refuses_duplicates_invalid_versions_and_bad_lines(tmp_path):
     assert json.loads(output.read_text())['snapshot_sha256'] == index['snapshot_sha256']
 
 
+def test_snapshot_index_records_download_and_provider_update_provenance(tmp_path):
+    snapshot = tmp_path / 'arxiv-metadata-oai-snapshot.json'
+    snapshot.write_text(json.dumps(record('2501.00001')) + '\n')
+    (tmp_path / 'snapshot.manifest.json').write_text(json.dumps({
+        'sha256': hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+        'downloaded_at': '2026-11-12T01:02:03+00:00',
+        'provider_updated_at': None,
+    }))
+    result = build_candidate_index(snapshot, [('1', '2501.00001')], tmp_path / 'index.json')
+    assert result['schema_version'] == 2
+    assert result['downloaded_at'] == '2026-11-12T01:02:03+00:00'
+    assert result['provider_updated_at'] is None
+    assert result['comparison_precision'] == 'calendar_day_utc'
+
+
+def test_real_kaggle_rfc2822_version_dates_are_normalized_to_utc_days(tmp_path):
+    identifier = '2501.00001'
+    snapshot = tmp_path / 'arxiv-metadata-oai-snapshot.json'
+    kaggle_record = record(identifier, (
+        'Mon, 2 Apr 2007 19:18:42 GMT',
+        'Tue, 3 Apr 2007 00:30:00 +0500',
+    ))
+    snapshot.write_text(json.dumps(kaggle_record) + '\n', encoding='utf-8')
+
+    index = build_candidate_index(snapshot, [('1', identifier)], tmp_path / 'index.json')
+
+    assert index['candidates'][identifier]['dates'] == ['2007-04-02', '2007-04-02']
+    assert index['diagnostics']['invalid_ids'] == []
+    assert index['diagnostics']['missing_ids'] == []
+
+
+def test_rfc_date_parser_version_does_not_reuse_legacy_invalid_index(tmp_path):
+    from src.kaggle_candidates import reuse_or_build_index
+
+    identifier = '2501.00001'
+    snapshot = tmp_path / 'snapshot.json'
+    snapshot.write_text(json.dumps(record(identifier, (
+        'Mon, 2 Apr 2007 19:18:42 GMT',
+    ))) + '\n', encoding='utf-8')
+    checksum = hashlib.sha256(snapshot.read_bytes()).hexdigest()
+    ids = [identifier]
+    legacy_key = hashlib.sha256(json.dumps(
+        [2, checksum, ids], separators=(',', ':')
+    ).encode()).hexdigest()
+    legacy_path = tmp_path / 'indices' / f'candidates_{legacy_key}.json'
+    legacy_path.parent.mkdir(parents=True)
+    legacy = build_candidate_index(snapshot, [('1', identifier)], legacy_path)
+    legacy['candidates'] = {}
+    legacy['diagnostics']['invalid_ids'] = [identifier]
+    legacy_path.write_text(json.dumps(legacy), encoding='utf-8')
+
+    current = reuse_or_build_index(snapshot, [('1', identifier)], legacy_path.parent, checksum)
+
+    assert current['reused'] is False
+    assert current['index_path'] != str(legacy_path)
+    assert current['index']['candidates'][identifier]['dates'] == ['2007-04-02']
+    assert json.loads(legacy_path.read_text(encoding='utf-8'))['candidates'] == {}
+
+
+def test_comparison_uses_exact_versions_and_utc_calendar_days():
+    identifier = '2501.00001'
+    candidate = {'version_ids': [identifier + 'v1', identifier + 'v2'],
+                 'dates': ['2025-02-12', '2025-02-12']}
+    discovery = {
+        'arxiv_id': identifier, 'status': 'found', 'http_status': 200,
+        'version_status': 'resolved',
+        'version_ids': [identifier + 'v1', identifier + 'v2'],
+        'published': '2025-02-12T00:30:00-02:00',
+        'updated': '2025-02-12T02:00:00Z',
+    }
+    assert compare_candidate_to_discovery(candidate, discovery)['status'] == 'match'
+    discovery['updated'] = '2025-02-13T00:00:00Z'
+    result = compare_candidate_to_discovery(candidate, discovery)
+    assert result['status'] == 'discrepancy'
+    assert 'latest_date' in result['mismatches']
+    discovery['version_ids'] = [identifier + 'v1']
+    assert 'version_ids' in compare_candidate_to_discovery(candidate, discovery)['mismatches']
+    assert compare_candidate_to_discovery(None, discovery)['status'] == 'unusable'
+
+
+def test_discrepancy_evidence_is_immutable_and_checkpointed(tmp_path):
+    evidence = {'schema_version': 1, 'session_id': 'session-a',
+                'arxiv_id': '2501.00001', 'decision': 'use_arxiv_latest'}
+    pointer = persist_discrepancy_evidence(
+        evidence, evidence_root=tmp_path / 'evidence',
+        checkpoint_root=tmp_path / 'checkpoints', session_id='session-a',
+    )
+    Path(pointer['checkpoint_path']).unlink()
+    from src.kaggle_candidates import validate_discrepancy_checkpoints
+    recovered = validate_discrepancy_checkpoints(tmp_path / 'checkpoints', tmp_path / 'evidence')
+    assert recovered[0]['recovered_from_orphan'] is True
+    checked = validate_discrepancy_checkpoint(pointer['checkpoint_path'])
+    assert checked['sha256'] == pointer['sha256']
+    with pytest.raises(FileExistsError):
+        persist_discrepancy_evidence(
+            {**evidence, 'decision': 'different'}, evidence_root=tmp_path / 'evidence',
+            checkpoint_root=tmp_path / 'checkpoints', session_id='session-a',
+        )
+    sidecar = Path(pointer['artifact_path']).with_suffix('.json.sha256')
+    sidecar.write_text('0' * 64)
+    with pytest.raises(ValueError, match='checksum'):
+        validate_discrepancy_checkpoint(pointer['checkpoint_path'])
+
+
+def test_missing_candidate_discrepancy_is_auditable_from_index_diagnostics(tmp_path):
+    snapshot = tmp_path / 'snapshot.json'
+    snapshot.write_text(json.dumps(record('2501.00002')) + '\n', encoding='utf-8')
+    index_path = tmp_path / 'index.json'
+    index = build_candidate_index(snapshot, [('1', '2501.00001')], index_path)
+    evidence = {
+        'schema_version': 1, 'session_id': 'session-missing',
+        'arxiv_id': '2501.00001', 'mssv': '1', 'observed_at': '2026-11-12T00:00:00Z',
+        'kaggle': {
+            'snapshot_path': str(snapshot), 'index_path': str(index_path),
+            'snapshot_sha256': index['snapshot_sha256'],
+            'index_sha256': file_sha256(index_path),
+            'version_ids': None, 'dates': None, 'diagnostic': 'missing',
+        },
+    }
+    pointer = persist_discrepancy_evidence(
+        evidence, evidence_root=tmp_path / 'evidence',
+        checkpoint_root=tmp_path / 'checkpoints', session_id='session-missing',
+    )
+    assert validate_discrepancy_checkpoint(pointer['checkpoint_path'])['arxiv_id'] == '2501.00001'
+
+
 def test_cache_rejects_mismatched_checksum_without_overwrite(tmp_path):
     target=tmp_path/'arxiv-metadata-oai-snapshot.json'
     target.write_text('original')
@@ -44,6 +179,26 @@ def test_missing_kaggle_token_falls_back(tmp_path):
 
 
 class TestCandidatesPipeline(HistoryIntegrationTests):
+    def test_legacy_kaggle_history_is_readable_but_not_trusted_by_new_m1_policy(self):
+        from src import arxiv_history
+        self.success(n=2, history=False)
+        self.run_pipeline(revision_history=False)
+        path = self.paper_path() / 'metadata.json'
+        metadata = json.loads(path.read_text(encoding='utf-8'))
+        metadata['versions'][1].update(date='2025-02-13', date_status='verified')
+        metadata['revised_dates'] = ['2025-02-13']
+        metadata['provenance']['version_history'] = {
+            'provider': 'kaggle_snapshot', 'query_identifier': PAIR[1],
+            'retrieved_at': '2026-11-12T00:00:00+00:00',
+            'snapshot': ['2025-02-13'], 'snapshot_sha256': 'a' * 64,
+            'dataset': 'Cornell-University/arxiv', 'snapshot_time': 'unknown',
+        }
+        path.write_text(json.dumps(metadata), encoding='utf-8')
+        loaded = self.store().read_metadata(*PAIR)
+        self.assertTrue(arxiv_history._cached(loaded))
+        with patch.dict('os.environ', {'M1_KAGGLE_POLICY_VERSION': 'm1-kaggle-reconcile-v2'}):
+            self.assertFalse(arxiv_history._cached(loaded))
+
     def test_fresh_arxiv_matching_kaggle_candidate_supplies_history(self):
         self.success(n=2, history=False)
         index={'status':'complete','snapshot_sha256':'a'*64, 'snapshot_time':'unknown',

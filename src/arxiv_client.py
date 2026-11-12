@@ -13,9 +13,10 @@ from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from xml.etree import ElementTree as ET
 
 from src import http_metrics
-from src.arxiv_discovery import ID_PATTERN, parse_arxiv_response, _entry_id
+from src.arxiv_discovery import ID_PATTERN, parse_arxiv_response, parse_arxiv_batch_response, _entry_id
 
 
 API_URL = "https://export.arxiv.org/api/query"
@@ -30,7 +31,7 @@ XML_CONTENT_TYPES = {"application/atom+xml", "application/xml", "text/xml"}
 
 
 class _NoRedirect(HTTPRedirectHandler):
-    # urllib redirects would send another request without waiting.
+    # urllib có thể tự gửi request mới qua redirect mà không chờ.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
@@ -187,8 +188,8 @@ def _retry_deadline(value, received_at_utc):
 
 
 def _request_event(url, attempt):
-    # Whitelist arXiv endpoints/IDs, never serialize arbitrary query strings,
-    # request headers, response bodies, User-Agent or exception messages.
+    # Chỉ cho phép endpoint và ID arXiv; không ghi query tùy ý,
+    # header request, nội dung response, User-Agent hoặc thông báo exception.
     parts = urlsplit(url)
     endpoint, identifier = None, None
     if parts.scheme == "https" and parts.netloc == "export.arxiv.org":
@@ -237,8 +238,8 @@ def _retry_wait_deadline(server, received, *, fallback_seconds=None):
             or not math.isfinite(fallback_seconds) or fallback_seconds < MIN_INTERVAL):
         raise ValueError("Invalid recorded arXiv 429 fallback")
     stamp = _parse_utc(received).timestamp()
-    # Keep server evidence unchanged; the effective wait also honors pacing
-    # after a runtime restart, including valid Retry-After: 0 or a past date.
+    # Giữ nguyên bằng chứng từ máy chủ; thời gian chờ thực tế cũng tuân thủ giãn cách
+    # sau khi khởi động lại môi trường, kể cả Retry-After hợp lệ bằng 0 hoặc ngày đã qua.
     return _utc(max(_parse_utc(server).timestamp(), stamp + MIN_INTERVAL)
                 if server is not None else stamp + fallback_seconds)
 
@@ -397,7 +398,7 @@ def _request_arxiv(
             if policy is not None:
                 if http_status != 429 or event["retry_429_decision"] != "retry_once":
                     return last_failure
-                continue  # Same Request object; waiting stays in the shared limiter.
+                continue  # Dùng lại cùng đối tượng Request; thời gian chờ vẫn do bộ giới hạn dùng chung quản lý.
             if not retry or attempt == max_attempts:
                 if http_status == 429:
                     print(
@@ -609,6 +610,51 @@ def query_arxiv(
     return {"mssv": mssv, "arxiv_id": arxiv_id, **result}
 
 
+def query_arxiv_batch(
+    mssv: str,
+    arxiv_ids: list[str],
+    *,
+    timeout: float = 30.0,
+    max_attempts: int = 3,
+    user_agent: str = USER_AGENT,
+) -> dict:
+    """Query up to 20 IDs through the shared limiter; leave absent IDs unresolved."""
+    if not isinstance(mssv, str) or not re.fullmatch(r"[0-9]+", mssv):
+        raise ValueError("mssv must be digits")
+    if (not isinstance(arxiv_ids, list) or not 1 <= len(arxiv_ids) <= 20
+            or len(arxiv_ids) != len(set(arxiv_ids))):
+        raise ValueError("arxiv_ids must be 1..20 unique IDs")
+    for identifier in arxiv_ids:
+        match = ID_PATTERN.fullmatch(identifier) if isinstance(identifier, str) else None
+        if match is None or match.group("version") is not None:
+            raise ValueError("arxiv_ids must contain base IDs only")
+
+    def read_xml(response):
+        mime = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if mime not in XML_CONTENT_TYPES:
+            return {"status": "invalid_response", "results": {}, "error": "Expected Atom/XML"}
+        body = response.read(5_000_001)
+        if len(body) > 5_000_000:
+            return {"status": "invalid_response", "results": {}, "error": "Batch Atom response too large"}
+        try:
+            parsed = parse_arxiv_batch_response(body, mssv, arxiv_ids)
+        except (ET.ParseError, ValueError, TypeError) as exc:
+            return {"status": "invalid_response", "results": {}, "error": str(exc)}
+        return {"status": "found", "results": parsed, "error": None}
+
+    url = API_URL + "?" + urlencode({
+        "id_list": ",".join(arxiv_ids), "start": 0, "max_results": len(arxiv_ids),
+    })
+    response = _request_arxiv(
+        url, timeout=timeout, max_attempts=max_attempts, user_agent=user_agent,
+        accept="application/atom+xml", read_response=read_xml,
+    )
+    response.setdefault("results", {})
+    for value in response["results"].values():
+        value.update(http_status=response.get("http_status"), attempts=response.get("attempts"))
+    return response
+
+
 def query_arxiv_official(
     mssv: str,
     arxiv_id: str,
@@ -629,7 +675,7 @@ def query_arxiv_official(
             import arxiv
             client = arxiv.Client(page_size=1, delay_seconds=MIN_INTERVAL, num_retries=3)
         except ImportError:
-            # Fall back to raw Atom HTTP client if arxiv.py is not installed
+            # Dùng client Atom qua HTTP nếu chưa cài arxiv.py.
             return query_arxiv(mssv, arxiv_id, timeout=timeout, user_agent=user_agent)
 
     try:

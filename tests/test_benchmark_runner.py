@@ -55,10 +55,25 @@ class BenchmarkRunnerTests(unittest.TestCase):
             return result
 
     def aggregate(self):
+        return self.aggregate_with_bbl_root()
+
+    def aggregate_with_bbl_root(self, bbl_artifact_root=None):
         return runner.aggregate_batch(
             self.root, batch_id=self.settings()["batch_id"],
             log_root=self.settings()["log_root"],
+            bbl_artifact_root=bbl_artifact_root,
         )
+
+    def run_with_retained_bbl(self):
+        artifacts = Path(self.temp.name) / "bbl-artifacts"
+        tex = b"\\documentclass{article}\\begin{document}\\cite{x}\\end{document}"
+        bbl = b"\\begin{thebibliography}{1}\\bibitem{x} Entry\\end{thebibliography}"
+        self.outcomes = [
+            xml_response(),
+            Response(fixtures.archive({"main.tex": tex, "refs.bbl": bbl})),
+        ]
+        result = self.run_adapter(bbl_artifact_dir=artifacts)
+        return result, artifacts
 
     def successes(self, pairs=(PAIR,), versions=1):
         self.outcomes = [
@@ -197,6 +212,40 @@ class BenchmarkRunnerTests(unittest.TestCase):
                 self.assertEqual(result["status"], "incomplete")
                 self.assertEqual(result["data_coverage"]["valid_tex_versions"], 0)
                 self.assertFalse(result["publication_complete"]["all_complete"])
+
+    def test_run_benchmark_passes_bbl_artifact_root_to_automatic_aggregation(self):
+        result, artifacts = self.run_with_retained_bbl()
+
+        self.assertEqual(result["aggregation"]["status"], "verified")
+        self.assertEqual(result["data_coverage"]["verified_checkpoints"], 1)
+        self.assertEqual(result["data_coverage"]["invalid_checkpoints"], 0)
+        self.assertEqual(result["aggregation"]["bbl_artifact_root"], str(artifacts.resolve()))
+
+    def test_missing_bbl_artifact_root_is_unverified_not_invalid(self):
+        _result, _artifacts = self.run_with_retained_bbl()
+
+        audit = self.aggregate()
+
+        self.assertEqual(audit["status"], "incomplete")
+        self.assertEqual(audit["data_coverage"]["verified_checkpoints"], 0)
+        self.assertEqual(audit["data_coverage"]["invalid_checkpoints"], 0)
+        self.assertEqual(audit["data_coverage"]["unverified_checkpoints"], 1)
+        self.assertEqual(audit["data_coverage"]["papers"][0]["reason"],
+                         "bbl_artifact_root_unconfigured")
+        self.assertTrue(any(issue["code"] == "bbl_artifact_root_unconfigured"
+                            for issue in audit["issues"]))
+
+    def test_corrupt_bbl_artifact_remains_invalid_when_root_is_configured(self):
+        _result, artifacts = self.run_with_retained_bbl()
+        manifest = self.manifest()
+        policy = manifest["versions"]["v1"]["bbl_policy"]
+        index = artifacts / policy["index_path"]
+        index.write_bytes(b"corrupted artifact")
+
+        audit = self.aggregate_with_bbl_root(artifacts)
+
+        self.assertEqual(audit["data_coverage"]["invalid_checkpoints"], 1)
+        self.assertEqual(audit["data_coverage"]["unverified_checkpoints"], 0)
 
     def test_inconsistent_checkpoint_is_reported_without_any_repair(self):
         self.successes()

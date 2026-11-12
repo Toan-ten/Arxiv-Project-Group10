@@ -51,9 +51,11 @@ def _fingerprint(value):
 
 
 def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_agent, s2_config=None,
-                revision_history=False):
+                revision_history=False, discovery_batch_size=1, force_discovery_refresh=False):
     _require(type(max_ids) is int and max_ids > 0)
     _require(type(revision_history) is bool)
+    _require(type(discovery_batch_size) is int and 1 <= discovery_batch_size <= 20)
+    _require(type(force_discovery_refresh) is bool)
     chosen = pipeline._version_selection(versions)
     validated = pipeline._inputs(pairs, CorpusStorage(corpus), timeout, max_attempts, user_agent)
     _require(bool(validated))
@@ -66,6 +68,10 @@ def _definition(pairs, corpus, max_ids, versions, timeout, max_attempts, user_ag
     )
     if revision_history:
         definition["revision_history"] = True
+    if discovery_batch_size > 1:
+        definition["discovery_batch_size"] = discovery_batch_size
+    if force_discovery_refresh:
+        definition["force_discovery_refresh"] = True
     s2_config = s2_integration.configuration(s2_config)
     if s2_config is not None:
         definition["s2"] = s2_config
@@ -92,6 +98,8 @@ def _load_evidence(directory, batch_id, corpus):
         definition["input_pairs"], corpus, definition["max_ids"],
         definition["versions"], definition["timeout"], definition["max_attempts"],
         definition["user_agent"], definition.get("s2"), definition.get("revision_history", False),
+        definition.get("discovery_batch_size", 1),
+        definition.get("force_discovery_refresh", False),
     )
     _require(definition == expected)
     history = batch._history(batch._safe(directory / "attempts"), batch_id, definition["selection"])
@@ -170,8 +178,8 @@ def _history_summary(history):
             result = row["result"]
             if result is None:
                 continue
-            # Only final paper snapshots count operations; in-progress snapshots
-            # cannot establish that a download finished.
+            # Chỉ bản chụp cuối của bài báo mới được tính thao tác; bản chụp đang xử lý
+            # không chứng minh được lượt tải đã hoàn tất.
             if row["state"] == "processed":
                 action = result["discovery"]["action"]
                 if action in {"queried", "cached"}:
@@ -198,7 +206,7 @@ def _history_summary(history):
                         "OSError", "RuntimeError", "ValueError", "PipelineStopped", "pagination_limit",
                     } else "unclassified",
                     version=error.get("version"),
-                ))  # Deliberately omit free-form messages and tracebacks.
+                ))  # Cố ý loại thông báo tự do và traceback.
         if attempt.get("error"):
             errors.append(dict(attempt_id=attempt["attempt_id"], stage="batch",
                                type="execution_exception"))
@@ -229,8 +237,8 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
     metadata, references = store.read_metadata(*pair), store.read_references(*pair)
     if s2_enabled:
         s2_integration.validate_checkpoint(store, *pair, for_resume=False)
-    # _sync validates dependencies but writes nothing. Compare its in-memory
-    # result to refuse incomplete multi-JSON commits rather than repairing them.
+    # _sync xác minh các phụ thuộc nhưng không ghi dữ liệu. So sánh bản trong bộ nhớ
+    # để từ chối lần ghi nhiều JSON chưa đầy đủ thay vì tự sửa chúng.
     synced = copy.deepcopy(manifest)
     store._sync(synced, metadata, references)
     _require(synced == manifest)
@@ -247,7 +255,7 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
             valid = store.should_skip_version(*pair, name)
             _require(valid)
         else:
-            # Pending/error source directories are not evidence of success.
+            # Thư mục mã nguồn đang chờ hoặc báo lỗi không phải bằng chứng thành công.
             _require(not store._safe(store.paper_path(*pair) / name).exists())
         versions.append(dict(
             version=name, status=record["status"], verified=valid,
@@ -264,8 +272,8 @@ def _paper(store, pair, batch_id, known_runs, *, s2_enabled=False):
         and all(v["verified"] for v in versions)
         and metadata["status"] == references["status"] == "complete"
     )
-    # A claimed complete paper must satisfy every contract condition, not just
-    # have one successful source version.
+    # Bài báo được khai báo hoàn tất phải đáp ứng mọi điều kiện hợp đồng, không chỉ
+    # có một phiên bản mã nguồn tải thành công.
     if manifest["status"] in {"complete", "complete_with_no_tex", "complete_with_withdrawn"}:
         _require(complete)
         expected = "complete_with_withdrawn" if any(
@@ -287,7 +295,10 @@ def _valid_resources(value):
     """Validate v2 numeric invariants before including a persisted measurement."""
     _require(isinstance(value, dict) and value["schema_version"] == 2
              and _number(value["wall_seconds"]))
-    for key in ("ram", "disk"):
+    series_names = ["ram", "disk"]
+    if "system_ram" in value:
+        series_names.append("system_ram")
+    for key in series_names:
         series = value[key]
         _require(isinstance(series, dict) and series["unit"] == "bytes")
         count = series["sample_count"]
@@ -301,7 +312,7 @@ def _valid_resources(value):
             _require(series["sampled_peak_bytes"] >= max(series["initial_bytes"], series["final_bytes"])
                      and series["sampled_peak_bytes"] <= series["sum_sample_bytes"]
                      <= series["sampled_peak_bytes"] * count)
-            if key == "ram":
+            if key in {"ram", "system_ram"}:
                 _require(_number(series["average_bytes"])
                          and math.isclose(series["average_bytes"], series["sum_sample_bytes"] / count))
         else:
@@ -309,15 +320,18 @@ def _valid_resources(value):
             _require(all(series[f] is None for f in (
                 "sum_sample_bytes", "sampled_peak_bytes", "initial_bytes", "final_bytes",
             )))
-            if key == "ram":
+            if key in {"ram", "system_ram"}:
                 _require(series["average_bytes"] is None)
     disk = value["disk"]
     _require(disk["final_corpus_bytes"] is None or _number(disk["final_corpus_bytes"]))
     _require(isinstance(disk["roots"], list) and bool(disk["roots"])
              and all(isinstance(p, str) for p in disk["roots"]))
-    _require(isinstance(value["ram"]["source"], str) and isinstance(value["ram"]["scope"], str))
+    for key in ("ram", "system_ram"):
+        if key in value:
+            _require(isinstance(value[key]["source"], str)
+                     and isinstance(value[key]["scope"], str))
     _require(isinstance(value["sampling"], dict))
-    # Do not propagate unknown fields such as credentials from edited sidecars.
+    # Không chuyển tiếp trường không xác định như thông tin xác thực từ sidecar đã bị sửa.
     result = {k: value[k] for k in ("schema_version", "wall_seconds", "sampling")}
     if "wall_scope" in value:
         result["wall_scope"] = value["wall_scope"]
@@ -330,6 +344,10 @@ def _valid_resources(value):
     }
     for kind in ("ram", "disk"):
         result[kind] = {k: v for k, v in value[kind].items() if k in fields}
+    if "system_ram" in value:
+        result["system_ram"] = {
+            k: v for k, v in value["system_ram"].items() if k in fields
+        }
     return result
 
 
@@ -360,18 +378,31 @@ def _measurement_summary(attempts, directory, fingerprint):
     complete = bool(attempts) and not missing and not invalid
     resources = [o["resources"] for o in observations]
     rams, disks = [r["ram"] for r in resources], [r["disk"] for r in resources]
+    system_rams = [r.get("system_ram") for r in resources]
     ram_scopes = {(r["source"], r["scope"]) for r in rams}
     disk_scopes = {tuple(sorted(d["roots"])) for d in disks}
+    system_ram_scopes = {
+        (r["source"], r["scope"]) for r in system_rams
+        if isinstance(r, dict) and isinstance(r.get("source"), str)
+        and isinstance(r.get("scope"), str)
+    }
     good_ram = complete and len(ram_scopes) == 1 and all(r["status"] == "collected" for r in rams)
     good_disk = complete and len(disk_scopes) == 1 and all(d["status"] == "collected" for d in disks)
+    good_system_ram = (
+        complete and len(system_rams) == len(resources) and len(system_ram_scopes) == 1
+        and all(isinstance(r, dict) and r.get("status") == "collected" for r in system_rams)
+    )
     samples = sum(r["sample_count"] for r in rams)
+    system_ram_samples = sum(r["sample_count"] for r in system_rams if isinstance(r, dict))
     last = next((o["resources"] for o in observations
                  if o["attempt_id"] == attempts[-1]["attempt_id"]), None) if attempts else None
     return dict(
         status="collected" if complete and good_ram and good_disk else
                "partial" if observations else "not_collected",
         missing_attempt_ids=missing, invalid_attempt_ids=invalid,
-        scope_mismatch=dict(ram=len(ram_scopes) > 1, disk=len(disk_scopes) > 1),
+        scope_mismatch=dict(ram=len(ram_scopes) > 1,
+                            system_ram=len(system_ram_scopes) > 1,
+                            disk=len(disk_scopes) > 1),
         attempts=observations, unit_bytes="bytes", unit_time="seconds",
         end_to_end_wall_seconds=sum(r["wall_seconds"] for r in resources) if complete else None,
         known_end_to_end_wall_seconds=sum(r["wall_seconds"] for r in resources),
@@ -379,24 +410,75 @@ def _measurement_summary(attempts, directory, fingerprint):
         average_ram_bytes=sum(r["sum_sample_bytes"] or 0 for r in rams) / samples if good_ram and samples else None,
         average_ram_method="sample-count weighted mean across all valid per-attempt RSS observations",
         sampled_peak_ram_bytes=max((r["sampled_peak_bytes"] for r in rams), default=None) if good_ram else None,
+        system_ram_status=("collected" if good_system_ram else
+                           "partial" if any(isinstance(r, dict) and r.get("sample_count", 0)
+                                            for r in system_rams) else "not_collected"),
+        average_system_ram_bytes=(
+            sum(r["sum_sample_bytes"] or 0 for r in system_rams) / system_ram_samples
+            if good_system_ram and system_ram_samples else None
+        ),
+        average_system_ram_method=(
+            "sample-count weighted mean across valid host-wide used-RAM observations"
+        ),
+        sampled_peak_system_ram_bytes=(
+            max((r["sampled_peak_bytes"] for r in system_rams), default=None)
+            if good_system_ram else None
+        ),
+        system_ram_scope=(next(iter(system_ram_scopes))[1]
+                          if len(system_ram_scopes) == 1 else None),
+        system_ram_source=(next(iter(system_ram_scopes))[0]
+                           if len(system_ram_scopes) == 1 else None),
         sampled_peak_disk_bytes=max((d["sampled_peak_bytes"] for d in disks), default=None) if good_disk else None,
         final_corpus_bytes=last["disk"]["final_corpus_bytes"] if last else None,
         final_size_scope="last measured attempt's corpus snapshot; never a sum across attempts or a fresh audit size",
     )
 
 
-def aggregate_batch(corpus_root, *, batch_id, log_root):
+def _bbl_artifact_versions_required(manifest):
+    """Return terminal versions whose BBL policy requires external artifacts.
+
+    With no artifact root, those versions cannot be verified. Only recognize a
+    structurally plausible current policy here; malformed policies continue
+    through normal validation and are reported as invalid evidence.
+    """
+    from src.bbl_handling import BBL_POLICY_VERSION
+
+    required = []
+    for version, record in manifest.get("versions", {}).items():
+        if not isinstance(record, dict) or record.get("status") not in TERMINAL:
+            continue
+        policy = record.get("bbl_policy")
+        if (isinstance(policy, dict)
+                and policy.get("policy_version") == BBL_POLICY_VERSION
+                and policy.get("status") == "complete"
+                and isinstance(policy.get("items"), list)
+                and isinstance(policy.get("index_path"), str)
+                and bool(policy["index_path"])):
+            required.append(version)
+    return required
+
+
+def aggregate_batch(corpus_root, *, batch_id, log_root, bbl_artifact_root=None):
     """Read one batch's entire history and cohort Storage without any writes.
 
     Invalid/missing evidence yields issues and incomplete coverage, never repair.
     Time and operation histories are observations; final coverage is checksum-led.
+    ``bbl_artifact_root`` must point to the external policy artifacts when any
+    terminal source checkpoint references them. Without it, affected papers are
+    reported as unverified rather than invalid.
     """
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
+    artifact_root = (Path(bbl_artifact_root).expanduser().resolve()
+                     if bbl_artifact_root is not None else None)
+    if artifact_root is not None:
+        _require(not (artifact_root == corpus or artifact_root.is_relative_to(corpus)
+                      or corpus.is_relative_to(artifact_root)))
     report = dict(
         schema_version=1, batch_id=batch_id, audited_at=batch._now(),
         corpus_root=str(corpus), log_root=str(logs), issues=[],
         configuration=None, history=None, benchmark_metrics=None,
         data_coverage=None, publication_complete=None,
+        bbl_artifact_root=str(artifact_root) if artifact_root is not None else None,
     )
     try:
         definition, history = _load(directory, batch_id, corpus)
@@ -416,7 +498,7 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
     report["configuration"]["user_agent"] = "not_recorded"
     if "s2" in definition:
         report["configuration"]["s2"] = copy.deepcopy(definition["s2"])
-    store = CorpusStorage(corpus)
+    store = CorpusStorage(corpus, bbl_artifact_root=artifact_root)
     papers = []
     runs = {a["run_id"] for a in history}
     persisted_ids = {
@@ -428,6 +510,23 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
         if pair[1] not in persisted_ids and not store.paper_path(*pair).exists():
             papers.append(dict(mssv=pair[0], arxiv_id=pair[1], checkpoint_status="not_created"))
             continue
+        if artifact_root is None:
+            try:
+                manifest = store.read_manifest(*pair)
+                required_versions = _bbl_artifact_versions_required(manifest)
+            except (OSError, StorageError, KeyError, TypeError, AttributeError):
+                required_versions = []
+            if required_versions:
+                report["issues"].append(dict(
+                    scope="checkpoint", code="bbl_artifact_root_unconfigured",
+                    mssv=pair[0], arxiv_id=pair[1], versions=required_versions,
+                ))
+                papers.append(dict(
+                    mssv=pair[0], arxiv_id=pair[1], checkpoint_status="unverified",
+                    reason="bbl_artifact_root_unconfigured",
+                    unverified_versions=required_versions,
+                ))
+                continue
         try:
             paper = _paper(store, pair, batch_id, runs, s2_enabled="s2" in definition)
         except (OSError, StorageError, BenchmarkError, KeyError, TypeError, AttributeError):
@@ -460,6 +559,7 @@ def aggregate_batch(corpus_root, *, batch_id, log_root):
     report["data_coverage"] = dict(
         cohort_papers=len(selection), verified_checkpoints=len(valid),
         invalid_checkpoints=sum(p["checkpoint_status"] == "invalid" for p in papers),
+        unverified_checkpoints=sum(p["checkpoint_status"] == "unverified" for p in papers),
         not_created_checkpoints=sum(p["checkpoint_status"] == "not_created" for p in papers),
         found_papers=sum(p["discovery_status"] == "found" for p in valid),
         not_found_papers=sum(p["discovery_status"] == "not_found" for p in valid),
@@ -536,6 +636,8 @@ def run_benchmark(
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
     disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
     should_stop=None, on_progress: Callable[[str, dict], None] | None = None,
+    on_discovery_progress: Callable[[str, dict], None] | None = None,
+    bbl_artifact_dir=None, discovery_batch_size=1, force_discovery_refresh=False,
 ):
     """Measure one Batch invocation with the existing foundation, then audit.
 
@@ -544,11 +646,13 @@ def run_benchmark(
     Historical attempts have logs only, not retroactively measured RAM/time.
     revision_history follows Batch: enabled for new definitions, inherited on
     resume. Sampling and wall time enclose the automatic history step. The
-    optional progress callback is forwarded to Batch after durable updates.
+    optional paper progress callback is forwarded to Batch after durable
+    updates; the optional discovery callback reports Atom request boundaries.
     """
     corpus, logs, directory = _locations(corpus_root, log_root, batch_id)
     _require(revision_history is None or type(revision_history) is bool)
     _require(on_progress is None or callable(on_progress))
+    _require(on_discovery_progress is None or callable(on_discovery_progress))
     _require(type(resume) is bool and _number(sample_interval) and sample_interval > 0)
     sampling = sampling_config(corpus, sample_interval, disk_interval, disk_roots)
     previous, existing = [], None
@@ -557,7 +661,8 @@ def run_benchmark(
     if revision_history is None:
         revision_history = existing.get("revision_history", False) if existing else True
     definition = _definition(pairs, corpus, max_ids, versions, timeout, max_attempts,
-                             user_agent, s2_config, revision_history)
+                             user_agent, s2_config, revision_history, discovery_batch_size,
+                             force_discovery_refresh)
     if existing is not None:
         _require(resume and existing == definition)
     else:
@@ -587,6 +692,10 @@ def run_benchmark(
     )
     if "revision_history" in definition:
         intent["configuration"]["revision_history"] = definition["revision_history"]
+    if "discovery_batch_size" in definition:
+        intent["configuration"]["discovery_batch_size"] = definition["discovery_batch_size"]
+    if "force_discovery_refresh" in definition:
+        intent["configuration"]["force_discovery_refresh"] = True
     if "s2" in definition:
         intent["configuration"]["s2"] = copy.deepcopy(definition["s2"])
     _atomic_json(destination / "intent.json", intent)
@@ -599,14 +708,19 @@ def run_benchmark(
                 resume=resume, versions=versions, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
                 revision_history=revision_history,
+                bbl_artifact_dir=bbl_artifact_dir,
+                discovery_batch_size=discovery_batch_size,
+                force_discovery_refresh=force_discovery_refresh,
                 should_stop=should_stop,
                 **({"on_progress": on_progress} if on_progress is not None else {}),
+                **({"on_discovery_progress": on_discovery_progress}
+                   if on_discovery_progress is not None else {}),
                 **({"s2_config": definition["s2"]} if "s2" in definition else {}),
             )
         except BaseException as exc:
             failure.append(exc)
-            # Suppress exception context so foundation traceback cannot serialize
-            # credentials from arbitrary exception text.
+            # Ẩn ngữ cảnh exception để traceback của lớp nền không thể ghi lại
+            # thông tin xác thực có trong nội dung exception tùy ý.
             raise _ExecutionFailed("Batch exception; original details withheld") from None
 
     resources = None
@@ -623,12 +737,15 @@ def run_benchmark(
             try:
                 resources = batch._read(destination / "resources.json")
             except (OSError, ValueError):
-                pass  # Never substitute a successful measurement for corrupt evidence.
+                pass  # Không thay bằng chứng hỏng bằng phép đo thành công khác.
     if resources is not None and resources.get("ram_source") == "unavailable":
         resources = copy.deepcopy(resources)
         for field in ("initial_ram_mb", "final_ram_mb", "peak_ram_mb"):
             resources[field] = None
-    audit = aggregate_batch(corpus, batch_id=batch_id, log_root=logs)
+    audit = aggregate_batch(
+        corpus, batch_id=batch_id, log_root=logs,
+        bbl_artifact_root=bbl_artifact_dir,
+    )
     history = audit["history"]
     old_ids = set(intent["previous_attempt_ids"])
     current = [a for a in history["attempts"] if a["attempt_id"] not in old_ids] if history else []

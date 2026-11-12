@@ -127,14 +127,15 @@ class TestIndependentS2Phase(unittest.TestCase):
         self.selection = m1_phases.build_member_selection(MSSV, 1)
         self.first_id = self.selection["pairs"][0][1]
         self.metadata_calls = []
+        self.metadata_batches = []
         self.reference_calls = []
         self.first_response_is_429 = True
 
         def fetch_metadata(ids, **_kwargs):
-            self.assertEqual(len(ids), 1)
-            arxiv_id = ids[0]
-            self.metadata_calls.append(arxiv_id)
-            if arxiv_id == self.first_id and self.first_response_is_429:
+            self.assertLessEqual(len(ids), m1_phases.S2_METADATA_BATCH_SIZE)
+            self.metadata_batches.append(list(ids))
+            self.metadata_calls.extend(ids)
+            if self.first_id in ids and self.first_response_is_429:
                 self.first_response_is_429 = False
                 return [{
                     "arxiv_id": arxiv_id,
@@ -143,8 +144,8 @@ class TestIndependentS2Phase(unittest.TestCase):
                     "attempts": 1,
                     "paper": None,
                     "error": "rate limited fixture",
-                }]
-            return [_metadata(arxiv_id, found=False)]
+                } for arxiv_id in ids]
+            return [_metadata(arxiv_id, found=False) for arxiv_id in ids]
 
         def fetch_references(arxiv_id, **_kwargs):
             self.reference_calls.append(arxiv_id)
@@ -163,21 +164,48 @@ class TestIndependentS2Phase(unittest.TestCase):
             item.stop()
         self.temp.cleanup()
 
-    def run_s2(self):
+    def run_s2(self, **options):
+        settings = {"budget_seconds": 60}
+        settings.update(options)
         return m1_phases.run_m1_s2_member(
             MSSV,
             drive_root=self.drive,
             local_root=self.local,
             cohort_limit=1,
-            budget_seconds=60,
+            **settings,
         )
+
+    def _failed_references_429(self, arxiv_id):
+        return {
+            "contract_version": 2,
+            "arxiv_id": arxiv_id,
+            "status": "failed",
+            "provenance": {
+                "provider": "semantic_scholar",
+                "query_identifier": "ARXIV:" + arxiv_id,
+                "s2_paper_id": None,
+                "retrieved_at": STAMP,
+            },
+            "coverage": {
+                "complete": False,
+                "continuation": {"offset": 0},
+                "reported_total": None,
+                "retrieved_count": 0,
+            },
+            "items": [],
+            "error": {
+                "type": "rate_limited", "message": "http_429",
+                "http_status": 429, "attempts": 1, "offset": 0,
+            },
+        }
 
     def test_s2_before_arxiv_stops_on_429_then_resumes_without_arxiv_or_duplicate_ids(self):
         with patch.object(semantic_scholar, "_key_from_environment", return_value=None):
             first = self.run_s2()
             self.assertTrue(first["stopped"])
             self.assertEqual(first["stop_reason"]["http_status"], 429)
-            self.assertEqual(self.metadata_calls, [self.first_id])
+            self.assertEqual(len(self.metadata_calls), 50)
+            self.assertEqual(self.metadata_calls[0], self.first_id)
             self.assertEqual(self.reference_calls, [])
             self.assertFalse(any(self.local.rglob("manifest.json")))
 
@@ -188,7 +216,8 @@ class TestIndependentS2Phase(unittest.TestCase):
         self.assertEqual(second["metadata_complete"], 100)
         self.assertEqual(second["references_complete"], 100)
         self.assertEqual(self.metadata_calls.count(self.first_id), 2)
-        self.assertEqual(len(self.metadata_calls), 101)
+        self.assertEqual(len(self.metadata_calls), 150)
+        self.assertEqual([len(batch) for batch in self.metadata_batches], [50, 50, 50])
         self.assertEqual(len(self.reference_calls), 100)
         checkpoint = (
             self.drive / "reports" / "phase_checkpoints" / self.selection["fingerprint"]
@@ -200,6 +229,189 @@ class TestIndependentS2Phase(unittest.TestCase):
         metadata_file = checkpoint.parent / "papers" / (self.first_id.replace(".", "-") + "/metadata.json")
         metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
         self.assertEqual(metadata["history"][0]["status"], "rate_limited")
+
+    def test_bounded_auto_resume_after_references_429_uses_verified_checkpoint(self):
+        first_429 = {"value": True}
+        resume_snapshots = []
+        self.first_response_is_429 = False
+
+        def fetch_references(arxiv_id, **kwargs):
+            resume = kwargs.get("resume_from")
+            if resume is not None:
+                resume_snapshots.append(resume)
+            if arxiv_id == self.first_id and first_429["value"]:
+                first_429["value"] = False
+                return self._failed_references_429(arxiv_id)
+            return _references(arxiv_id, found=False)
+
+        with (
+            patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(m1_phases.random, "uniform", return_value=300.0),
+            patch.object(m1_phases.time, "sleep") as sleep,
+        ):
+            result = self.run_s2(
+                auto_resume_429=True,
+                auto_resume_429_max_per_cohort=1,
+                auto_resume_429_max_per_session=2,
+                auto_resume_429_cooldown_min_seconds=300,
+                auto_resume_429_cooldown_max_seconds=600,
+                budget_seconds=3600,
+            )
+
+        self.assertFalse(result["stopped"])
+        self.assertEqual(result["metadata_complete"], 100)
+        self.assertEqual(result["references_complete"], 100)
+        self.assertEqual(result["auto_resume_429"]["resume_attempts"], 1)
+        self.assertEqual(sleep.call_args.args, (300.0,))
+        self.assertEqual(len(resume_snapshots), 1)
+        self.assertEqual(resume_snapshots[0]["error"]["http_status"], 429)
+        event = result["auto_resume_429"]["events"][0]
+        self.assertEqual(event["stage"], "s2_references")
+        self.assertTrue(event["checkpoint_saved"])
+        self.assertEqual(event["outcome"], "resumed")
+        self.assertEqual(event["affected_ids"], [self.first_id])
+        evidence_path = Path(result["auto_resume_429"]["events_path"])
+        saved_events = json.loads(evidence_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved_events["selection_fingerprint"], self.selection["fingerprint"])
+        self.assertEqual(saved_events["events"], result["auto_resume_429"]["events"])
+        observations = list(
+            (self.drive / "reports" / "stage_observations").glob(
+                f"{result['session_id']}_*_s2_retry_wait_*.json"
+            )
+        )
+        self.assertEqual(len(observations), 1)
+        wait = json.loads(observations[0].read_text(encoding="utf-8"))
+        self.assertEqual(wait["configuration"]["trigger_stage"], "s2_references")
+        self.assertEqual(wait["result"]["trigger_http_status"], 429)
+
+    def test_bounded_auto_resume_after_metadata_429_retries_only_unfinished_metadata(self):
+        with (
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(m1_phases.random, "uniform", return_value=300.0),
+            patch.object(m1_phases.time, "sleep") as sleep,
+        ):
+            result = self.run_s2(auto_resume_429=True, budget_seconds=3600)
+
+        self.assertFalse(result["stopped"])
+        self.assertEqual(result["metadata_complete"], 100)
+        self.assertEqual(result["references_complete"], 100)
+        self.assertEqual(result["auto_resume_429"]["resume_attempts"], 1)
+        self.assertEqual(sleep.call_args.args, (300.0,))
+        self.assertEqual(len(self.metadata_batches), 3)
+        self.assertEqual(self.metadata_calls.count(self.first_id), 2)
+        first_event = result["auto_resume_429"]["events"][0]
+        self.assertEqual(first_event["stage"], "s2_metadata")
+        self.assertTrue(first_event["checkpoint_saved"])
+        self.assertEqual(first_event["outcome"], "resumed")
+        self.assertEqual(len(first_event["affected_ids"]), 50)
+
+    def test_auto_resume_limit_stops_after_one_retry_and_keeps_checkpoint(self):
+        reference_calls = []
+        self.first_response_is_429 = False
+
+        def fetch_references(arxiv_id, **_kwargs):
+            reference_calls.append(arxiv_id)
+            if arxiv_id == self.first_id:
+                return self._failed_references_429(arxiv_id)
+            return _references(arxiv_id, found=False)
+
+        with (
+            patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(m1_phases.random, "uniform", return_value=300.0),
+            patch.object(m1_phases.time, "sleep"),
+        ):
+            result = self.run_s2(auto_resume_429=True, budget_seconds=3600)
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["auto_resume_429"]["resume_attempts"], 1)
+        self.assertEqual(result["auto_resume_429"]["events"][-1]["deferred_reason"], "cohort_resume_limit")
+        self.assertEqual(reference_calls.count(self.first_id), 2)
+
+    def test_auto_resume_does_not_retry_http_403(self):
+        self.first_response_is_429 = False
+        def fetch_references(arxiv_id, **_kwargs):
+            result = self._failed_references_429(arxiv_id)
+            result["error"].update(type="http_error", message="http_403", http_status=403)
+            return result
+
+        with (
+            patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(m1_phases.time, "sleep") as sleep,
+        ):
+            result = self.run_s2(auto_resume_429=True, budget_seconds=3600)
+
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["stop_reason"]["http_status"], 403)
+        self.assertEqual(result["auto_resume_429"]["resume_attempts"], 0)
+        self.assertEqual(result["auto_resume_429"]["events"], [])
+        sleep.assert_not_called()
+
+    def test_auto_resume_uses_retry_after_and_stops_when_session_budget_is_insufficient(self):
+        self.first_response_is_429 = False
+
+        def fetch_references(arxiv_id, **_kwargs):
+            return self._failed_references_429(arxiv_id)
+
+        limiter = type("LimiterWithRetryAfter", (), {"cooldown_remaining_seconds": 450.0})()
+        with (
+            patch.object(semantic_scholar, "RateLimiter", return_value=limiter),
+            patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+            patch.object(m1_phases.random, "uniform", return_value=300.0),
+            patch.object(m1_phases.time, "sleep") as sleep,
+        ):
+            result = self.run_s2(auto_resume_429=True, budget_seconds=60)
+
+        self.assertTrue(result["stopped"])
+        event = result["auto_resume_429"]["events"][0]
+        self.assertTrue(event["checkpoint_saved"])
+        self.assertEqual(event["deferred_reason"], "session_budget")
+        self.assertEqual(event["cooldown_seconds"], 450.0)
+        sleep.assert_not_called()
+
+    def test_batch_length_mismatch_fails_before_any_metadata_evidence_write(self):
+        with (
+            patch.object(semantic_scholar, "fetch_metadata", return_value=[
+                _metadata(self.first_id, found=False),
+            ]),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+        ):
+            with self.assertRaisesRegex(m1_phases.M1PhaseError, "batch không khớp"):
+                self.run_s2()
+        checkpoint = (
+            self.drive / "reports" / "phase_checkpoints" / self.selection["fingerprint"]
+            / "s2" / "cohort_0151" / "checkpoint.json"
+        )
+        saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        self.assertEqual(saved["files"], {})
+
+    def test_invalid_batch_is_split_and_each_id_is_checkpointed(self):
+        sizes = []
+
+        def fetch_metadata(ids, **_kwargs):
+            sizes.append(len(ids))
+            if len(ids) == 50 and ids[0] == self.first_id:
+                return [{"arxiv_id": aid, "status": "invalid_response",
+                         "http_status": 200, "attempts": 1, "paper": None,
+                         "error": "invalid_batch_length_or_structure"} for aid in ids]
+            return [_metadata(aid, found=False) for aid in ids]
+
+        with (
+            patch.object(semantic_scholar, "fetch_metadata", side_effect=fetch_metadata),
+            patch.object(semantic_scholar, "_key_from_environment", return_value=None),
+        ):
+            result = self.run_s2()
+        self.assertFalse(result["stopped"])
+        self.assertEqual(sizes, [50, 25, 25, 50])
+        checkpoint = (
+            self.drive / "reports" / "phase_checkpoints" / self.selection["fingerprint"]
+            / "s2" / "cohort_0151" / "checkpoint.json"
+        )
+        saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+        self.assertEqual(len([name for name in saved["files"] if name.endswith("metadata.json")]), 100)
 
     def test_checkpoint_checksum_mismatch_fails_closed_and_preserves_file(self):
         with patch.object(semantic_scholar, "_key_from_environment", return_value=None):
@@ -220,18 +432,18 @@ class TestIndependentS2Phase(unittest.TestCase):
         self.assertEqual(evidence.read_bytes(), before)
 
     def test_partial_reference_page_resumes_from_saved_continuation(self):
-        second_id = self.selection["pairs"][1][1]
+        second_id = self.selection["pairs"][50][1]
         stopped_once = {"value": False}
         partial_once = {"value": False}
         resumes = []
 
         def fetch_metadata(ids, **_kwargs):
-            arxiv_id = ids[0]
-            if arxiv_id == second_id and not stopped_once["value"]:
+            if second_id in ids and not stopped_once["value"]:
                 stopped_once["value"] = True
                 return [{"arxiv_id": arxiv_id, "status": "rate_limited", "http_status": 429,
-                         "attempts": 1, "paper": None, "error": "rate limited fixture"}]
-            return [_metadata(arxiv_id, found=False)]
+                         "attempts": 1, "paper": None, "error": "rate limited fixture"}
+                        for arxiv_id in ids]
+            return [_metadata(arxiv_id, found=False) for arxiv_id in ids]
 
         def fetch_references(arxiv_id, **kwargs):
             resume = kwargs.get("resume_from")
@@ -354,11 +566,39 @@ class TestArxivAndAuditGates(unittest.TestCase):
         self.assertFalse(result["s2_issues"] == [])
         export.assert_not_called()
 
+    def test_audit_blocks_export_when_kaggle_discrepancy_checksum_is_invalid(self):
+        from src.kaggle_candidates import persist_discrepancy_evidence
+
+        self.drive.mkdir(parents=True, exist_ok=True)
+        phase_root = m1_phases._persist_selection(self.drive, self.selection)
+        evidence = {
+            "schema_version": 1, "session_id": "tampered-session",
+            "arxiv_id": self.selection["pairs"][0][1],
+            "mssv": MSSV, "decision": "use_arxiv_latest",
+        }
+        pointer = persist_discrepancy_evidence(
+            evidence,
+            evidence_root=phase_root / "arxiv" / "kaggle_discrepancies",
+            checkpoint_root=phase_root / "arxiv" / "kaggle_discrepancy_checkpoints",
+            session_id="tampered-session",
+        )
+        Path(pointer["artifact_path"]).with_suffix(".json.sha256").write_text("0" * 64)
+        with patch("src.export.export_official_datasets") as export:
+            result = m1_phases.run_m1_audit_member(
+                MSSV, drive_root=self.drive, local_root=self.local,
+                cohort_limit=1, budget_seconds=60,
+            )
+        self.assertEqual(result["kaggle_evidence"]["status"], "invalid")
+        self.assertEqual(result["kaggle_evidence_issues"][0]["issue"],
+                         "kaggle_discrepancy_evidence_invalid")
+        self.assertEqual(result["export_status"], "blocked")
+        export.assert_not_called()
+
     def test_successful_audit_reconciles_s2_without_changing_source_bytes(self):
         found_id = self.selection["pairs"][0][1]
 
         def fetch_metadata(ids, **_kwargs):
-            return [_metadata(ids[0], found=ids[0] == found_id)]
+            return [_metadata(arxiv_id, found=arxiv_id == found_id) for arxiv_id in ids]
 
         def fetch_references(arxiv_id, **_kwargs):
             return _references(arxiv_id, found=arxiv_id == found_id)

@@ -1,5 +1,6 @@
 import gzip
 import io
+import json
 import socket
 import ssl
 import stat
@@ -17,6 +18,7 @@ from urllib.error import HTTPError, URLError
 
 from src import arxiv_client as client
 from src import arxiv_source as source
+from src.bbl_handling import validate_bbl_source_policy
 
 
 MSSV = "24120232"
@@ -143,6 +145,56 @@ class SourceExtractionTests(unittest.TestCase):
         self.assertEqual(result["status"], "no_tex_source")
         self.assertEqual(result["files"], ["references.bib"])
         self.assertEqual((self.destination / "references.bib").read_bytes(), BIB)
+
+    def test_policy_filters_before_source_directory_is_published(self):
+        artifacts = self.root / "artifacts"
+        self.payload.write_bytes(tar_bytes([
+            ("main.tex", TEX),
+            ("refs.bib", BIB),
+            ("refs.bbl", b"rendered bibliography"),
+        ]))
+        result = source.extract_source(
+            self.payload,
+            self.destination,
+            bbl_artifact_dir=artifacts,
+            mssv=MSSV,
+            versioned_id=VERSION_ID,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertNotIn("refs.bbl", result["files"])
+        self.assertFalse((self.destination / "refs.bbl").exists())
+        self.assertEqual(result["bbl_policy"]["items"][0]["status"], "removed_bib_present")
+        evidence = artifacts / result["bbl_policy"]["items"][0]["source_evidence_path"]
+        self.assertEqual(evidence.read_bytes(), b"rendered bibliography")
+        index_path = artifacts / result["bbl_policy"]["index_path"]
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        self.assertEqual(index["version"], "v1")
+        validate_bbl_source_policy(
+            self.destination,
+            result["files"],
+            result["bbl_policy"],
+            artifact_root=artifacts,
+            mssv=MSSV,
+            arxiv_id="2502.09992",
+            version="v1",
+        )
+
+    def test_policy_blocks_publication_if_bbl_artifact_root_is_missing(self):
+        self.payload.write_bytes(tar_bytes([
+            ("main.tex", TEX),
+            ("refs.bbl", b"\\begin{thebibliography}{1}\\bibitem{x} X\\end{thebibliography}"),
+        ]))
+        result = source.extract_source(
+            self.payload,
+            self.destination,
+            mssv=MSSV,
+            versioned_id=VERSION_ID,
+        )
+
+        self.assertEqual(result["status"], "storage_error")
+        self.assertIn("bbl_artifact_dir_required", result["error"])
+        self.assertFalse(self.destination.exists())
 
     def test_pdf_postscript_and_gzipped_pdf_are_no_tex_source(self):
         for body in (b"%PDF-1.7\nexample", b"%!PS-Adobe-3.0\nexample", gzip.compress(b"%PDF-1.7\nexample")):

@@ -47,7 +47,7 @@ def confirmed_withdrawal(meta: Any, arxiv_id: str, version: str) -> bool:
         return False
     try:
         parsed = urlsplit(official_url)
-        port = parsed.port  # Raises ValueError for malformed ports.
+        port = parsed.port  # Phát sinh ValueError nếu số cổng không đúng định dạng.
     except ValueError:
         return False
     if (parsed.scheme != "https" or parsed.hostname != "arxiv.org"

@@ -10,7 +10,7 @@ DEFAULT_CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "config" / "group10_id_ranges.json"
 )
 
-# Assigned ranges use five-digit IDs; historical IDs are handled elsewhere.
+# Dải ID được phân công dùng ID năm chữ số; ID lịch sử được xử lý ở nơi khác.
 _MIN_MONTH = "2015-01"
 _MAX_MONTH = "2099-12"
 _ARXIV_ID_RE = re.compile(r"^(?P<yymm>[0-9]{4})\.(?P<serial>[0-9]{5})$")
@@ -21,7 +21,7 @@ class ConfigError(ValueError):
 
 
 def _positive_integer(value: object, field: str) -> None:
-    # bool is also an int, so check the exact type.
+    # bool cũng là kiểu con của int; vì vậy cần kiểm tra kiểu chính xác.
     if type(value) is not int or value < 1:
         raise ConfigError(f"{field} must be a positive integer (not bool)")
 

@@ -33,8 +33,8 @@ from src.storage_integrity import (
     audit_version_integrity,
 )
 
-METRIC_DEFINITION_VERSION = "2.1.0"
-REPORT_SCHEMA_VERSION = "2.1.0"
+METRIC_DEFINITION_VERSION = "2.2.0"
+REPORT_SCHEMA_VERSION = "2.2.0"
 
 
 def _get_git_commit(cwd: Optional[Path] = None) -> str:
@@ -105,7 +105,7 @@ def _perform_independent_reconciliation(
         resolved_corpus_root = store.root
         discrepancies.append(f"Corpus root unresolvable during reconciliation: {exc}")
 
-    # Pass 2A: Iterate all pairs to compute raw discovery, manifest, and version structures
+    # Lượt 2A: duyệt mọi cặp để tính kết quả discovery thô, manifest và cấu trúc phiên bản.
     for mssv, arxiv_id in pairs_list:
         try:
             folder_key = arxiv_id_to_folder_key(arxiv_id)
@@ -285,7 +285,7 @@ def _perform_independent_reconciliation(
                     if c_is_d and re.fullmatch(r"v[1-9][0-9]*", child.name):
                         raw_version_dirs_count += 1
                         paper_disk_v_dirs.add(child.name)
-                # Check version directory mismatch: on-disk version directories must match declared directories
+                # Kiểm tra sai khác thư mục phiên bản: thư mục trên đĩa phải khớp khai báo.
                 if paper_disk_v_dirs != paper_declared_v_dirs:
                     discrepancies.append(
                         f"Version directory on disk mismatch for {arxiv_id}: disk={sorted(paper_disk_v_dirs)} vs declared={sorted(paper_declared_v_dirs)}"
@@ -295,7 +295,7 @@ def _perform_independent_reconciliation(
         else:
             raw_other_unresolved_count += 1
 
-    # Cross-check independent raw counts against classified statistics
+    # Đối chiếu số đếm thô độc lập với thống kê đã phân loại.
     if raw_found_count != stats["found_papers"]:
         discrepancies.append(
             f"Found papers mismatch: classified {stats['found_papers']} vs independent {raw_found_count}"
@@ -333,15 +333,15 @@ def _perform_independent_reconciliation(
             f"Terminal versions mismatch: classified {stats['terminal_versions']} vs independent {raw_terminal_versions}"
         )
 
-    # Reconcile on-disk version directories with declared versions (FIND-REP-D, Step 3)
+    # Đối soát thư mục phiên bản trên đĩa với phiên bản đã khai báo (FIND-REP-D, bước 3).
     if raw_version_dirs_count > raw_total_versions:
         discrepancies.append(
             f"On-disk version directories ({raw_version_dirs_count}) exceed total declared versions ({raw_total_versions})"
         )
 
-    # Pass 2B: Independent Revalidation of M1-complete candidates (FIND-REP-D 12 checks)
+    # Lượt 2B: xác minh độc lập các ứng viên hoàn tất M1 (12 kiểm tra FIND-REP-D).
     if m1_complete_candidates is None:
-        # Fall back to finding pairs declaring terminal complete status in manifest
+        # Nếu cần, tìm các cặp được manifest khai báo ở trạng thái kết thúc hoàn tất.
         m1_complete_candidates = []
         for mssv, arxiv_id in pairs_list:
             try:
@@ -369,7 +369,7 @@ def _perform_independent_reconciliation(
         candidate_failed = False
         reasons: List[str] = []
 
-        # Check 1: Safe path & containment
+        # Kiểm tra 1: đường dẫn an toàn và nằm trong phạm vi.
         try:
             folder_key = arxiv_id_to_folder_key(arxiv_id)
             p_dir = store.root / folder_key
@@ -402,7 +402,7 @@ def _perform_independent_reconciliation(
             discrepancies.append(f"Paper {arxiv_id} failed M1 independent revalidation: {'; '.join(reasons)}")
             continue
 
-        # Check 2: Raw manifest
+        # Kiểm tra 2: manifest thô.
         manifest = None
         man_path = p_dir / "manifest.json"
         try:
@@ -446,7 +446,7 @@ def _perform_independent_reconciliation(
             discrepancies.append(f"Paper {arxiv_id} failed M1 independent revalidation: {'; '.join(reasons)}")
             continue
 
-        # Check 3: Identity & contract_version=2
+        # Kiểm tra 3: định danh và contract_version=2.
         contract_v = manifest.get("contract_version", manifest.get("storage_contract_version"))
         if contract_v != CONTRACT_VERSION or type(contract_v) is not int or isinstance(contract_v, bool):
             candidate_failed = True
@@ -458,12 +458,12 @@ def _perform_independent_reconciliation(
             candidate_failed = True
             reasons.append(f"Check 3 (identity): mssv mismatch: {manifest.get('mssv')} != {mssv}")
 
-        # Check 4: Discovery=found
+        # Kiểm tra 4: Discovery=found.
         if manifest.get("discovery_status") != "found":
             candidate_failed = True
             reasons.append(f"Check 4 (discovery): discovery_status is {manifest.get('discovery_status')}, expected 'found'")
 
-        # Check 5: Terminal manifest status
+        # Kiểm tra 5: trạng thái kết thúc trong manifest.
         if manifest.get("status") not in {"complete", "complete_with_no_tex", "complete_with_withdrawn"}:
             candidate_failed = True
             reasons.append(f"Check 5 (terminal manifest status): manifest status is {manifest.get('status')}")
@@ -478,7 +478,7 @@ def _perform_independent_reconciliation(
             candidate_failed = True
             reasons.append(f"Check 5 (terminal manifest status): manifest.references_status is {manifest.get('references_status')}")
 
-        # Check 6: Terminal versions
+        # Kiểm tra 6: các phiên bản đã kết thúc.
         versions = manifest.get("versions")
         if not isinstance(versions, dict) or len(versions) == 0:
             candidate_failed = True
@@ -492,7 +492,7 @@ def _perform_independent_reconciliation(
                     candidate_failed = True
                     reasons.append(f"Check 6 (terminal versions): version {v_name} status '{v_info.get('status') if isinstance(v_info, dict) else None}' not in TERMINAL")
 
-        # Check 7: Audit source files & SHA-256
+        # Kiểm tra 7: tệp mã nguồn và SHA-256.
         if isinstance(versions, dict):
             for v_name, v_info in versions.items():
                 if isinstance(v_info, dict):
@@ -505,7 +505,7 @@ def _perform_independent_reconciliation(
                         candidate_failed = True
                         reasons.append(f"Check 7 (source files & SHA-256): {v_name} audit failed with error: {exc}")
 
-        # Check 8: Read & validate metadata
+        # Kiểm tra 8: đọc và xác thực metadata.
         meta_path = p_dir / "metadata.json"
         meta = None
         try:
@@ -553,7 +553,7 @@ def _perform_independent_reconciliation(
             candidate_failed = True
             reasons.append(f"Check 8 (read/validate metadata): unexpected error: {exc}")
 
-        # Check 9: Metadata consistency
+        # Kiểm tra 9: tính nhất quán của metadata.
         if meta is not None and isinstance(meta, dict) and isinstance(versions, dict):
             if meta.get("arxiv_id") != arxiv_id:
                 candidate_failed = True
@@ -570,7 +570,7 @@ def _perform_independent_reconciliation(
                 candidate_failed = True
                 reasons.append("Check 9 (metadata consistency): missing title or authors")
 
-        # Check 10: Read & validate references
+        # Kiểm tra 10: đọc và xác thực references.
         ref_path = p_dir / "references.json"
         ref = None
         try:
@@ -618,7 +618,7 @@ def _perform_independent_reconciliation(
             candidate_failed = True
             reasons.append(f"Check 10 (read/validate references): unexpected error: {exc}")
 
-        # Check 11: Reference coverage complete & continuation=None
+        # Kiểm tra 11: references đã đủ và continuation=None.
         if ref is not None and isinstance(ref, dict):
             cov = ref.get("coverage")
             if not isinstance(cov, dict):
@@ -635,7 +635,7 @@ def _perform_independent_reconciliation(
                 candidate_failed = True
                 reasons.append("Check 11 (references coverage): items is not a list")
 
-        # Check 12: No unmanaged/symlink violations in paper_dir
+        # Kiểm tra 12: không có tệp ngoài quản lý hoặc vi phạm symlink trong paper_dir.
         allowed_entries = {"manifest.json", "metadata.json", "references.json"}
         if isinstance(versions, dict):
             for v_name, v_info in versions.items():
@@ -675,7 +675,7 @@ def _perform_independent_reconciliation(
             f"M1-complete count mismatch: classified {stats['m1_complete_papers']} vs independently verified {verified_m1_complete_count}"
         )
 
-    # Verification of arithmetic invariants
+    # Xác minh các bất biến số học.
     paper_population_balance = (
         stats["found_papers"]
         + stats["confirmed_not_found"]
@@ -769,7 +769,7 @@ def compute_m1_statistics(
     pairs_list = list(pairs)
     total_candidates = len(pairs_list)
 
-    # 1. Primary Paper Classification (Mutually Exclusive Partition of assigned_candidates)
+    # 1. Phân loại chính các bài báo (phân hoạch loại trừ lẫn nhau của assigned_candidates).
     found_papers = 0
     confirmed_not_found = 0
     unprocessed_papers = 0
@@ -778,21 +778,21 @@ def compute_m1_statistics(
     discovery_failed = 0
     other_unresolved = 0
 
-    # 2. Stage Completion Counters
+    # 2. Bộ đếm hoàn tất theo pha.
     source_complete_papers = 0
     metadata_complete_papers = 0
     references_complete_papers = 0
     m1_complete_papers = 0
     m1_complete_candidates: List[Tuple[str, str]] = []
 
-    # 3. Found Papers Lifecycle Counters (Mutually Exclusive Partition of found_papers)
+    # 3. Bộ đếm vòng đời bài báo đã tìm thấy (phân hoạch loại trừ lẫn nhau của found_papers).
     partial_papers = 0
     failed_papers = 0
     interrupted_papers = 0
     unresolved_found_papers = 0
     integrity_failed_papers = 0
 
-    # 4. Version Level Counters
+    # 4. Bộ đếm theo phiên bản.
     total_discovered_versions = 0
     successful_tex_versions = 0
     no_tex_versions = 0
@@ -803,7 +803,7 @@ def compute_m1_statistics(
     invalid_versions = 0
     source_integrity_failed_versions = 0
 
-    # 5. Reference Counters
+    # 5. Bộ đếm tài liệu tham khảo.
     complete_reference_papers = 0
     partial_reference_papers = 0
     failed_reference_papers = 0
@@ -812,6 +812,7 @@ def compute_m1_statistics(
     total_complete_reference_records = 0
     total_observed_reference_records = 0
     reference_metadata_complete_records = 0
+    reference_arxiv_id_records = 0
     logical_size_papers = 0
     logical_before_bytes = 0
     logical_after_bytes = 0
@@ -825,7 +826,7 @@ def compute_m1_statistics(
 
         paper_dir = store.root / folder_key
 
-        # Check paper directory presence and path safety
+        # Kiểm tra thư mục bài báo có tồn tại và đường dẫn an toàn.
         try:
             p_link, p_dir_is_d, _ = _inspect_path(paper_dir)
         except FileNotFoundError:
@@ -889,7 +890,7 @@ def compute_m1_statistics(
         disc = manifest.get("discovery_status")
 
         if disc == "not_found":
-            # Verify negative discovery contract (R14: versions must be exact empty dict)
+            # Xác minh hợp đồng discovery âm (R14: versions phải là dict rỗng chính xác).
             versions = manifest.get("versions")
             is_valid_manifest_not_found = (
                 manifest.get("status") == "not_found"
@@ -897,7 +898,7 @@ def compute_m1_statistics(
                 and not versions
             )
 
-            # FIND-REP-C: Check filesystem: no version directories and no unmanaged entries
+            # FIND-REP-C: kiểm tra hệ thống tệp không có thư mục phiên bản hoặc mục ngoài quản lý.
             has_version_dirs = False
             has_unmanaged_entries = False
             try:
@@ -942,7 +943,7 @@ def compute_m1_statistics(
 
             total_discovered_versions += len(versions)
 
-            # Audit paper integrity using canonical Phase 1 API
+            # Kiểm toán tính toàn vẹn bài báo bằng API chuẩn của Pha 1.
             audit_res = audit_paper_integrity(store, mssv, arxiv_id)
             if audit_res.has_integrity_failure:
                 integrity_failed_papers += 1
@@ -961,13 +962,13 @@ def compute_m1_statistics(
                 logical_before_bytes += sum(before_bytes(version) for version in versions.values())
                 logical_after_bytes += sum(version["kept_bytes"] for version in versions.values())
 
-            # --- A. Source Completion Check ---
-            # Decoupled from metadata and references (FIND-REP-A)
+            # --- A. Kiểm tra hoàn tất mã nguồn ---
+            # Độc lập với metadata và references (FIND-REP-A).
             if audit_res.is_source_complete:
                 source_complete_papers += 1
 
-            # --- B. Metadata Completion Check ---
-            # Verify metadata file independently
+            # --- B. Kiểm tra hoàn tất metadata ---
+            # Xác minh riêng tệp metadata.
             is_meta_complete = False
             meta_path = paper_dir / "metadata.json"
             try:
@@ -997,7 +998,7 @@ def compute_m1_statistics(
             if is_meta_complete:
                 metadata_complete_papers += 1
 
-            # --- C. References Completion Check ---
+            # --- C. Kiểm tra hoàn tất references ---
             is_ref_complete = False
             ref_path = paper_dir / "references.json"
             try:
@@ -1029,6 +1030,11 @@ def compute_m1_statistics(
                         is_ref_complete = True
                         complete_reference_papers += 1
                         total_complete_reference_records += item_count
+                        reference_arxiv_id_records += sum(
+                            1 for item in items if isinstance(item, dict)
+                            and isinstance(item.get("arxiv_id"), str)
+                            and bool(item.get("arxiv_id"))
+                        )
                         reference_metadata_complete_records += sum(
                             1 for item in items if isinstance(item, dict)
                             and item.get("title") and item.get("authors")
@@ -1053,16 +1059,16 @@ def compute_m1_statistics(
             if is_ref_complete:
                 references_complete_papers += 1
 
-            # --- D. Milestone 1 Complete Invariant ---
-            # Strict: source complete and metadata complete and references complete and no violations
+            # --- D. Bất biến hoàn tất Milestone 1 ---
+            # Điều kiện chặt: mã nguồn, metadata và references đều hoàn tất, không có vi phạm.
             if audit_res.is_m1_complete and is_meta_complete and is_ref_complete:
                 m1_complete_papers += 1
                 m1_complete_candidates.append((mssv, arxiv_id))
 
-            # --- E. Found Papers Lifecycle Classification (Mutually Exclusive) ---
+            # --- E. Phân loại vòng đời bài báo đã tìm thấy (loại trừ lẫn nhau) ---
             man_status = manifest.get("status")
             if audit_res.is_m1_complete and is_meta_complete and is_ref_complete:
-                pass  # Accounted as m1_complete
+                pass  # Được tính vào m1_complete.
             elif man_status == "partial":
                 partial_papers += 1
             elif man_status == "failed":
@@ -1072,7 +1078,7 @@ def compute_m1_statistics(
             else:
                 unresolved_found_papers += 1
 
-            # --- F. Version-Level Accounting ---
+            # --- F. Kiểm kê theo phiên bản ---
             for v_name, v_info in versions.items():
                 if not isinstance(v_info, dict):
                     invalid_versions += 1
@@ -1094,7 +1100,7 @@ def compute_m1_statistics(
                 else:
                     invalid_versions += 1
 
-                # Check version source integrity violations
+                # Kiểm tra vi phạm toàn vẹn mã nguồn phiên bản.
                 try:
                     v_violations = audit_version_integrity(paper_dir, arxiv_id, v_name, v_info)
                 except Exception:
@@ -1113,7 +1119,7 @@ def compute_m1_statistics(
         else:
             other_unresolved += 1
 
-    # Computed percentages (None when denominator == 0, explicit semantics)
+    # Tính tỷ lệ (None khi mẫu số bằng 0; ngữ nghĩa được quy định tường minh).
     source_completion_rate: Optional[float] = (
         round(source_complete_papers / found_papers * 100.0, 2) if found_papers > 0 else None
     )
@@ -1147,7 +1153,7 @@ def compute_m1_statistics(
         else None
     )
 
-    # Reconciliation Checks
+    # Các kiểm tra đối soát.
     paper_population_balance = (
         found_papers
         + confirmed_not_found
@@ -1222,31 +1228,31 @@ def compute_m1_statistics(
             "assigned_candidate_count": total_candidates,
             "report_scope": report_scope or "cohort_assignment",
         },
-        # Candidate Accounting
+        # Kiểm kê ứng viên.
         "assigned_candidates": total_candidates,
-        "total_candidates": total_candidates,  # Compatibility alias
+        "total_candidates": total_candidates,  # Tên tương thích ngược.
         "found_papers": found_papers,
         "confirmed_not_found": confirmed_not_found,
-        "not_found_papers": confirmed_not_found,  # Compatibility alias
+        "not_found_papers": confirmed_not_found,  # Tên tương thích ngược.
         "unprocessed_papers": unprocessed_papers,
         "missing_manifests": missing_manifests,
         "invalid_manifests": invalid_manifests,
         "discovery_failed": discovery_failed,
         "other_unresolved": other_unresolved,
-        # Stage & M1 Completion
+        # Hoàn tất pha và M1.
         "source_complete_papers": source_complete_papers,
         "metadata_complete_papers": metadata_complete_papers,
         "references_complete_papers": references_complete_papers,
         "m1_complete_papers": m1_complete_papers,
-        # Found Lifecycle Partition
+        # Phân loại vòng đời bài báo đã tìm thấy.
         "partial_papers": partial_papers,
         "failed_papers": failed_papers,
         "interrupted_papers": interrupted_papers,
         "unresolved_found_papers": unresolved_found_papers,
         "integrity_failed_papers": integrity_failed_papers,
-        # Version Accounting
+        # Kiểm kê phiên bản.
         "total_discovered_versions": total_discovered_versions,
-        "total_versions": total_discovered_versions,  # Compatibility alias
+        "total_versions": total_discovered_versions,  # Tên tương thích ngược.
         "successful_tex_versions": successful_tex_versions,
         "no_tex_versions": no_tex_versions,
         "withdrawn_versions": withdrawn_versions,
@@ -1255,17 +1261,26 @@ def compute_m1_statistics(
         "incomplete_versions": incomplete_versions,
         "failed_versions": failed_versions,
         "invalid_versions": invalid_versions,
-        "unresolved_versions": invalid_versions,  # Canonical metric spec name
+        "unresolved_versions": invalid_versions,  # Tên chuẩn của đặc tả chỉ số.
         "source_integrity_failed_versions": source_integrity_failed_versions,
-        # References Accounting
+        # Kiểm kê references.
         "complete_reference_papers": complete_reference_papers,
         "partial_reference_papers": partial_reference_papers,
         "failed_reference_papers": failed_reference_papers,
         "not_attempted_reference_papers": not_attempted_reference_papers,
         "invalid_reference_papers": invalid_reference_papers,
-        "invalid_references": invalid_reference_papers,  # Compatibility alias
+        "invalid_references": invalid_reference_papers,  # Tên tương thích ngược.
         "total_complete_reference_records": total_complete_reference_records,
         "total_observed_reference_records": total_observed_reference_records,
+        "reference_arxiv_id_records": reference_arxiv_id_records,
+        "reference_arxiv_id_coverage_rate": (
+            round(reference_arxiv_id_records / total_complete_reference_records * 100.0, 2)
+            if total_complete_reference_records else None
+        ),
+        "reference_arxiv_id_coverage_definition": (
+            "Percent of raw reference items in complete reference lists with a nonempty arXiv ID; "
+            "the export deduplicates repeated citing-paper/reference-ID edges"
+        ),
         "reference_metadata_complete_records": reference_metadata_complete_records,
         "reference_metadata_success_rate": (
             round(reference_metadata_complete_records / total_complete_reference_records * 100.0, 2)
@@ -1275,6 +1290,10 @@ def compute_m1_statistics(
             "Percent of items in complete reference lists with nonempty title, authors, "
             "submission or publication date, and Semantic Scholar ID; arXiv ID is optional"
         ),
+        "average_references_per_paper_definition": (
+            "All raw items in complete reference lists, including items without arXiv IDs, "
+            "divided by papers with complete reference lists"
+        ),
         "logical_size_measured_papers": logical_size_papers,
         "average_logical_before_bytes_per_paper": (
             logical_before_bytes / logical_size_papers if logical_size_papers and logical_size_papers == found_papers else None
@@ -1283,7 +1302,7 @@ def compute_m1_statistics(
             logical_after_bytes / logical_size_papers if logical_size_papers and logical_size_papers == found_papers else None
         ),
         "logical_size_scope": "uncompressed regular file bytes before source filtering and kept bytes after filtering; withdrawn versions count as zero",
-        # Rates and Averages
+        # Tỷ lệ và giá trị trung bình.
         "source_completion_rate": source_completion_rate,
         "metadata_completion_rate": metadata_completion_rate,
         "references_coverage_rate": references_coverage_rate,
@@ -1291,10 +1310,10 @@ def compute_m1_statistics(
         "version_extraction_success_rate": version_extraction_success_rate,
         "no_tex_rate": no_tex_rate,
         "average_references_per_paper": average_references_per_paper,
-        # Reconciliation Results
+        # Kết quả đối soát.
         "is_reconciled": is_reconciled,
         "reconciliation": reconciliation_result,
-        # Backward compatibility aliases
+        # Tên trường tương thích ngược.
         "completed_papers": source_complete_papers,
         "completed_versions": terminal_versions,
         "success_rate": source_completion_rate if source_completion_rate is not None else 0.0,
@@ -1365,8 +1384,10 @@ def format_markdown_summary(stats: Dict[str, Any]) -> str:
         f"| Bài báo trích dẫn dở dang (partial_refs) | {stats['partial_reference_papers']:,} | Cần bổ sung trích dẫn |",
         f"| Bài báo trích dẫn lỗi (failed_refs) | {stats['failed_reference_papers']:,} | Lỗi API S2 |",
         f"| Bài báo chưa thu thập trích dẫn (not_attempted) | {stats['not_attempted_reference_papers']:,} | Chưa cào |",
-        f"| Tổng liên kết trích dẫn hoàn tất | {stats['total_complete_reference_records']:,} | Thu thập từ bài complete |",
-        f"| Số liên kết trích dẫn trung bình / bài | {stats['average_references_per_paper'] if stats['average_references_per_paper'] is not None else 'N/A'} | Trên bài complete |",
+        f"| Tổng mục references thô trong danh sách hoàn tất | {stats['total_complete_reference_records']:,} | Bao gồm mục thiếu arXiv ID |",
+        f"| References thô trung bình / bài có danh sách hoàn tất | {stats['average_references_per_paper'] if stats['average_references_per_paper'] is not None else 'N/A'} | Tổng mục thô / `complete_reference_papers` |",
+        f"| Metadata references đầy đủ | {_fmt_rate(stats['reference_metadata_success_rate'])} | {stats['reference_metadata_complete_records']:,}/{stats['total_complete_reference_records']:,}; title, authors, ngày, S2 ID; arXiv ID tùy chọn |",
+        f"| Mục thô có arXiv ID | {_fmt_rate(stats['reference_arxiv_id_coverage_rate'])} | {stats['reference_arxiv_id_records']:,}/{stats['total_complete_reference_records']:,}; CSV có thể gộp cạnh trùng |",
         "",
         "#### 5. Bảng kiểm tra đối chiếu số liệu (Reconciliation Summary)",
         "",

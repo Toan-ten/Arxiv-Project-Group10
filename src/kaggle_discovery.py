@@ -25,7 +25,7 @@ def _parse_iso_date(date_str: Optional[str]) -> Optional[str]:
     if not date_str or not isinstance(date_str, str):
         return None
     date_str = date_str.strip()
-    # Check if already ISO YYYY-MM-DD
+    # Kiểm tra giá trị đã ở dạng ISO YYYY-MM-DD chưa.
     if len(date_str) >= 10 and re.match(r"^\d{4}-\d{2}-\d{2}", date_str):
         candidate = date_str[:10]
         if _valid_date(candidate):

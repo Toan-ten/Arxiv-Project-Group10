@@ -46,7 +46,7 @@ def export_papers_table(
             if not isinstance(meta, dict):
                 continue
             status = meta.get("status")
-            # R15: require_m1_complete=True always requires actual metadata.status == "complete", regardless of verified_only
+            # R15: require_m1_complete=True luôn yêu cầu metadata.status thực tế bằng "complete", không phụ thuộc verified_only.
             if require_m1_complete or verified_only:
                 if status != "complete":
                     continue
@@ -132,7 +132,7 @@ def export_references_table(
                     continue
                 ref_arxiv = item.get("arxiv_id")
                 if not ref_arxiv or not isinstance(ref_arxiv, str):
-                    continue  # Only include citations resolved to an arXiv ID
+                    continue  # Chỉ đưa vào các trích dẫn đã xác định được arXiv ID.
                 key = (str(arxiv_id), str(ref_arxiv))
                 ref_sub_date = item.get("submission_date") or item.get("publication_date")
                 raw_authors = item.get("authors")

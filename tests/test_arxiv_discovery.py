@@ -1,7 +1,7 @@
 import unittest
 from xml.sax.saxutils import escape
 
-from src.arxiv_discovery import parse_arxiv_response
+from src.arxiv_discovery import parse_arxiv_response, parse_arxiv_batch_response
 from src.id_ranges import iter_assigned_ids
 
 
@@ -38,6 +38,24 @@ def make_feed(entries, total="1", start="0"):
 
 
 class ArxivDiscoveryTests(unittest.TestCase):
+    def test_batch_maps_exact_ids_and_leaves_missing_unresolved(self):
+        second = "2502.08236"
+        entries = make_entry() + make_entry(identifier=f"http://arxiv.org/abs/{second}v2")
+        mapped = parse_arxiv_batch_response(
+            make_feed(entries, total="2"), MSSV, [ARXIV_ID, second],
+        )
+        self.assertEqual(set(mapped), {ARXIV_ID, second})
+        self.assertEqual(mapped[second]["version_ids"], [f"{second}v1", f"{second}v2"])
+        partial = parse_arxiv_batch_response(
+            make_feed(make_entry()), MSSV, [ARXIV_ID, second],
+        )
+        self.assertEqual(set(partial), {ARXIV_ID})
+        with self.assertRaisesRegex(ValueError, "duplicated"):
+            parse_arxiv_batch_response(
+                make_feed(make_entry() + make_entry(), total="2"),
+                MSSV, [ARXIV_ID, second],
+            )
+
     def parse(self, xml):
         result = parse_arxiv_response(xml, MSSV, ARXIV_ID)
         self.assertEqual(result["mssv"], MSSV)

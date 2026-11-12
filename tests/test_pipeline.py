@@ -163,6 +163,35 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(references["coverage"]["complete"])
         self.assertTrue(self.store().should_skip_version(*PAIR, "v3"))
 
+    def test_optional_batch_discovery_maps_two_ids_with_one_atom_request(self):
+        second = (PAIR[0], "2502.08236")
+        first_entry = atom(PAIR[1]).decode().split("<entry>", 1)[1].split("</entry>", 1)[0]
+        second_entry = atom(second[1], versions=2).decode().split("<entry>", 1)[1].split("</entry>", 1)[0]
+        feed = (
+            '<feed xmlns="http://www.w3.org/2005/Atom" '
+            'xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/">'
+            '<opensearch:totalResults>2</opensearch:totalResults>'
+            f'<entry>{first_entry}</entry><entry>{second_entry}</entry></feed>'
+        ).encode()
+        self.outcomes = [Response(feed, "application/atom+xml"), Response(TEX),
+                         Response(TEX), Response(TEX)]
+        result = self.run_pairs([PAIR, second], discovery_batch_size=20)
+        self.assertEqual(len(result["papers"]), 2)
+        self.assertEqual(len([url for url in self.requests if "/api/query" in url]), 1)
+        self.assertEqual(self.manifest(PAIR)["discovery_status"], "found")
+        self.assertEqual(self.manifest(second)["discovery_status"], "found")
+        self.assertEqual(len(self.manifest(second)["versions"]), 2)
+
+    def test_optional_batch_discovery_queries_missing_id_individually(self):
+        second = (PAIR[0], "2502.08236")
+        self.outcomes = [Response(atom(PAIR[1]), "application/atom+xml"),
+                         Response(TEX), xml_response(second[1]), Response(TEX)]
+        result = self.run_pairs([PAIR, second], discovery_batch_size=20)
+        self.assertFalse(result["stopped"])
+        self.assertEqual(len([url for url in self.requests if "/api/query" in url]), 2)
+        self.assertEqual(self.manifest(PAIR)["discovery_status"], "found")
+        self.assertEqual(self.manifest(second)["discovery_status"], "found")
+
     def test_two_papers_keep_ownership_and_output_separate(self):
         self.outcomes = [xml_response(), Response(TEX), xml_response(OTHER[1]), Response(TEX)]
         report = self.run_pairs([PAIR, OTHER])
@@ -184,6 +213,60 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(paper["source"]["v1"]["action"], "skipped")
         self.assertEqual(paper["source"]["v1"]["status"], "success")
         self.assertEqual(self.snapshot(), before)
+
+    def test_force_discovery_refresh_rechecks_fresh_checkpoint_without_redownloading_source(self):
+        self.seed(versions=1, completed=True)
+        self.outcomes = [xml_response(versions=1)]
+        result = self.run_pairs(force_discovery_refresh=True)["papers"][0]
+        self.assertEqual(result["discovery"]["action"], "queried")
+        self.assertEqual(result["source"]["v1"]["action"], "skipped")
+        self.assertEqual(len(self.requests), 1)
+        self.assertIn("/api/query", self.requests[0])
+
+    def test_active_kaggle_mismatch_writes_referenced_evidence_before_fallback(self):
+        from src.kaggle_candidates import (
+            build_candidate_index,
+            file_sha256,
+            validate_discrepancy_checkpoint,
+        )
+        snapshot = self.root.parent / "snapshot.json"
+        snapshot.write_text(json.dumps({
+            "id": PAIR[1],
+            "versions": [
+                {"version": "v1", "created": "2025-02-11T00:00:00Z"},
+            ],
+            "authors_parsed": [["Fixture", "Author", ""]],
+        }) + "\n", encoding="utf-8")
+        index_root = self.root.parent / "indices"
+        index_root.mkdir()
+        built = build_candidate_index(snapshot, [PAIR], index_root / "index.json")
+        index_path = index_root / "index.json"
+        evidence_root = self.root.parent / "discrepancies"
+        checkpoint_root = self.root.parent / "discrepancy-checkpoints"
+        env = {
+            "M1_KAGGLE_CANDIDATE_INDEX": str(index_path),
+            "M1_KAGGLE_SNAPSHOT_PATH": str(snapshot),
+            "M1_KAGGLE_SNAPSHOT_SHA256": built["snapshot_sha256"],
+            "M1_KAGGLE_INDEX_SHA256": file_sha256(index_path),
+            "M1_KAGGLE_POLICY_VERSION": "m1-kaggle-reconcile-v2",
+            "M1_KAGGLE_EVIDENCE_ROOT": str(evidence_root),
+            "M1_KAGGLE_CHECKPOINT_ROOT": str(checkpoint_root),
+            "M1_KAGGLE_EVIDENCE_SESSION": "offline-session",
+        }
+        self.outcomes = [xml_response(versions=1), Response(TEX)]
+        with patch.dict("os.environ", env):
+            paper = run_selected(
+                [PAIR], self.root, run_id="active-kaggle-fixture", timeout=15,
+                max_attempts=1, revision_history=True,
+            )["papers"][0]
+        reference = paper["revision_history"]["comparison_evidence"]
+        checked = validate_discrepancy_checkpoint(reference["checkpoint_path"])
+        evidence = json.loads(Path(reference["artifact_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(paper["discovery"]["kaggle_comparison"], "discrepancy")
+        self.assertEqual(evidence["decision"], "use_arxiv_latest")
+        self.assertEqual(evidence["kaggle"]["snapshot_sha256"], built["snapshot_sha256"])
+        self.assertEqual(evidence["kaggle"]["index_sha256"], env["M1_KAGGLE_INDEX_SHA256"])
+        self.assertEqual(checked["sha256"], reference["sha256"])
 
     def test_resume_only_downloads_pending_versions(self):
         self.seed(versions=3, completed=True)

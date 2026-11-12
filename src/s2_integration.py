@@ -68,7 +68,7 @@ def metadata_result(result, identifier):
     _require(isinstance(result.get("status"), str) and result["status"] in {
         "found", "not_found", "rate_limited", "http_error", "timeout", "invalid_response",
     }, "metadata_status")
-    # A reused limiter can refuse admission before a new transport call.
+    # Bộ giới hạn dùng lại có thể từ chối trước khi phát sinh request mới.
     zero_cooldown = (result.get("attempts") == 0
                      and result.get("error") == "cooldown_wait_budget_exceeded"
                      and result.get("status") in {"rate_limited", "http_error"})
@@ -125,7 +125,7 @@ def references_evidence(value, identifier, *, for_resume=False):
     _safe(value)
     _require(isinstance(value, dict) and value.get("arxiv_id") == identifier
              and value.get("contract_version") == 2, "reference_identity")
-    # Storage readers already validate shape. This also checks fresh responses.
+    # Bộ đọc Storage đã kiểm tra cấu trúc; bước này cũng kiểm tra response vừa nhận.
     from src.storage import CorpusStorage
     validator = object.__new__(CorpusStorage)
     validator.paper_path = lambda *_: None

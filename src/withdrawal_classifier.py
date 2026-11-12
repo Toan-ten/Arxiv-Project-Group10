@@ -68,7 +68,7 @@ def classify_version_outcome(
     now_iso = datetime.now(timezone.utc).isoformat()
     version_clean = version if version.startswith("v") else f"v{version}"
 
-    # Rule 1: HTTP 200 checks
+    # Quy tắc 1: kiểm tra HTTP 200.
     if http_status == 200:
         c_type = (content_type or "").lower().split(";", 1)[0].strip()
         if c_type == "application/pdf" or not has_tex_files:
@@ -91,7 +91,7 @@ def classify_version_outcome(
             "details": {"content_type": content_type, "files": file_list or []},
         }
 
-    # Rule 3: HTTP 429 Rate limiting (Never terminal no-source)
+    # Quy tắc 3: HTTP 429 do giới hạn tốc độ (không phải trạng thái kết thúc không có source).
     if http_status == 429:
         return {
             "classification": "rate_limited",
@@ -103,7 +103,7 @@ def classify_version_outcome(
             "details": {"error_message": error_message},
         }
 
-    # Rule 4: HTTP 5xx / timeout / network blips
+    # Quy tắc 4: HTTP 5xx, timeout hoặc lỗi mạng nhất thời.
     if (http_status is not None and http_status >= 500) or (
         error_message
         and any(x in error_message.lower() for x in ["timeout", "connection", "reset", "503", "502", "504"])
@@ -118,11 +118,11 @@ def classify_version_outcome(
             "details": {"error_message": error_message},
         }
 
-    # Rule 2: HTTP 404 Evidence-based resolution
+    # Quy tắc 2: xác định HTTP 404 dựa trên bằng chứng.
     if http_status == 404:
         meta = discovery_metadata or {}
 
-        # Evidence Source 1: Check if metadata explicitly flags withdrawal
+        # Nguồn bằng chứng 1: kiểm tra metadata có đánh dấu rút bài tường minh không.
         is_withdrawn = bool(meta.get("is_withdrawn"))
         comments = str(meta.get("comments") or "")
         title = str(meta.get("title") or "")
@@ -157,7 +157,7 @@ def classify_version_outcome(
                 },
             }
 
-        # Evidence Source 2: Check if version is known not to exist
+        # Nguồn bằng chứng 2: kiểm tra phiên bản đã được xác nhận là không tồn tại chưa.
         version_ids = meta.get("version_ids") or []
         latest_id = meta.get("latest_version_id")
         if version_ids:
@@ -173,7 +173,7 @@ def classify_version_outcome(
                     "details": {"version_ids": version_ids, "latest_version_id": latest_id},
                 }
 
-        # Evidence Source 3: Unverified 404 (insufficient metadata evidence to claim withdrawal)
+        # Nguồn bằng chứng 3: HTTP 404 chưa xác minh (metadata chưa đủ để kết luận bài bị rút).
         return {
             "classification": "http_error_404_unverified",
             "is_terminal": False,
@@ -184,7 +184,7 @@ def classify_version_outcome(
             "details": {"error_message": error_message},
         }
 
-    # Default fallback for unclassified errors
+    # Phương án mặc định cho lỗi chưa phân loại.
     return {
         "classification": "permanent_error",
         "is_terminal": False,

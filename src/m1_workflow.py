@@ -481,7 +481,9 @@ def _run_m1_member_monolithic(
                     "malformed_lines": index_data["diagnostics"].get("malformed_lines"),
                     "reused": index_observation["reused"],
                     "index_elapsed_seconds": time.perf_counter() - index_started,
+                    "snapshot_precheck_seconds": index_observation.get("snapshot_precheck_seconds"),
                     "snapshot_checksum_seconds": None if index_observation["reused"] else index_data.get("checksum_seconds"),
+                    "snapshot_checksum_in_scan": index_data.get("checksum_in_scan", False),
                     "snapshot_scan_seconds": None if index_observation["reused"] else index_data.get("scan_seconds"),
                     "snapshot_sha256": kaggle_evidence.get("snapshot_sha256"),
                 }
@@ -904,6 +906,29 @@ def _run_m1_member_monolithic(
             session_id=session_id,
             configuration={"run_scope": scope, "mssv": mssv},
         )
+        storage_size_metrics = {
+            "status": "complete" if all(
+                type(size) is int and size >= 0
+                for size in (
+                    size_measurement.get("corpus_size_bytes"),
+                    size_measurement.get("archive_size_bytes"),
+                    size_measurement.get("export_size_bytes"),
+                )
+            ) else "incomplete",
+            "corpus_bytes": size_measurement.get("corpus_size_bytes"),
+            "source_archives_bytes": size_measurement.get("archive_size_bytes"),
+            "official_export_bytes": size_measurement.get("export_size_bytes"),
+            "final_output_storage_bytes": (
+                size_measurement.get("archive_size_bytes")
+                + size_measurement.get("export_size_bytes")
+                if type(size_measurement.get("archive_size_bytes")) is int
+                and type(size_measurement.get("export_size_bytes")) is int else None
+            ),
+            "final_output_scope": (
+                "selected compressed source archives plus official export directory; "
+                "local working corpus is reported separately"
+            ),
+        }
 
         envelope = _close_session(
             envelope_path,
@@ -937,6 +962,7 @@ def _run_m1_member_monolithic(
                 envelopes.append({})
         benchmark_summary = summarize_workflow(observations, required, session_envelopes=envelopes)
         from src.session_evidence import summarize_discovery_timings, summarize_paper_timings
+        assigned_ids = [aid for _member, aid in all_pairs]
         found_ids = None
         if data_complete:
             try:
@@ -945,6 +971,13 @@ def _run_m1_member_monolithic(
             except Exception:
                 found_ids = None
         benchmark_summary["paper_timings"] = summarize_paper_timings(observations, found_ids)
+        benchmark_summary["assigned_paper_timings"] = summarize_paper_timings(
+            observations, assigned_ids
+        )
+        benchmark_summary["assigned_paper_count"] = len(assigned_ids)
+        benchmark_summary["average_assigned_paper_seconds"] = benchmark_summary[
+            "assigned_paper_timings"
+        ].get("average_seconds")
         benchmark_summary["discovery_timings"] = summarize_discovery_timings(
             observations, [aid for _, aid in all_pairs] if data_complete else None
         )
@@ -968,7 +1001,7 @@ def _run_m1_member_monolithic(
                  "cpu_count": os.cpu_count(), "accelerator": "CPU", "commit": commit},
                 sort_keys=True,
             ).encode()).hexdigest(),
-            measurement_protocol="m1-colab-stage-v3; 10h soft budget; retries and waits included",
+            measurement_protocol="m1-colab-stage-v4; 10h soft budget; retries and waits included; host RAM sampled",
             discovery_arm="kaggle" if index_path else "arxiv_only",
             snapshot_source=kaggle_evidence.get("source"),
             snapshot_sha256=kaggle_evidence.get("snapshot_sha256"),
@@ -977,6 +1010,17 @@ def _run_m1_member_monolithic(
             corpus_size_scope="tệp thường trong corpus local sau kiểm toán; bỏ qua symbolic link",
             archive_size_bytes=size_measurement.get("archive_size_bytes"),
             export_size_bytes=size_measurement.get("export_size_bytes"),
+            final_output_storage_bytes=storage_size_metrics["final_output_storage_bytes"],
+            final_output_storage_scope=(
+                "selected compressed source archives plus official export directory; "
+                "local working corpus is reported separately"
+            ),
+            storage_size_metrics=storage_size_metrics,
+            resource_measurement_scope=(
+                "Crawler process-tree RSS and host-wide used RAM are sampled separately; "
+                "disk is sampled logical regular-file bytes under disjoint configured roots. "
+                "Sampled peaks may miss short-lived spikes."
+            ),
             m1_data_complete=data_complete,
             audit_reconciled=reconciled,
             integrity_failed=integrity_failed,
@@ -989,8 +1033,11 @@ def _run_m1_member_monolithic(
                 and not handoff_issues and export_error is None and export_result is not None
                 and campaign.get("starting_state_empty") is True
                 and data_signature is not None
-                and benchmark_summary["paper_timings"]["status"] == "complete"
+                and benchmark_summary["assigned_paper_timings"]["status"] == "complete"
                 and benchmark_summary["discovery_timings"]["status"] == "complete"
+                and benchmark_summary.get("system_ram_status") == "collected"
+                and benchmark_summary.get("resource_scope_status") == "collected"
+                and storage_size_metrics["status"] == "complete"
             ),
         )
         benchmark_path = runner.reports_dir / f"benchmark_observed_{campaign['campaign_id']}_{session_id}.json"
@@ -1112,9 +1159,9 @@ def _export_datasets(runner: FastProductionRunner, pairs: list[tuple[str, str]],
     )
 
 
-# Public entry points use independent, fingerprinted phase checkpoints. The
-# former combined implementation stays private for reproducible comparison of
-# old audit logs; operational callers use the sequential compatibility wrapper.
+# Các điểm vào công khai dùng điểm khôi phục riêng theo từng pha, có dấu vân tay. Bản
+# triển khai gộp cũ được giữ ở phạm vi riêng để có thể so sánh lại
+# nhật ký kiểm toán cũ; bên gọi vận hành dùng wrapper tương thích chạy tuần tự.
 from src.m1_phases import (  # noqa: E402
     build_member_selection,
     run_m1_arxiv_member,

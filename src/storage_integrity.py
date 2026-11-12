@@ -37,7 +37,7 @@ from src.storage import (
 class IntegrityCode:
     GENERIC = "GENERIC"
 
-    # Version format & identity
+    # Định dạng phiên bản và định danh
     INVALID_VERSION_NAME = "INVALID_VERSION_NAME"
     VERSION_ID_MISMATCH = "VERSION_ID_MISMATCH"
     UNKNOWN_VERSION_STATUS = "UNKNOWN_VERSION_STATUS"
@@ -45,7 +45,7 @@ class IntegrityCode:
     MISSING_COMPLETED_AT = "MISSING_COMPLETED_AT"
     WITHDRAWAL_EVIDENCE_INVALID = "WITHDRAWAL_EVIDENCE_INVALID"
 
-    # Path safety & filesystem
+    # An toàn đường dẫn và hệ thống tệp
     PATH_SAFETY_VIOLATION = "PATH_SAFETY_VIOLATION"
     SYMLINK_VERSION_DIR = "SYMLINK_VERSION_DIR"
     SYMLINK_SUBDIR = "SYMLINK_SUBDIR"
@@ -55,7 +55,7 @@ class IntegrityCode:
     FILESYSTEM_TRAVERSAL_ERROR = "FILESYSTEM_TRAVERSAL_ERROR"
     FILESYSTEM_ERROR = "FILESYSTEM_ERROR"
 
-    # Source files & directories
+    # Tệp và thư mục mã nguồn
     MISSING_SOURCE_DIR = "MISSING_SOURCE_DIR"
     NON_DIR_SOURCE_PATH = "NON_DIR_SOURCE_PATH"
     MISSING_FILES_LIST = "MISSING_FILES_LIST"
@@ -67,7 +67,7 @@ class IntegrityCode:
     UNEXPECTED_VERSION_DIR = "UNEXPECTED_VERSION_DIR"
     NON_BIB_IN_NO_TEX = "NON_BIB_IN_NO_TEX"
 
-    # Checksums & byte counts
+    # Mã kiểm tra và số byte
     FILE_CHECKSUMS_NOT_DICT = "FILE_CHECKSUMS_NOT_DICT"
     MALFORMED_CHECKSUM = "MALFORMED_CHECKSUM"
     MISSING_CHECKSUM_ENTRIES = "MISSING_CHECKSUM_ENTRIES"
@@ -80,7 +80,7 @@ class IntegrityCode:
     NONZERO_KEPT_BYTES_EMPTY = "NONZERO_KEPT_BYTES_EMPTY"
     KEPT_BYTES_MISMATCH = "KEPT_BYTES_MISMATCH"
 
-    # Checkpoints & schemas
+    # Điểm khôi phục và schema
     INVALID_ARXIV_ID = "INVALID_ARXIV_ID"
     MISSING_PAPER_DIR = "MISSING_PAPER_DIR"
     MISSING_MANIFEST = "MISSING_MANIFEST"
@@ -94,12 +94,12 @@ class IntegrityCode:
     REFERENCES_VALIDATION_FAILED = "REFERENCES_VALIDATION_FAILED"
     REFERENCES_UNPARSEABLE = "REFERENCES_UNPARSEABLE"
 
-    # Negative discovery
+    # Discovery âm
     NOT_FOUND_HAS_VERSIONS = "NOT_FOUND_HAS_VERSIONS"
     NOT_FOUND_VERSION_DIR_EXISTS = "NOT_FOUND_VERSION_DIR_EXISTS"
     UNMANAGED_PAPER_ENTRY = "UNMANAGED_PAPER_ENTRY"
 
-    # Cross-file consistency
+    # Tính nhất quán giữa các tệp
     CROSS_FILE_METADATA_STATUS_MISMATCH = "CROSS_FILE_METADATA_STATUS_MISMATCH"
     CROSS_FILE_VERSION_STATUS_MISMATCH = "CROSS_FILE_VERSION_STATUS_MISMATCH"
     CROSS_FILE_VERSIONS_MISMATCH = "CROSS_FILE_VERSIONS_MISMATCH"
@@ -109,7 +109,7 @@ class IntegrityCode:
 
 
 INTEGRITY_FAILURE_CODES = {
-    # Checksums & metrics
+    # Mã kiểm tra và số liệu
     IntegrityCode.CHECKSUM_MISMATCH,
     IntegrityCode.MALFORMED_CHECKSUM,
     IntegrityCode.FILE_CHECKSUMS_NOT_DICT,
@@ -124,7 +124,7 @@ INTEGRITY_FAILURE_CODES = {
     IntegrityCode.MISSING_COMPLETED_AT,
     IntegrityCode.WITHDRAWAL_EVIDENCE_INVALID,
 
-    # Path safety & symlinks
+    # An toàn đường dẫn và symlink
     IntegrityCode.PATH_SAFETY_VIOLATION,
     IntegrityCode.SYMLINK_VERSION_DIR,
     IntegrityCode.SYMLINK_SUBDIR,
@@ -134,7 +134,7 @@ INTEGRITY_FAILURE_CODES = {
     IntegrityCode.FILESYSTEM_TRAVERSAL_ERROR,
     IntegrityCode.FILESYSTEM_ERROR,
 
-    # Source files & versions
+    # Tệp mã nguồn và phiên bản
     IntegrityCode.INVALID_VERSION_NAME,
     IntegrityCode.VERSION_ID_MISMATCH,
     IntegrityCode.UNKNOWN_VERSION_STATUS,
@@ -150,7 +150,7 @@ INTEGRITY_FAILURE_CODES = {
     IntegrityCode.UNEXPECTED_VERSION_DIR,
     IntegrityCode.NON_BIB_IN_NO_TEX,
 
-    # Schemas & files
+    # Schema và tệp
     IntegrityCode.MANIFEST_CORRUPTED,
     IntegrityCode.MANIFEST_SCHEMA_VIOLATION,
     IntegrityCode.MANIFEST_UNPARSEABLE,
@@ -160,12 +160,12 @@ INTEGRITY_FAILURE_CODES = {
     IntegrityCode.REFERENCES_UNPARSEABLE,
     IntegrityCode.MISSING_MANIFEST,
 
-    # Negative discovery
+    # Discovery âm
     IntegrityCode.NOT_FOUND_HAS_VERSIONS,
     IntegrityCode.NOT_FOUND_VERSION_DIR_EXISTS,
     IntegrityCode.UNMANAGED_PAPER_ENTRY,
 
-    # References completeness claims
+    # Tuyên bố về độ đầy đủ của references
     IntegrityCode.REFERENCES_COVERAGE_INCOMPLETE,
     IntegrityCode.REFERENCES_CONTINUATION_NOT_NULL,
 }
@@ -242,7 +242,7 @@ class PaperIntegrityResult:
             if v.severity == "warning":
                 continue
 
-            # Fail-closed check on invalid/malformed severity metadata
+            # Từ chối an toàn nếu metadata mức độ lỗi không hợp lệ hoặc sai định dạng.
             if v.severity != "error":
                 return True
 
@@ -283,9 +283,9 @@ class PaperIntegrityResult:
                     return True
                 continue
 
-            # Fail-closed fallback: Any unrecognized/unknown code or GENERIC violation
-            # with severity="error" MUST be treated as an integrity failure so that it cannot
-            # silently bypass integrity checks.
+            # Phương án từ chối an toàn: mọi mã không nhận diện được hoặc vi phạm GENERIC
+            # có severity="error" BẮT BUỘC phải được xem là lỗi toàn vẹn để không thể
+            # âm thầm vượt qua bước kiểm tra toàn vẹn.
             return True
 
         return False
@@ -425,7 +425,7 @@ def _open_and_hash_source_file(
         if fstat_res.st_nlink != 1:
             return None, None, f"Source file has multiple hard links ({fstat_res.st_nlink})"
 
-        # Fallback check for platforms without O_NOFOLLOW
+        # Kiểm tra dự phòng cho nền tảng không có O_NOFOLLOW.
         if not has_nofollow:
             try:
                 lstat_res = os.lstat(fpath)
@@ -467,7 +467,7 @@ def audit_version_integrity(
     """Verify filesystem source files, checksums, and invariants for a single version."""
     violations: List[IntegrityViolation] = []
 
-    # R12: Validate version name format strictly using _version() before creating or checking paths
+    # R12: kiểm tra chặt định dạng tên phiên bản bằng _version() trước khi tạo hoặc kiểm tra đường dẫn.
     try:
         _version(version_name)
     except (StorageError, Exception) as exc:
@@ -520,7 +520,7 @@ def audit_version_integrity(
 
     version_dir = paper_dir / version_name
 
-    # Check version_dir existence and type safely using _inspect_path
+    # Kiểm tra an toàn sự tồn tại và kiểu của version_dir bằng _inspect_path.
     try:
         v_link, v_is_d, _ = _inspect_path(version_dir)
         v_exists = True
@@ -555,7 +555,7 @@ def audit_version_integrity(
         )
         return violations
 
-    # Reject version_dir if it is a symlink (R5, R12: check symlink before resolve to prevent symlink loops)
+    # Từ chối version_dir nếu là symlink (R5, R12: kiểm tra symlink trước resolve để tránh vòng lặp).
     if v_link:
         violations.append(
             IntegrityViolation(
@@ -570,7 +570,7 @@ def audit_version_integrity(
         )
         return violations
 
-    # R12: Check containment unconditionally, regardless of existence on disk (catch both OSError and RuntimeError)
+    # R12: luôn kiểm tra đường dẫn nằm trong phạm vi, dù có tồn tại trên đĩa hay không (bắt cả OSError và RuntimeError).
     try:
         if not version_dir.resolve().is_relative_to(paper_dir.resolve()):
             violations.append(
@@ -648,7 +648,7 @@ def audit_version_integrity(
             )
             return violations
 
-        # Verify files and checksum metadata in manifest (R3)
+        # Xác minh tệp và metadata checksum trong manifest (R3).
         raw_files = version_record.get("files")
         if not isinstance(raw_files, list) or not raw_files:
             violations.append(
@@ -681,7 +681,7 @@ def audit_version_integrity(
         else:
             expected_checksums = raw_checksums
 
-        # Validate checksum format for each entry (R3)
+        # Kiểm tra định dạng checksum của từng mục (R3).
         for fname, sha in expected_checksums.items():
             if not isinstance(sha, str) or not SHA256_HEX_RE.match(sha):
                 violations.append(
@@ -698,7 +698,7 @@ def audit_version_integrity(
                     )
                 )
 
-        # 1:1 match between expected files and checksum keys (R3)
+        # Đảm bảo tệp dự kiến khớp một-một với khóa checksum (R3).
         missing_checksums = expected_files - set(expected_checksums.keys())
         if missing_checksums:
             violations.append(
@@ -750,7 +750,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Non-following directory traversal with fail-closed onerror (R5, R8)
+        # Duyệt thư mục không theo symlink; từ chối an toàn khi gặp lỗi (R5, R8).
         try:
             for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror):
                 root_path = Path(root)
@@ -786,7 +786,7 @@ def audit_version_integrity(
                     dirs.clear()
                     continue
 
-                # Prune and report symlinked subdirectories (do not enter)
+                # Loại khỏi lượt quét và báo cáo thư mục con là symlink; không đi vào.
                 symlink_dirs = []
                 for d in list(dirs):
                     dpath = root_path / d
@@ -857,7 +857,7 @@ def audit_version_integrity(
                         actual_files.add(rel_posix)
                         continue
 
-                    # Reject symlink files immediately (do not follow or open) (R5)
+                    # Từ chối ngay tệp symlink; không theo liên kết hoặc mở tệp (R5).
                     if f_link:
                         violations.append(
                             IntegrityViolation(
@@ -873,7 +873,7 @@ def audit_version_integrity(
                         actual_files.add(rel_posix)
                         continue
 
-                    # Containment check within version_dir (R5)
+                    # Kiểm tra đường dẫn vẫn nằm trong version_dir (R5).
                     try:
                         if not fpath.resolve().is_relative_to(version_dir.resolve()):
                             violations.append(
@@ -921,7 +921,7 @@ def audit_version_integrity(
                     if suffix == ".tex":
                         has_tex = True
 
-                    # Descriptor-based safe open and hashing (R9)
+                    # Mở tệp và tính hash an toàn thông qua descriptor (R9).
                     sha, fstat_res, err_msg = _open_and_hash_source_file(fpath)
                     if err_msg or fstat_res is None or sha is None:
                         violations.append(
@@ -981,7 +981,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Check missing files on disk (R3)
+        # Kiểm tra tệp bị thiếu trên đĩa (R3).
         missing_files = expected_files - actual_files
         if missing_files:
             violations.append(
@@ -997,7 +997,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Check unmanaged extra files on disk (R3)
+        # Kiểm tra tệp thừa ngoài quản lý trên đĩa (R3).
         extra_files = actual_files - expected_files
         if extra_files:
             violations.append(
@@ -1013,7 +1013,7 @@ def audit_version_integrity(
                 )
             )
 
-        # Check checksums for present expected files (R3)
+        # Kiểm tra checksum của các tệp dự kiến đang có (R3).
         for fname in sorted(expected_files & actual_files):
             if fname in expected_checksums and fname in actual_checksums:
                 exp_sha = expected_checksums[fname]
@@ -1033,7 +1033,7 @@ def audit_version_integrity(
                         )
                     )
 
-        # Check kept_bytes (R7)
+        # Kiểm tra kept_bytes (R7).
         if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
             violations.append(
                 IntegrityViolation(
@@ -1104,12 +1104,12 @@ def audit_version_integrity(
             )
 
     elif st == "no_tex_source":
-        # Fully validate no_tex_source (R4, R7, R8, R9)
+        # Xác thực đầy đủ no_tex_source (R4, R7, R8, R9).
         raw_files = version_record.get("files") or []
         expected_files = set(raw_files)
 
         if not expected_files:
-            # Empty no_tex_source: directory vN/ must not exist on disk
+            # no_tex_source rỗng: thư mục vN/ không được tồn tại trên đĩa.
             if v_exists:
                 violations.append(
                     IntegrityViolation(
@@ -1136,7 +1136,7 @@ def audit_version_integrity(
                         code=IntegrityCode.UNEXPECTED_CHECKSUM_ENTRIES,
                     )
                 )
-            # R7: Enforce exact integer 0 for empty no_tex_source
+            # R7: yêu cầu giá trị nguyên 0 chính xác khi no_tex_source rỗng.
             if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
                 violations.append(
                     IntegrityViolation(
@@ -1166,7 +1166,7 @@ def audit_version_integrity(
                         )
                     )
         else:
-            # Non-empty no_tex_source (bib-only): version directory must exist and be a directory
+            # no_tex_source không rỗng (chỉ có bib): thư mục phiên bản phải tồn tại và đúng kiểu thư mục.
             if not v_exists:
                 violations.append(
                     IntegrityViolation(
@@ -1195,7 +1195,7 @@ def audit_version_integrity(
                 )
                 return violations
 
-            # All files in manifest must strictly be .bib or .bbl files
+            # Mọi tệp trong manifest bắt buộc phải có đuôi .bib hoặc .bbl.
             for f in expected_files:
                 if Path(f).suffix.lower() not in {".bib", ".bbl"}:
                     violations.append(
@@ -1227,7 +1227,7 @@ def audit_version_integrity(
             else:
                 expected_checksums = raw_checksums
 
-            # Validate checksum format
+            # Kiểm tra định dạng checksum.
             for fname, sha in expected_checksums.items():
                 if not isinstance(sha, str) or not SHA256_HEX_RE.match(sha):
                     violations.append(
@@ -1294,7 +1294,7 @@ def audit_version_integrity(
                     )
                 )
 
-            # Non-following traversal of version_dir with fail-closed onerror (R4, R5, R8)
+            # Duyệt version_dir không theo symlink; từ chối an toàn khi gặp lỗi (R4, R5, R8).
             try:
                 for root, dirs, files in os.walk(version_dir, followlinks=False, onerror=walk_onerror_bib):
                     root_path = Path(root)
@@ -1400,7 +1400,7 @@ def audit_version_integrity(
                             actual_files.add(rel_posix)
                             continue
 
-                        # Reject symlink files immediately (do not follow or open) (R5)
+                        # Từ chối ngay tệp symlink; không theo liên kết hoặc mở tệp (R5).
                         if f_link:
                             violations.append(
                                 IntegrityViolation(
@@ -1460,7 +1460,7 @@ def audit_version_integrity(
                                 )
                             )
 
-                        # Descriptor-based safe open and hashing (R9)
+                        # Mở tệp và tính hash an toàn thông qua descriptor (R9).
                         sha, fstat_res, err_msg = _open_and_hash_source_file(fpath)
                         if err_msg or fstat_res is None or sha is None:
                             violations.append(
@@ -1555,7 +1555,7 @@ def audit_version_integrity(
                             )
                         )
 
-            # Check kept_bytes (R7)
+            # Kiểm tra kept_bytes (R7).
             if "kept_bytes" not in version_record or version_record["kept_bytes"] is None:
                 violations.append(
                     IntegrityViolation(
@@ -1626,7 +1626,7 @@ def audit_version_integrity(
                 )
 
     elif st == "withdrawn_version":
-        # Withdrawn version: empty record, no files on disk, kept_bytes=0, completed_at required
+        # Phiên bản bị rút: bản ghi rỗng, không có tệp trên đĩa, kept_bytes=0 và bắt buộc có completed_at.
         evidence = version_record.get("withdrawal_evidence")
         detail = evidence.get("details") if isinstance(evidence, dict) else None
         try:
@@ -1735,7 +1735,7 @@ def audit_version_integrity(
             )
 
     else:
-        # Non-terminal version: version directory should NOT exist on disk
+        # Phiên bản chưa kết thúc: thư mục phiên bản KHÔNG được tồn tại trên đĩa.
         if v_exists:
             violations.append(
                 IntegrityViolation(
@@ -1786,7 +1786,7 @@ def audit_paper_integrity(
 
     paper_dir = store.root / folder_key
 
-    # 1. Paper directory presence
+    # 1. Kiểm tra sự tồn tại của thư mục bài báo.
     try:
         p_link, p_dir_is_d, _ = _inspect_path(paper_dir)
     except FileNotFoundError:
@@ -1847,7 +1847,7 @@ def audit_paper_integrity(
             violations=violations,
         )
 
-    # 2. Path safety check (symlinks, junctions)
+    # 2. Kiểm tra an toàn đường dẫn (symlink, junction).
     if p_link:
         violations.append(
             IntegrityViolation(
@@ -1909,7 +1909,7 @@ def audit_paper_integrity(
             violations=violations,
         )
 
-    # 3. Read and validate core JSON checkpoints
+    # 3. Đọc và xác thực các điểm khôi phục JSON chính.
     manifest: Optional[Dict[str, Any]] = None
     metadata: Optional[Dict[str, Any]] = None
     references: Optional[Dict[str, Any]] = None
@@ -1918,7 +1918,7 @@ def audit_paper_integrity(
     metadata_path = paper_dir / "metadata.json"
     references_path = paper_dir / "references.json"
 
-    # Validate manifest.json
+    # Xác thực manifest.json.
     try:
         m_link, _, m_file = _inspect_path(manifest_path)
     except FileNotFoundError:
@@ -2014,7 +2014,7 @@ def audit_paper_integrity(
                     )
                 )
 
-    # Validate metadata.json
+    # Xác thực metadata.json.
     disc_status = manifest.get("discovery_status") if manifest is not None else None
     try:
         meta_link, _, meta_file = _inspect_path(metadata_path)
@@ -2101,7 +2101,7 @@ def audit_paper_integrity(
                     )
                 )
 
-    # Validate references.json
+    # Xác thực references.json.
     try:
         ref_link, _, ref_file = _inspect_path(references_path)
     except FileNotFoundError:
@@ -2187,7 +2187,7 @@ def audit_paper_integrity(
                     )
                 )
 
-    # If manifest failed to load, determine initial failure status
+    # Nếu không tải được manifest, xác định trạng thái lỗi ban đầu.
     if manifest is None:
         has_corrupt = any(v.category == "corrupted" for v in violations)
         has_missing = any(v.category == "missing" for v in violations)
@@ -2202,13 +2202,13 @@ def audit_paper_integrity(
             warnings=warnings,
         )
 
-    # 4. Cross-file consistency checks between manifest, metadata, references
+    # 4. Kiểm tra tính nhất quán giữa manifest, metadata và references.
     man_status = manifest.get("status")
     ver_status = manifest.get("version_status")
     meta_status = metadata.get("status") if metadata is not None else None
     ref_status = references.get("status") if references is not None else None
 
-    # Check negative discovery filesystem invariants (FIND-REP-C)
+    # Kiểm tra bất biến hệ thống tệp cho discovery âm (FIND-REP-C).
     if disc_status == "not_found":
         manifest_versions = manifest.get("versions")
         if not isinstance(manifest_versions, dict) or len(manifest_versions) > 0:
@@ -2317,7 +2317,7 @@ def audit_paper_integrity(
                 )
             )
 
-        # Check version coverage synchronization
+        # Kiểm tra đồng bộ độ bao phủ phiên bản.
         manifest_versions = manifest.get("versions") or {}
         metadata_versions = [v.get("version") for v in (metadata.get("versions") or []) if isinstance(v, dict)]
 
@@ -2334,7 +2334,7 @@ def audit_paper_integrity(
                 )
             )
 
-    # 5. References coverage semantics (distinguish null vs empty vs complete)
+    # 5. Kiểm tra ngữ nghĩa độ bao phủ references (phân biệt null, rỗng và hoàn tất).
     cov_complete = False
     if references is not None:
         if manifest.get("references_status") != ref_status:
@@ -2380,7 +2380,7 @@ def audit_paper_integrity(
                     )
                 )
 
-    # 6. Audit source files for each version
+    # 6. Kiểm toán tệp mã nguồn của từng phiên bản.
     manifest_versions = manifest.get("versions") or {}
     all_versions_terminal = bool(manifest_versions)
     all_versions_verified = bool(manifest_versions)
@@ -2395,7 +2395,7 @@ def audit_paper_integrity(
         elif len(v_violations) > 0:
             all_versions_verified = False
 
-    # 7. Scan paper directory for extraneous / unmanaged files
+    # 7. Quét thư mục bài báo để tìm tệp thừa hoặc ngoài quản lý.
     allowed_paper_entries = {"manifest.json", "metadata.json", "references.json"}
     for v_name, v_rec in manifest_versions.items():
         if v_rec.get("status") == "success" or (v_rec.get("status") == "no_tex_source" and v_rec.get("files")):
@@ -2454,7 +2454,7 @@ def audit_paper_integrity(
             )
         )
 
-    # 8. Compute completeness flags
+    # 8. Tính các cờ hoàn tất.
     is_source_complete = (
         disc_status == "found"
         and ver_status == "resolved"
@@ -2472,7 +2472,7 @@ def audit_paper_integrity(
         and len(violations) == 0
     )
 
-    # 9. Determine overall paper integrity classification
+    # 9. Xác định phân loại toàn vẹn tổng thể của bài báo.
     if disc_status == "not_found":
         overall_status = "valid" if len(violations) == 0 else "invalid"
     elif any(v.category == "corrupted" for v in violations):
@@ -2666,7 +2666,7 @@ def reconcile_withdrawn_version_evidence(
             "reason": f"Manifest records non-empty source files or kept_bytes for version {clean_v}",
         }
 
-    # Pre-flight verify all other terminal versions (especially v1)
+    # Xác minh trước mọi phiên bản kết thúc khác (đặc biệt là v1).
     for other_v, other_rec in manifest["versions"].items():
         if other_v != clean_v and other_rec.get("status") in TERMINAL:
             try:
@@ -2674,7 +2674,7 @@ def reconcile_withdrawn_version_evidence(
             except IntegrityError as exc:
                 raise IntegrityError(f"Pre-flight verification failed for {other_v}: {exc}") from exc
 
-    # Resolve evidence
+    # Đối chiếu bằng chứng.
     if evidence is not None and isinstance(evidence, dict):
         evidence_meta = evidence
     else:
@@ -2726,8 +2726,8 @@ def reconcile_withdrawn_version_evidence(
             },
         }
 
-    # Apply
-    # Clean up empty destination directory if it exists
+    # Áp dụng.
+    # Dọn thư mục đích rỗng nếu nó tồn tại.
     if destination.exists():
         destination.rmdir()
 
@@ -2743,7 +2743,7 @@ def reconcile_withdrawn_version_evidence(
         kept_bytes=0,
     )
 
-    # Also update metadata if evidence provided comments/abstract that were missing
+    # Đồng thời cập nhật metadata nếu bằng chứng bổ sung comments/abstract còn thiếu.
     metadata = store.read_metadata(mssv, arxiv_id)
     arxiv_prov = (metadata.get("provenance", {}) or {}).get("arxiv")
     if arxiv_prov is not None and isinstance(arxiv_prov, dict):
@@ -2756,7 +2756,7 @@ def reconcile_withdrawn_version_evidence(
 
     manifest = store._commit(manifest)
 
-    # Post-apply verification of all versions (including v1 and clean_v)
+    # Xác minh sau khi áp dụng trên mọi phiên bản (gồm v1 và clean_v).
     for other_v, other_rec in manifest["versions"].items():
         if other_rec.get("status") in TERMINAL:
             store._verify_source(mssv, arxiv_id, other_v, other_rec)

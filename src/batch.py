@@ -113,7 +113,7 @@ def check_arxiv_cooldown(log_root):
                     server = arxiv_client._retry_deadline(raw, received)
                     fallback = None
                     if server is None:
-                        # Replay the recorded policy, never today's writer default.
+                        # Phát lại chính sách đã ghi, không dùng mặc định của bộ ghi hiện tại.
                         policy = value.get("arxiv_retry_429")
                         _require(isinstance(policy, dict))
                         fallback = policy["fallback_seconds"]
@@ -176,7 +176,7 @@ def _history(directory, batch_id, selection):
         raise BatchError("Cannot inspect attempt history") from exc
     for path in paths:
         if path.suffix != ".json":
-            continue  # Preserve temporary evidence from an abruptly killed writer.
+            continue  # Giữ bằng chứng tạm do tiến trình ghi bị dừng đột ngột để lại.
         value = _read(path)
         try:
             _require(re.fullmatch(r"[0-9a-f]{32}", path.stem))
@@ -214,6 +214,8 @@ def run_batch(
     versions=None, timeout=30.0, max_attempts=1,
     user_agent=arxiv_client.USER_AGENT, s2_config=None, revision_history=None,
     should_stop=None, on_progress: Callable[[str, dict], None] | None = None,
+    on_discovery_progress: Callable[[str, dict], None] | None = None,
+    bbl_artifact_dir=None, discovery_batch_size=1, force_discovery_refresh=False,
 ):
     """Run the first max_ids validated pairs, preserving input order.
 
@@ -223,7 +225,8 @@ def run_batch(
     revision_history=None enables history for a new batch and inherits an
     existing definition (missing flag means legacy/off). An explicit change
     requires a new batch_id; no old definition or log is rewritten. If supplied,
-    on_progress(event, summary) runs after each durable paper-boundary update.
+    on_progress(event, summary) runs after each durable paper-boundary update;
+    on_discovery_progress(event, detail) reports Atom request boundaries.
     """
     if (not isinstance(batch_id, str) or
             re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", batch_id) is None or
@@ -238,6 +241,12 @@ def run_batch(
         raise BatchError("revision_history must be bool or None")
     if on_progress is not None and not callable(on_progress):
         raise BatchError("on_progress must be callable or None")
+    if on_discovery_progress is not None and not callable(on_discovery_progress):
+        raise BatchError("on_discovery_progress must be callable or None")
+    if type(discovery_batch_size) is not int or not 1 <= discovery_batch_size <= 20:
+        raise BatchError("discovery_batch_size must be from 1 to 20")
+    if type(force_discovery_refresh) is not bool:
+        raise BatchError("force_discovery_refresh must be bool")
     chosen_versions = pipeline._version_selection(versions)
     s2_config = s2_integration.configuration(s2_config)
     store = CorpusStorage(corpus_root)
@@ -266,6 +275,10 @@ def run_batch(
     )
     if revision_history:
         definition["revision_history"] = True
+    if discovery_batch_size > 1:
+        definition["discovery_batch_size"] = discovery_batch_size
+    if force_discovery_refresh:
+        definition["force_discovery_refresh"] = True
     if s2_config is not None:
         definition["s2"] = s2_config
     if directory.exists():
@@ -353,21 +366,25 @@ def run_batch(
 
     def record_http(event):
         value["arxiv_http_requests"].append(copy.deepcopy(event))
-        persist()  # Durable before returning to Pipeline or sending another HTTP.
+        persist()  # Ghi bền vững trước khi trả về Pipeline hoặc gửi request HTTP khác.
 
-    persist()  # The attempt intent is durable before any HTTP or corpus write.
+    persist()  # Ý định của lượt chạy được ghi bền vững trước mọi request HTTP hoặc thao tác ghi corpus.
     try:
         with http_metrics.collect(metrics), arxiv_client.record_requests(record_http):
             summary = pipeline.run_selected(
                 selection, corpus, run_id=run_id, timeout=timeout,
                 max_attempts=max_attempts, user_agent=user_agent,
                 versions=definition["versions"], on_progress=progress,
+                on_discovery_progress=on_discovery_progress,
                 revision_history=revision_history,
+                bbl_artifact_dir=bbl_artifact_dir,
+                discovery_batch_size=discovery_batch_size,
+                force_discovery_refresh=force_discovery_refresh,
                 should_stop=should_stop,
                 **({"s2_config": s2_config} if s2_config is not None else {}),
             )
     except BatchLogError:
-        raise  # Preserve the last durable snapshot; never continue/retry.
+        raise  # Giữ bản chụp bền vững gần nhất; không tiếp tục hoặc thử lại.
     except BaseException as exc:
         value["status"] = "interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "failed"
         value["stopped"] = True

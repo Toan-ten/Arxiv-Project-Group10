@@ -68,10 +68,10 @@ def _is_pid_alive(pid: int) -> bool:
     except OSError as err:
         if err.errno == errno.ESRCH:
             return False
-        # EPERM, EACCES, or any other OS error: fail-safe, assume alive
+        # EPERM, EACCES hoặc lỗi hệ điều hành khác: an toàn khi giả định tiến trình còn sống
         return True
     except Exception:
-        # Any unexpected error: fail-safe, assume alive
+        # Lỗi ngoài dự kiến: an toàn khi giả định tiến trình còn sống
         return True
 
 
@@ -95,14 +95,14 @@ def cleanup_orphaned_archive_tmp(
                 continue
             m = re.search(r"\.pid_(\d+)_", orphan.name)
             if not m:
-                # Unknown/unidentifiable PID: fail-safe, preserve
+                # PID không rõ hoặc không thể xác định: giữ lại để an toàn
                 continue
             try:
                 orphan_pid = int(m.group(1))
             except (ValueError, TypeError):
                 continue
             if orphan_pid <= 0 or _is_pid_alive(orphan_pid):
-                # Invalid PID, active process, or unconfirmed dead: do not delete
+                # PID không hợp lệ, tiến trình đang chạy hoặc chưa xác nhận đã dừng: không xóa
                 continue
             try:
                 orphan.unlink()
@@ -190,6 +190,7 @@ def audit_cohort_archive_payload(
 
             found_m1_complete = 0
             confirmed_not_found = 0
+            legacy_bbl_found = False
             included_ids: List[str] = []
             omitted: List[Dict[str, str]] = []
 
@@ -267,6 +268,57 @@ def audit_cohort_archive_payload(
                         checksums = v_data.get("file_checksums") or {}
                         v_files = v_data.get("files") or []
                         all_v_files = set(checksums.keys()) | set(v_files)
+                        bbl_policy = v_data.get("bbl_policy")
+                        if (bbl_policy is None
+                                and any(PurePosixPath(name).suffix.lower() == ".bbl"
+                                        for name in v_files)):
+                            legacy_bbl_found = True
+                        if bbl_policy is not None:
+                            if (not isinstance(bbl_policy, dict)
+                                    or bbl_policy.get("policy_version") != "bbl-exception-v1"
+                                    or bbl_policy.get("status") != "complete"
+                                    or not isinstance(bbl_policy.get("items"), list)):
+                                raise ValueError(f"Paper {aid} has an invalid BBL policy in {v_name}")
+                            decisions = bbl_policy["items"]
+                            decision_names = [
+                                item.get("bbl_path") for item in decisions if isinstance(item, dict)
+                            ]
+                            if (len(decision_names) != len(decisions)
+                                    or any(not isinstance(name, str) for name in decision_names)
+                                    or len(decision_names) != len(set(decision_names))):
+                                raise ValueError(f"Paper {aid} has invalid BBL decisions in {v_name}")
+                            retained_bbls = set()
+                            for item in decisions:
+                                name = item["bbl_path"]
+                                digest = item.get("bbl_sha256")
+                                if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                                    raise ValueError(f"Paper {aid} has an invalid BBL checksum in {v_name}")
+                                decision = item.get("status")
+                                if decision == "retained_conversion_failed":
+                                    retained_bbls.add(name)
+                                    if checksums.get(name) != digest or name not in v_files:
+                                        raise ValueError(f"Retained BBL checksum mismatch for {aid}/{v_name}/{name}")
+                                elif decision in {
+                                    "removed_bib_present", "removed_bibitem_in_tex", "converted_and_removed",
+                                }:
+                                    if name in all_v_files:
+                                        raise ValueError(f"Removed BBL remains in corpus: {aid}/{v_name}/{name}")
+                                    if not isinstance(item.get("source_evidence_path"), str):
+                                        raise ValueError(f"Missing BBL source evidence path for {aid}/{v_name}/{name}")
+                                    if decision == "converted_and_removed":
+                                        if (not isinstance(item.get("derived_bib_path"), str)
+                                                or not isinstance(item.get("derived_bib_sha256"), str)
+                                                or type(item.get("entry_count")) is not int
+                                                or item["entry_count"] < 1):
+                                            raise ValueError(f"Missing derived BibTeX evidence for {aid}/{v_name}/{name}")
+                                else:
+                                    raise ValueError(f"Unknown BBL decision for {aid}/{v_name}/{name}")
+                            actual_bbls = {
+                                name for name in v_files
+                                if PurePosixPath(name).suffix.lower() == ".bbl"
+                            }
+                            if retained_bbls != actual_bbls:
+                                raise ValueError(f"BBL policy does not account for corpus files in {aid}/{v_name}")
 
                         if v_st == "withdrawn_version":
                             has_any_withdrawn_version = True
@@ -325,7 +377,7 @@ def audit_cohort_archive_payload(
                         if not has_any_withdrawn_version:
                             raise ValueError(f"Paper {aid} status is 'complete_with_withdrawn' but no withdrawn_version found")
 
-                    # Verify no unmanaged files in paper directory
+                    # Xác minh thư mục bài báo không có tệp ngoài manifest.
                     for p_member in files_by_paper.get(folder_name, set()):
                         rel_to_paper = "/".join(p_member.parts[1:])
                         if rel_to_paper not in managed_files_for_paper:
@@ -370,6 +422,9 @@ def audit_cohort_archive_payload(
                 "omitted": omitted,
                 "omitted_count": len(omitted),
                 "is_cohort_complete": is_cohort_complete,
+                "bbl_policy_state": (
+                    "legacy_unverified" if legacy_bbl_found else "complete"
+                ),
             }
 
     except (tarfile.TarError, OSError, EOFError) as e:
@@ -395,6 +450,9 @@ class FastProductionRunner:
         self.logs_dir = self.drive_root / "logs"
         self.reports_dir = self.drive_root / "reports"
         self.archives_dir = self.drive_root / "archives"
+        self.bbl_artifact_dir = (
+            self.reports_dir / "derived_bibliography" / "bbl-exception-v1"
+        )
 
         if scratch_root is not None:
             self.scratch_dir = Path(scratch_root).resolve()
@@ -412,7 +470,9 @@ class FastProductionRunner:
         self.retry_429 = retry_429
         self.retry_wait_budget = float(retry_wait_budget)
         self.timeout = float(timeout)
-        self.store = CorpusStorage(self.corpus_dir)
+        self.store = CorpusStorage(
+            self.corpus_dir, bbl_artifact_root=self.bbl_artifact_dir,
+        )
 
     def _reset_recoverable_archive_conflicts(self, number: int) -> int:
         """Reset versions previously marked unsafe_archive due to duplicate non-TeX/non-Bib files."""
@@ -509,7 +569,7 @@ class FastProductionRunner:
             except Exception:
                 continue
 
-            # 3. Validate manifest schema and arXiv identity before trusting any status field (R10, R13)
+            # 3. Kiểm tra schema manifest và định danh arXiv trước khi tin cậy bất kỳ trường trạng thái nào (R10, R13).
             if not isinstance(m, dict):
                 continue
             try:
@@ -520,14 +580,14 @@ class FastProductionRunner:
             status = m.get("status")
             disc = m.get("discovery_status")
 
-            # 4. Negative terminal discovery: not_found (R10, R14)
+            # 4. Kết quả discovery âm đã kết thúc: not_found (R10, R14).
             if disc == "not_found":
                 if status != "not_found":
                     continue
                 versions = m.get("versions")
                 if not isinstance(versions, dict) or versions:
                     continue
-                # Verify no version directories exist on disk
+                # Xác minh trên đĩa không có thư mục phiên bản.
                 try:
                     has_version_dir = False
                     for p in paper_dir.iterdir():
@@ -547,7 +607,7 @@ class FastProductionRunner:
                 done += 1
                 continue
 
-            # 5. Resolved terminal versions: found (R10)
+            # 5. Các phiên bản đã xác định và kết thúc: found (R10).
             versions = m.get("versions")
             if disc == "found" and isinstance(versions, dict) and versions and m.get("version_status") == "resolved":
                 if not all(isinstance(v, dict) and v.get("status") in TERMINAL for v in versions.values()):
@@ -647,6 +707,8 @@ class FastProductionRunner:
         revision_history: bool,
         timeout: Optional[float] = None,
         s2_config: Optional[dict] = None,
+        discovery_batch_size: int = 1,
+        force_discovery_refresh: bool = False,
     ) -> Tuple[str, bool]:
         """Resolve a non-destructive batch_id and determine if it can safely resume."""
         from src import s2_integration
@@ -661,6 +723,10 @@ class FastProductionRunner:
             if saved_def.get("revision_history", False) != bool(revision_history):
                 return False
             if saved_def.get("timeout") != effective_timeout:
+                return False
+            if saved_def.get("discovery_batch_size", 1) != discovery_batch_size:
+                return False
+            if saved_def.get("force_discovery_refresh", False) != force_discovery_refresh:
                 return False
 
             try:
@@ -701,7 +767,8 @@ class FastProductionRunner:
             pass
 
         s2_flag = 1 if s2_config is not None else 0
-        variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}-s{s2_flag}"
+        refresh_flag = "-d1" if force_discovery_refresh else ""
+        variant_id = f"fast-arxiv-{number:04d}-a{max_attempts}-h{int(bool(revision_history))}-s{s2_flag}{refresh_flag}"
         variant_dir = self.logs_dir / variant_id
         variant_json = variant_dir / "batch.json"
         try:
@@ -713,7 +780,7 @@ class FastProductionRunner:
         except Exception:
             pass
 
-        # If variant_dir already exists but is incompatible, ensure we return a new non-colliding batch_id
+        # Nếu variant_dir đã tồn tại nhưng không tương thích, phải trả về batch_id mới không trùng.
         if variant_dir.exists():
             counter = 1
             while (self.logs_dir / f"{variant_id}-{counter}").exists():
@@ -732,18 +799,25 @@ class FastProductionRunner:
         max_ids: Optional[int] = None,
         should_stop=None,
         on_progress: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        on_discovery_progress: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+        discovery_batch_size: int = 1,
+        force_discovery_refresh: bool = False,
     ) -> dict:
         """Execute one cohort (100 papers) with SSD acceleration, backoff retries, Drive sync, and revision history."""
         if should_stop is not None and not callable(should_stop):
             raise ValueError("should_stop must be callable or None")
         if on_progress is not None and not callable(on_progress):
             raise ValueError("on_progress must be callable or None")
+        if on_discovery_progress is not None and not callable(on_discovery_progress):
+            raise ValueError("on_discovery_progress must be callable or None")
         self._reset_recoverable_archive_conflicts(number)
         pairs = cohort_pairs(number)
         target_limit = min(max_ids, len(pairs)) if max_ids is not None else len(pairs)
         max_attempts = 6 if (self.retry_429 and self.retry_wait_budget > 0) else 1
         batch_id, can_resume = self._resolve_batch_id(
-            number, max_attempts, revision_history, timeout=self.timeout, s2_config=s2_config
+            number, max_attempts, revision_history, timeout=self.timeout, s2_config=s2_config,
+            discovery_batch_size=discovery_batch_size,
+            force_discovery_refresh=force_discovery_refresh,
         )
         effective_resume = can_resume if resume else False
         experiment_id = f"exp-fast-{number:04d}-{int(time.time())}"
@@ -779,8 +853,13 @@ class FastProductionRunner:
                     disk_roots=[self.corpus_dir, self.scratch_dir],
                     s2_config=s2_config,
                     revision_history=revision_history,
+                    bbl_artifact_dir=self.bbl_artifact_dir,
+                    discovery_batch_size=discovery_batch_size,
+                    force_discovery_refresh=force_discovery_refresh,
                     should_stop=should_stop,
                     **({"on_progress": on_progress} if on_progress is not None else {}),
+                    **({"on_discovery_progress": on_discovery_progress}
+                       if on_discovery_progress is not None else {}),
                 )
         except KeyboardInterrupt:
             interrupted = True
@@ -1000,7 +1079,7 @@ class FastProductionRunner:
                 break
             paper_results.append(paper)
 
-            # Check actual terminal statuses
+            # Kiểm tra trạng thái kết thúc thực tế.
             m_ok = False
             try:
                 m_after = self.store.read_metadata(mssv, arxiv_id)
@@ -1028,7 +1107,7 @@ class FastProductionRunner:
             else:
                 failed_or_partial += 1
 
-            # Persist after each paper so runtime loss cannot discard a long S2 run.
+            # Ghi sau mỗi bài để mất môi trường chạy không làm mất tiến độ S2 kéo dài.
             self._archive_cohort(number, self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz")
 
         archive_dest = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
@@ -1082,7 +1161,7 @@ class FastProductionRunner:
         if not archive_path.exists():
             return None
 
-        # Verify readability of source archive first
+        # Trước tiên xác minh có thể đọc archive mã nguồn.
         try:
             with tarfile.open(archive_path, "r:gz") as test_tar:
                 _ = test_tar.getmembers()
@@ -1091,15 +1170,15 @@ class FastProductionRunner:
 
         sha256_cur = self._compute_sha256(archive_path)
         from src.archive_validation import validate_archive_sidecars
-        # Must run BEFORE the existing-backup reuse path. Legacy archives may
-        # omit sidecars only when explicitly allowed by the caller.
+        # Phải chạy TRƯỚC nhánh dùng lại bản sao lưu. Archive cũ có thể
+        # thiếu sidecar chỉ khi bên gọi cho phép tường minh.
         validate_archive_sidecars(archive_path, number,
                                   require_complete=require_sidecars,
                                   expected_digest=sha256_cur)
         timestamp = int(archive_path.stat().st_mtime)
 
-        # Reuse a verified backup when it already contains these exact bytes.
-        # This keeps repeated Colab resumes from multiplying identical archives.
+        # Dùng lại bản sao lưu đã xác minh nếu nó chứa đúng các byte này.
+        # Việc này ngăn các lần tiếp tục Colab tạo thêm archive trùng lặp.
         existing_prefix = f"cohort_{number:04d}_corpus.bak_"
         for existing in sorted(self.archives_dir.glob(f"{existing_prefix}*.tar.gz")):
             try:
@@ -1129,10 +1208,10 @@ class FastProductionRunner:
                     "reused": True,
                 }
             except (OSError, ValueError, tarfile.TarError):
-                # Unreadable or unverifiable prior backups are never reused.
+                # Không dùng lại bản sao lưu cũ nếu không đọc hoặc xác minh được.
                 continue
 
-        # Validate original sidecar .sha256 if present
+        # Nếu có sidecar .sha256 gốc thì xác minh nó.
         sha_cur_file = archive_path.with_name(archive_name + ".sha256")
         if sha_cur_file.exists():
             sha_text = sha_cur_file.read_text(encoding="utf-8").strip()
@@ -1142,7 +1221,7 @@ class FastProductionRunner:
                     f"Original sha256 sidecar is corrupt or mismatched ({match.group(0) if match else 'None'} != {sha256_cur})"
                 )
 
-        # Validate original sidecar .manifest.json if present
+        # Nếu có sidecar .manifest.json gốc thì xác minh nó.
         manifest_cur_file = archive_path.with_name(archive_name.replace(".tar.gz", ".manifest.json"))
         manifest_data = None
         if manifest_cur_file.exists():
@@ -1161,7 +1240,7 @@ class FastProductionRunner:
                     f"Original manifest sidecar cohort mismatch ({manifest_data.get('cohort_number')} != {number})"
                 )
 
-        # Generate collision-resistant unique base name
+        # Tạo tên gốc duy nhất, tránh va chạm.
         short_sha = sha256_cur[:12]
         base_prefix = f"cohort_{number:04d}_corpus.bak_{timestamp}_{short_sha}"
         counter = 0
@@ -1177,7 +1256,7 @@ class FastProductionRunner:
             candidate_sha = self.archives_dir / f"{candidate_base}.tar.gz.sha256"
             candidate_manifest = self.archives_dir / f"{candidate_base}.manifest.json"
 
-            # Pre-check non-existence
+            # Kiểm tra trước rằng tệp chưa tồn tại.
             if candidate_tar.exists() or candidate_sha.exists() or candidate_manifest.exists():
                 counter += 1
                 continue
@@ -1191,24 +1270,24 @@ class FastProductionRunner:
 
         created_files: List[Path] = [candidate_tar]
         try:
-            # 1. Stream archive content into exclusively created file
+            # 1. Ghi tuần tự nội dung archive vào tệp được tạo độc quyền.
             with open(archive_path, "rb") as f_in, os.fdopen(fd, "wb") as f_out:
                 shutil.copyfileobj(f_in, f_out, length=65536)
                 f_out.flush()
                 os.fsync(f_out.fileno())
 
-            # 2. Cryptographically verify the backup archive SHA-256
+            # 2. Xác minh SHA-256 của archive sao lưu bằng thuật toán băm.
             backup_sha256 = self._compute_sha256(candidate_tar)
             if backup_sha256 != sha256_cur:
                 raise RuntimeError(
                     f"Backup archive verification failed: SHA-256 mismatch ({backup_sha256} != {sha256_cur})"
                 )
 
-            # 3. Verify backup archive is valid and readable
+            # 3. Xác minh archive sao lưu hợp lệ và đọc được.
             with tarfile.open(candidate_tar, "r:gz") as test_tar:
                 _ = test_tar.getmembers()
 
-            # 4. Atomically create verified .sha256 sidecar
+            # 4. Tạo nguyên tử sidecar .sha256 đã xác minh.
             sha_fd = os.open(str(candidate_sha), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             with os.fdopen(sha_fd, "w", encoding="utf-8") as f_sha:
                 f_sha.write(f"{sha256_cur}  {candidate_tar.name}\n")
@@ -1216,12 +1295,12 @@ class FastProductionRunner:
                 os.fsync(f_sha.fileno())
             created_files.append(candidate_sha)
 
-            # Double-check sidecar text
+            # Kiểm tra lại nội dung sidecar.
             sha_content = candidate_sha.read_text(encoding="utf-8")
             if not (sha256_cur in sha_content and candidate_tar.name in sha_content):
                 raise RuntimeError("Backup sha256 sidecar verification failed")
 
-            # 5. Atomically create verified .manifest.json sidecar if original existed
+            # 5. Nếu bản gốc có sidecar .manifest.json thì tạo bản đã xác minh theo cách nguyên tử.
             if manifest_data is not None:
                 backup_manifest_data = dict(manifest_data)
                 backup_manifest_data["archive_filename"] = candidate_tar.name
@@ -1274,7 +1353,7 @@ class FastProductionRunner:
             except OSError:
                 pass
 
-            # Safe cleanup of orphaned temporary files from deceased processes ONLY
+            # Chỉ dọn an toàn tệp tạm mồ côi do tiến trình đã dừng để lại.
             cleanup_orphaned_archive_tmp(destination.parent, destination.name)
 
             pid = os.getpid()
@@ -1335,20 +1414,20 @@ class FastProductionRunner:
                     f_out.flush()
                     os.fsync(f_out.fileno())
 
-                # Verify readability of the created archive before atomic replacement
+                # Xác minh archive mới đọc được trước khi thay thế nguyên tử.
                 with tarfile.open(tmp_path, "r:gz") as test_tar:
                     _ = test_tar.getmembers()
 
                 archive_sha256 = self._compute_sha256(tmp_path)
                 os.replace(tmp_path, destination)
 
-                # Atomic publication of SHA-256 checksum file
+                # Công bố nguyên tử tệp mã kiểm tra SHA-256.
                 sha_file = destination.with_name(destination.name + ".sha256")
                 sha_tmp = destination.with_name(f".{destination.name}.sha256.tmp")
                 sha_tmp.write_text(f"{archive_sha256}  {destination.name}\n", encoding="utf-8")
                 os.replace(sha_tmp, sha_file)
 
-                # Determine archive_state and verified_completed_count
+                # Xác định archive_state và verified_completed_count.
                 m1_stats = self.count_m1_completed_papers(number)
                 source_count = self.count_source_completed_papers(number)
                 if len(included_ids) < len(pairs):
@@ -1360,10 +1439,12 @@ class FastProductionRunner:
                 else:
                     archive_state = "checkpoint_partial"
 
-                # Atomic publication of cohort archive accounting manifest
+                # Công bố nguyên tử manifest kiểm kê archive của lô.
                 manifest_name = destination.name.replace(".tar.gz", ".manifest.json")
                 manifest_file = destination.with_name(manifest_name)
                 manifest_tmp = destination.with_name(f".{manifest_name}.tmp")
+                bbl_artifacts = self._archive_bbl_artifacts(number)
+                bbl_policy_state = self._cohort_bbl_policy_state(number)
                 accounting_payload = {
                     "cohort_number": number,
                     "archive_filename": destination.name,
@@ -1377,6 +1458,8 @@ class FastProductionRunner:
                     "verified_completed_count": m1_stats["found_m1_complete"],
                     "source_completed_count": source_count,
                     "m1_stats": m1_stats,
+                    "bbl_policy_state": bbl_policy_state,
+                    "bbl_artifact_archive": bbl_artifacts,
                     "omitted_count": len(omitted),
                     "omitted": omitted,
                 }
@@ -1397,6 +1480,123 @@ class FastProductionRunner:
                 os.close(lock_fd)
             except OSError:
                 pass
+
+    def _cohort_bbl_policy_state(self, number: int) -> str:
+        """Report whether all retained BBL files have a verified policy record."""
+        from src.storage import arxiv_id_to_folder_key
+
+        for mssv, arxiv_id in cohort_pairs(number):
+            manifest_path = self.corpus_dir / arxiv_id_to_folder_key(arxiv_id) / "manifest.json"
+            if not manifest_path.is_file() or manifest_path.is_symlink():
+                continue
+            try:
+                manifest = self.store.read_manifest(mssv, arxiv_id)
+            except (OSError, ValueError):
+                return "unverified"
+            for version, record in manifest.get("versions", {}).items():
+                if (any(PurePosixPath(name).suffix.lower() == ".bbl"
+                        for name in record.get("files", []))
+                        and record.get("bbl_policy") is None):
+                    return "legacy_unverified"
+                if record.get("bbl_policy") is not None:
+                    try:
+                        is_valid = self.store.should_skip_version(mssv, arxiv_id, version)
+                    except (OSError, ValueError):
+                        return "unverified"
+                    if not is_valid:
+                        return "unverified"
+        return "complete"
+
+    def _archive_bbl_artifacts(self, number: int) -> dict | None:
+        """Package external BBL indexes and evidence with a verified checksum map."""
+        import fcntl
+        import uuid
+        from src.bbl_handling import validate_bbl_source_policy
+        from src.storage import arxiv_id_to_folder_key
+
+        files: dict[str, str] = {}
+        for mssv, arxiv_id in cohort_pairs(number):
+            paper_key = arxiv_id_to_folder_key(arxiv_id)
+            try:
+                manifest = self.store.read_manifest(mssv, arxiv_id)
+            except (OSError, ValueError):
+                continue
+            for version, record in manifest.get("versions", {}).items():
+                policy = record.get("bbl_policy")
+                if policy is None:
+                    continue
+                version_dir = self.corpus_dir / paper_key / version
+                validate_bbl_source_policy(
+                    version_dir,
+                    record.get("files", []),
+                    policy,
+                    artifact_root=self.bbl_artifact_dir,
+                    mssv=mssv,
+                    arxiv_id=arxiv_id,
+                    version=version,
+                )
+                relatives = [policy.get("index_path")]
+                for item in policy.get("items", []):
+                    relatives.extend((item.get("source_evidence_path"),
+                                      item.get("derived_bib_path")))
+                for relative in relatives:
+                    if relative is None:
+                        continue
+                    path = self.bbl_artifact_dir / relative
+                    is_link, _, is_file = _inspect_path(path)
+                    if is_link or not is_file:
+                        raise ValueError(f"BBL artifact is missing or unsafe: {relative}")
+                    files[relative] = self._compute_sha256(path)
+        if not files:
+            return None
+
+        self.archives_dir.mkdir(parents=True, exist_ok=True)
+        name = f"cohort_{number:04d}_bbl_artifacts.tar.gz"
+        destination = self.archives_dir / name
+        lock_path = self.archives_dir / f".{name}.lock"
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            temporary = self.archives_dir / f".{name}.pid_{os.getpid()}_{uuid.uuid4().hex[:8]}.tmp"
+            try:
+                with tarfile.open(temporary, "w:gz") as tar:
+                    for relative in sorted(files):
+                        tar.add(self.bbl_artifact_dir / relative, arcname=relative, recursive=False)
+                with tarfile.open(temporary, "r:gz") as check:
+                    members = check.getmembers()
+                    if any(not member.isfile() for member in members):
+                        raise ValueError("BBL artifact archive contains a non-file member")
+                    if {member.name for member in members} != set(files):
+                        raise ValueError("BBL artifact archive contents do not match its index")
+                archive_sha = self._compute_sha256(temporary)
+                os.replace(temporary, destination)
+                sha_path = destination.with_name(destination.name + ".sha256")
+                sha_tmp = sha_path.with_name(f".{sha_path.name}.tmp")
+                sha_tmp.write_text(f"{archive_sha}  {destination.name}\n", encoding="utf-8")
+                os.replace(sha_tmp, sha_path)
+                manifest_path = destination.with_name(
+                    destination.name.replace(".tar.gz", ".manifest.json")
+                )
+                _atomic_json(manifest_path, {
+                    "cohort_number": number,
+                    "archive_filename": destination.name,
+                    "archive_sha256": archive_sha,
+                    "files": dict(sorted(files.items())),
+                    "file_count": len(files),
+                })
+                return {
+                    "archive_filename": destination.name,
+                    "archive_sha256": archive_sha,
+                    "files": dict(sorted(files.items())),
+                    "file_count": len(files),
+                }
+            finally:
+                temporary.unlink(missing_ok=True)
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
 
     def _safe_replace_paper(
         self,
@@ -1420,7 +1620,7 @@ class FastProductionRunner:
         except Exception:
             return False
 
-        # Validate file checksums in src_folder if versions with file_checksums exist
+        # Nếu phiên bản có file_checksums, xác minh checksum tệp trong src_folder.
         versions = m_src.get("versions") or {}
         for ver_name, ver_info in versions.items():
             if isinstance(ver_info, dict) and ver_info.get("status") == "success" and ver_info.get("file_checksums"):
@@ -1441,6 +1641,21 @@ class FastProductionRunner:
                             return False
                     except Exception:
                         return False
+            if isinstance(ver_info, dict) and ver_info.get("bbl_policy") is not None:
+                from src.bbl_handling import validate_bbl_source_policy
+
+                try:
+                    validate_bbl_source_policy(
+                        src_folder / ver_name,
+                        ver_info.get("files", []),
+                        ver_info["bbl_policy"],
+                        artifact_root=self.bbl_artifact_dir,
+                        mssv=m_src.get("mssv"),
+                        arxiv_id=m_src.get("arxiv_id"),
+                        version=ver_name,
+                    )
+                except (OSError, ValueError, TypeError):
+                    return False
 
         try:
             is_l_tgt, is_d_tgt, _ = _inspect_path(target_folder)
@@ -1459,7 +1674,7 @@ class FastProductionRunner:
         except Exception:
             pass
 
-        # Atomic replacement: stage to temporary directory on the same filesystem
+        # Thay thế nguyên tử: chuẩn bị dữ liệu trong thư mục tạm trên cùng hệ thống tệp.
         target_parent = target_folder.parent
         target_parent.mkdir(parents=True, exist_ok=True)
         stage_dir = Path(tempfile.mkdtemp(prefix=".stage-", dir=str(target_parent)))
@@ -1504,6 +1719,102 @@ class FastProductionRunner:
             if backup_dir and backup_dir.exists() and not preserve_backup:
                 shutil.rmtree(backup_dir, ignore_errors=True)
 
+    def _validate_bbl_artifact_archive(
+        self,
+        number: int,
+        artifact_info: dict | None,
+        *,
+        restore: bool = False,
+    ) -> dict:
+        """Verify the external BBL bundle and optionally restore missing files."""
+        if artifact_info is None:
+            return {"status": "not_present", "file_count": 0}
+        if not isinstance(artifact_info, dict):
+            raise ValueError("Invalid BBL artifact archive record")
+        expected_name = f"cohort_{number:04d}_bbl_artifacts.tar.gz"
+        if artifact_info.get("archive_filename") != expected_name:
+            raise ValueError("Unexpected BBL artifact archive filename")
+        files = artifact_info.get("files")
+        if (not isinstance(files, dict)
+                or type(artifact_info.get("file_count")) is not int
+                or artifact_info["file_count"] != len(files)):
+            raise ValueError("Invalid BBL artifact checksum map")
+        for relative, digest in files.items():
+            if not isinstance(relative, str):
+                raise ValueError("Unsafe BBL artifact checksum entry")
+            path = PurePosixPath(relative)
+            if (path.is_absolute() or "\\" in relative
+                    or any(part in {"", ".", ".."} for part in path.parts)
+                    or not isinstance(digest, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+                raise ValueError("Unsafe BBL artifact checksum entry")
+
+        archive_path = self.archives_dir / expected_name
+        is_link, _, is_file = _inspect_path(archive_path)
+        if is_link or not is_file:
+            raise ValueError(f"Missing BBL artifact archive {expected_name}")
+        actual_sha = self._compute_sha256(archive_path)
+        if actual_sha != artifact_info.get("archive_sha256"):
+            raise ValueError("BBL artifact archive checksum mismatch")
+        sha_path = archive_path.with_name(archive_path.name + ".sha256")
+        is_link, _, is_file = _inspect_path(sha_path)
+        if is_link or not is_file:
+            raise ValueError("Missing BBL artifact checksum sidecar")
+        sidecar = _read_bytes_safely(sha_path).decode("utf-8").strip().split()
+        if not sidecar or sidecar[0] != actual_sha:
+            raise ValueError("BBL artifact checksum sidecar mismatch")
+
+        import tarfile
+
+        payloads = {}
+        with tarfile.open(archive_path, "r:gz") as archive:
+            members = archive.getmembers()
+            if any(not member.isfile() for member in members):
+                raise ValueError("BBL artifact archive contains unsafe member types")
+            if {member.name for member in members} != set(files):
+                raise ValueError("BBL artifact archive member list mismatch")
+            for member in members:
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError("Cannot read BBL artifact archive member")
+                data = stream.read()
+                if hashlib.sha256(data).hexdigest() != files[member.name]:
+                    raise ValueError(f"BBL artifact member checksum mismatch: {member.name}")
+                payloads[member.name] = data
+
+        for relative, data in payloads.items():
+            relative_path = PurePosixPath(relative)
+            target = self.bbl_artifact_dir.joinpath(*relative_path.parts)
+            current = self.bbl_artifact_dir
+            for part in relative_path.parts:
+                current = current / part
+                if current.is_symlink():
+                    raise ValueError(f"BBL artifact path contains a symlink: {relative}")
+            if target.exists():
+                if not target.is_file() or self._compute_sha256(target) != files[relative]:
+                    raise ValueError(f"Existing BBL artifact conflicts with archive: {relative}")
+                continue
+            if not restore:
+                raise ValueError(f"BBL artifact is missing from the index: {relative}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".restore.tmp", dir=target.parent,
+            )
+            temporary_path = Path(temporary)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                try:
+                    os.link(temporary_path, target)
+                except FileExistsError:
+                    if not target.is_file() or self._compute_sha256(target) != files[relative]:
+                        raise ValueError(f"Concurrent BBL artifact conflict: {relative}")
+            finally:
+                temporary_path.unlink(missing_ok=True)
+        return {"status": "verified", "file_count": len(files)}
+
     def restore_cohort(
         self,
         number: int,
@@ -1532,7 +1843,7 @@ class FastProductionRunner:
         valid_pairs = cohort_pairs(number)
         allowed_folders = {arxiv_id_to_folder_key(aid): (mssv, aid) for mssv, aid in valid_pairs}
 
-        # 1. Migrate from legacy Drive corpus layout if present
+        # 1. Nếu có, chuyển đổi bố cục corpus Drive cũ.
         try:
             is_l, is_d, _ = _inspect_path(legacy_corpus)
             if not is_l and is_d:
@@ -1553,7 +1864,7 @@ class FastProductionRunner:
         except Exception:
             pass
 
-        # 2. Extract cohort archive from Drive without overwriting newer local papers
+        # 2. Giải nén archive của lô từ Drive mà không ghi đè bài báo cục bộ mới hơn.
         archive_path = self.archives_dir / f"cohort_{number:04d}_corpus.tar.gz"
         try:
             is_link, _, is_f = _inspect_path(archive_path)
@@ -1622,6 +1933,11 @@ class FastProductionRunner:
             elif require_manifest:
                 raise ValueError(f"Missing accounting manifest for {archive_path.name}")
 
+        if isinstance(m_payload, dict) and "bbl_artifact_archive" in m_payload:
+            self._validate_bbl_artifact_archive(
+                number, m_payload.get("bbl_artifact_archive"), restore=True,
+            )
+
         import tarfile
         with tempfile.TemporaryDirectory(prefix=".restore-", dir=str(self.local_root)) as temp_extract:
             temp_dir = Path(temp_extract)
@@ -1644,7 +1960,7 @@ class FastProductionRunner:
                     raise ValueError(f"Corrupted or unreadable archive {archive_path.name}: {e}") from e
                 return restored
 
-            # Strict cross-validation of archive contents against accounting manifest if manifest is present
+            # Nếu có manifest kiểm kê, đối chiếu nghiêm ngặt nội dung archive với manifest đó.
             if m_payload is not None and "included_ids" in m_payload:
                 expected_folders = {arxiv_id_to_folder_key(aid) for aid in m_payload["included_ids"]}
                 if tar_top_folders != expected_folders:
@@ -1691,7 +2007,7 @@ class FastProductionRunner:
         except Exception:
             return False
 
-        # Shared exhaustive audit validator (fail-closed if any integrity violation)
+        # Dùng chung bộ kiểm tra toàn diện; từ chối khi phát hiện bất kỳ vi phạm toàn vẹn nào.
         try:
             audit_res = audit_cohort_archive_payload(archive_dest, number, require_full=False)
         except Exception:
@@ -1707,6 +2023,24 @@ class FastProductionRunner:
         manifest_name = archive_dest.name.replace(".tar.gz", ".manifest.json")
         manifest_file = archive_dest.with_name(manifest_name)
         manifest_tmp = archive_dest.with_name(f".{manifest_name}.tmp")
+        artifact_info = None
+        artifact_manifest_path = self.archives_dir / (
+            f"cohort_{number:04d}_bbl_artifacts.manifest.json"
+        )
+        if artifact_manifest_path.is_file() and not artifact_manifest_path.is_symlink():
+            try:
+                artifact_payload = json.loads(
+                    _read_bytes_safely(artifact_manifest_path).decode("utf-8")
+                )
+                artifact_info = {
+                    "archive_filename": artifact_payload["archive_filename"],
+                    "archive_sha256": artifact_payload["archive_sha256"],
+                    "files": artifact_payload["files"],
+                    "file_count": artifact_payload["file_count"],
+                }
+                self._validate_bbl_artifact_archive(number, artifact_info, restore=False)
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
         accounting_payload = {
             "cohort_number": number,
             "archive_filename": archive_dest.name,
@@ -1727,6 +2061,8 @@ class FastProductionRunner:
                 "integrity_failures": 0,
                 "is_cohort_complete": audit_res["is_cohort_complete"],
             },
+            "bbl_policy_state": audit_res.get("bbl_policy_state", "unverified"),
+            "bbl_artifact_archive": artifact_info,
             "omitted_count": audit_res["omitted_count"],
             "omitted": audit_res["omitted"],
         }
@@ -1809,6 +2145,15 @@ def verify_cohort_handoff(
     if inspect_members:
         audit_res = audit_cohort_archive_payload(archive_path, number, require_full=True)
         inspected_count = audit_res["inspected_papers"]
+    bbl_artifact_check = runner._validate_bbl_artifact_archive(
+        number, m_payload.get("bbl_artifact_archive"), restore=False,
+    )
+    bbl_policy_state = runner._cohort_bbl_policy_state(number)
+    recorded_bbl_state = m_payload.get("bbl_policy_state")
+    if recorded_bbl_state == "complete" and bbl_policy_state != "complete":
+        raise ValueError(
+            f"BBL policy was recorded complete but currently audits as {bbl_policy_state}"
+        )
 
     return {
         "cohort_number": number,
@@ -1819,4 +2164,6 @@ def verify_cohort_handoff(
         "expected_count": len(pairs),
         "verified": True,
         "inspected_papers": inspected_count,
+        "bbl_policy_state": bbl_policy_state,
+        "bbl_artifact_archive": bbl_artifact_check,
     }

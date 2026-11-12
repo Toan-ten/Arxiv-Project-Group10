@@ -5,6 +5,7 @@ client; offline callers/tests must provide fake HTTP. Single writer only.
 """
 import copy
 from datetime import datetime, timedelta, timezone
+import hashlib
 import math
 import json
 import os
@@ -48,6 +49,41 @@ class _HttpPolicyStop(Exception):
 
 
 DISCOVERY_MAX_AGE = timedelta(days=30)
+_KAGGLE_INDEX_CACHE = {}
+
+
+def _load_kaggle_index(index_path):
+    """Load and checksum a candidate index once, rechecking only file stats per ID."""
+    from src.kaggle_candidates import _verified_file_sha256
+
+    path = Path(index_path).expanduser().resolve()
+    snapshot_path = os.environ.get("M1_KAGGLE_SNAPSHOT_PATH")
+    expected_index_sha = os.environ.get("M1_KAGGLE_INDEX_SHA256")
+    expected_snapshot_sha = os.environ.get("M1_KAGGLE_SNAPSHOT_SHA256")
+    index_stat = path.stat()
+    snapshot_stat = Path(snapshot_path).stat() if snapshot_path else None
+    signature = (
+        index_stat.st_dev, index_stat.st_ino, index_stat.st_size, index_stat.st_mtime_ns,
+        None if snapshot_stat is None else (
+            snapshot_stat.st_dev, snapshot_stat.st_ino,
+            snapshot_stat.st_size, snapshot_stat.st_mtime_ns,
+        ),
+    )
+    cached = _KAGGLE_INDEX_CACHE.get(str(path))
+    if cached and cached["signature"] == signature and cached["expected_index_sha"] == expected_index_sha:
+        return cached["index"], cached["sha256"]
+    payload = path.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    if expected_index_sha and digest != expected_index_sha:
+        raise ValueError("Kaggle candidate index checksum mismatch")
+    index = json.loads(payload.decode("utf-8"))
+    if snapshot_path:
+        _verified_file_sha256(snapshot_path, expected_snapshot_sha)
+    _KAGGLE_INDEX_CACHE[str(path)] = {
+        "signature": signature, "expected_index_sha": expected_index_sha,
+        "sha256": digest, "index": index,
+    }
+    return index, digest
 
 
 def cached_discovery_is_fresh(metadata, *, now=None):
@@ -83,8 +119,8 @@ def _inputs(pairs, store, timeout, max_attempts, user_agent):
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise ValueError("Each selection must be (MSSV, base_arxiv_id)")
         mssv, arxiv_id = pair
-        # Public Storage validation delegates to ID/config and checks ownership.
-        # This returns a path without creating a paper/version directory.
+        # Kiểm tra Storage công khai dựa vào ID/cấu hình và xác minh quyền sở hữu.
+        # Hàm trả về đường dẫn mà không tạo thư mục bài báo/phiên bản.
         store.paper_path(mssv, arxiv_id)
         if arxiv_id in seen:
             raise ValueError(f"Duplicate arXiv ID: {arxiv_id}")
@@ -146,8 +182,8 @@ def _cached_snapshot(store, paper):
         return None
     if snapshot.get("status") != paper["discovery"]["status"]:
         raise StorageError("Cached discovery status conflicts with its arXiv snapshot")
-    # Legacy Kaggle ingestion placed its snapshot in the arXiv provenance
-    # field. Such evidence must be reviewed, never treated as arXiv discovery.
+    # Luồng Kaggle cũ ghi bản chụp vào trường xuất xứ arXiv.
+    # Cần xem xét bằng chứng này; không được xem nó là kết quả discovery arXiv.
     if "revised_dates" in snapshot and snapshot.get("http_status") != 200:
         return None
     return snapshot
@@ -187,7 +223,7 @@ def _record_http_result(paper, stage, result, save, version=None):
         manifest = save(result)
     except StorageError as exc:
         if result.get("http_status") in (403, 429):
-            # A rejected checkpoint must not allow another HTTP request either.
+            # Điểm khôi phục bị từ chối cũng không được phép phát sinh request HTTP mới.
             paper["blocked"][version or "paper"] = type(exc).__name__
             _error(paper, "storage", type(exc).__name__, exc, version)
             raise _HttpPolicyStop(
@@ -198,12 +234,98 @@ def _record_http_result(paper, stage, result, save, version=None):
     return manifest
 
 
-def _run_paper(store, paper, options, versions):
+def _record_kaggle_comparison(paper, discovery):
+    """Persist a per-ID mismatch before discovery can fail checkpoint reconciliation."""
+    policy_version = os.environ.get("M1_KAGGLE_POLICY_VERSION")
+    index_path = os.environ.get("M1_KAGGLE_CANDIDATE_INDEX")
+    if not policy_version or not index_path or discovery.get("http_status") != 200:
+        return
+    evidence_required = False
+    try:
+        from src.kaggle_candidates import (
+            compare_candidate_to_discovery,
+            persist_discrepancy_evidence,
+        )
+        snapshot_path = os.environ.get("M1_KAGGLE_SNAPSHOT_PATH")
+        snapshot_sha256 = os.environ.get("M1_KAGGLE_SNAPSHOT_SHA256")
+        index, index_sha256 = _load_kaggle_index(index_path)
+        if (index.get("status") != "complete" or index.get("schema_version") != 2
+                or index.get("snapshot_sha256") != snapshot_sha256
+                or index.get("comparison_precision") != "calendar_day_utc"
+                or not snapshot_path):
+            raise ValueError("Kaggle snapshot/index provenance failed verification")
+        candidate = index.get("candidates", {}).get(paper["arxiv_id"])
+        comparison = compare_candidate_to_discovery(candidate, discovery)
+        paper["discovery"]["kaggle_comparison"] = comparison["status"]
+        if comparison["status"] == "match":
+            return
+        evidence_required = True
+        evidence_root = os.environ.get("M1_KAGGLE_EVIDENCE_ROOT")
+        checkpoint_root = os.environ.get("M1_KAGGLE_CHECKPOINT_ROOT")
+        session_id = os.environ.get("M1_KAGGLE_EVIDENCE_SESSION")
+        if not all((evidence_root, checkpoint_root, session_id)):
+            raise ValueError("Kaggle discrepancy evidence destination is not configured")
+        diagnostic = None
+        diagnostics = index.get("diagnostics", {})
+        for name, field in (("duplicate", "duplicate_ids"),
+                            ("invalid", "invalid_ids"), ("missing", "missing_ids")):
+            if paper["arxiv_id"] in diagnostics.get(field, []):
+                diagnostic = name
+                break
+        evidence = {
+            "schema_version": 1,
+            "session_id": session_id,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "arxiv_id": paper["arxiv_id"],
+            "mssv": paper["mssv"],
+            "policy_version": policy_version,
+            "comparison_precision": "calendar_day_utc",
+            "kaggle": {
+                "dataset": index.get("dataset"),
+                "snapshot_path": str(Path(os.environ["M1_KAGGLE_SNAPSHOT_PATH"]).resolve()),
+                "index_path": str(Path(index_path).resolve()),
+                "snapshot_sha256": index.get("snapshot_sha256"),
+                "index_sha256": index_sha256,
+                "downloaded_at": index.get("downloaded_at"),
+                "provider_updated_at": index.get("provider_updated_at"),
+                "version_ids": candidate.get("version_ids") if isinstance(candidate, dict) else None,
+                "dates": candidate.get("dates") if isinstance(candidate, dict) else None,
+                "diagnostic": diagnostic,
+            },
+            "arxiv_discovery": {
+                key: discovery.get(key) for key in (
+                    "status", "http_status", "attempts", "version_status", "version_ids",
+                    "latest_version_id", "published", "updated", "error",
+                )
+            },
+            "queried_at": paper["discovery"].get("query_started_at"),
+            "response_observed_at": paper["discovery"].get("queried_at"),
+            "comparison": comparison,
+            "decision": (
+                "use_arxiv_latest" if discovery.get("status") == "found"
+                and discovery.get("version_status") == "resolved"
+                else "use_arxiv_not_found" if discovery.get("status") == "not_found"
+                else "arxiv_discovery_unresolved"
+            ),
+        }
+        paper["discovery"]["comparison_evidence"] = persist_discrepancy_evidence(
+            evidence, evidence_root=evidence_root,
+            checkpoint_root=checkpoint_root, session_id=session_id,
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        if evidence_required:
+            # Bắt buộc có artifact ghi nhận sai khác; nếu tạo thất bại thì phải dừng lượt chạy.
+            raise
+        paper["discovery"]["kaggle_error"] = "snapshot_or_index_validation_failed"
+
+
+def _run_paper(store, paper, options, versions, bbl_artifact_dir=None, query_discovery=None,
+               force_discovery_refresh=False):
     mssv, arxiv_id = paper["mssv"], paper["arxiv_id"]
     _checkpoint(paper, store.initialize_paper(mssv, arxiv_id))
     if paper["discovery"]["status"] in {"found", "not_found"}:
         paper["discovery"]["action"] = "cached"
-        # Reject invalid cached evidence before resume can write recovery state.
+        # Từ chối bằng chứng bộ nhớ đệm không hợp lệ trước khi thao tác tiếp tục ghi trạng thái phục hồi.
         _cached_snapshot(store, paper)
     if "s2_metadata" in paper:
         s2_integration.validate_checkpoint(store, mssv, arxiv_id)
@@ -215,15 +337,23 @@ def _run_paper(store, paper, options, versions):
         snapshot = _cached_snapshot(store, paper)
         paper["discovery"].update(wall_seconds=0.0, timing_status="cached")
         cached_metadata = store.read_metadata(mssv, arxiv_id)
-        if not cached_discovery_is_fresh(cached_metadata):
+        if force_discovery_refresh or not cached_discovery_is_fresh(cached_metadata):
             started = time.perf_counter()
+            paper["discovery"]["query_started_at"] = datetime.now(timezone.utc).isoformat()
             try:
-                fresh = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
+                if query_discovery is None:
+                    fresh, allocated = arxiv_client.query_arxiv(mssv, arxiv_id, **options), None
+                else:
+                    fresh, allocated = query_discovery(mssv, arxiv_id)
             finally:
                 paper["discovery"].update(wall_seconds=max(0.0, time.perf_counter() - started),
                                           timing_status="measured", action="queried")
+            if allocated is not None:
+                paper["discovery"]["wall_seconds"] = allocated
+            paper["discovery"]["queried_at"] = datetime.now(timezone.utc).isoformat()
             paper["discovery"].update(http_status=fresh.get("http_status"),
                                       attempts=fresh.get("attempts", 0), error=fresh.get("error"))
+            _record_kaggle_comparison(paper, fresh)
             if fresh.get("http_status") in (403, 429):
                 paper["blocked"]["discovery"] = "refresh_stopped"
                 _error(paper, "discovery", "refresh_stopped", "Fresh discovery blocked by HTTP policy")
@@ -250,12 +380,20 @@ def _run_paper(store, paper, options, versions):
     else:
         paper["discovery"]["action"] = "queried"
         started = time.perf_counter()
+        paper["discovery"]["query_started_at"] = datetime.now(timezone.utc).isoformat()
         try:
-            snapshot = arxiv_client.query_arxiv(mssv, arxiv_id, **options)
+            if query_discovery is None:
+                snapshot, allocated = arxiv_client.query_arxiv(mssv, arxiv_id, **options), None
+            else:
+                snapshot, allocated = query_discovery(mssv, arxiv_id)
         finally:
             paper["discovery"].update(
                 wall_seconds=max(0.0, time.perf_counter() - started), timing_status="measured",
             )
+        if allocated is not None:
+            paper["discovery"]["wall_seconds"] = allocated
+        paper["discovery"]["queried_at"] = datetime.now(timezone.utc).isoformat()
+        _record_kaggle_comparison(paper, snapshot)
         _record_http_result(paper, "discovery", snapshot, store.record_discovery)
     paper["discovery"].update(
         http_status=snapshot.get("http_status"), attempts=snapshot.get("attempts", 0),
@@ -283,7 +421,7 @@ def _run_paper(store, paper, options, versions):
                        f"Selected version {name} is not confirmed by discovery", name)
             return True
 
-    # Also checks orphan destinations for newly discovered versions.
+    # Đồng thời kiểm tra đích mồ côi của các phiên bản vừa phát hiện.
     plan = store.resume(mssv, arxiv_id)
     _checkpoint(paper, plan["manifest"])
     resolved = False
@@ -316,7 +454,12 @@ def _run_paper(store, paper, options, versions):
                 continue
             _checkpoint(paper, store.read_manifest(mssv, arxiv_id))
             paper['source'][name]['action'] = 'in_progress'
-            result = arxiv_source.download_source(mssv, arxiv_id + name, destination, **options)
+            source_options = dict(options)
+            if bbl_artifact_dir is not None:
+                source_options["bbl_artifact_dir"] = bbl_artifact_dir
+            result = arxiv_source.download_source(
+                mssv, arxiv_id + name, destination, **source_options,
+            )
             manifest = _record_http_result(
                 paper, "source", result, store.record_source_result, name,
             )
@@ -325,7 +468,7 @@ def _run_paper(store, paper, options, versions):
                 manifest = store.read_manifest(mssv, arxiv_id)
                 _checkpoint(paper, manifest)
         except StorageError as exc:
-            # Storage may already have persisted validation_failed.
+            # Storage có thể đã ghi trạng thái validation_failed.
             manifest = store.read_manifest(mssv, arxiv_id)
             _checkpoint(paper, manifest)
             state = manifest["versions"][name]["status"]
@@ -342,7 +485,7 @@ def _run_paper(store, paper, options, versions):
             if state not in RETRYABLE:
                 paper["blocked"][name] = state
             if state == "storage_error":
-                return False  # Disk/permissions failures can affect all papers.
+                return False  # Lỗi ổ đĩa hoặc quyền truy cập có thể ảnh hưởng mọi bài báo.
             _stop_on_http(paper, "source", result.get("http_status"), name)
     return True
 
@@ -361,20 +504,44 @@ def _run_history(store, paper, options):
     info.update(action="in_progress", status="in_progress",
                 observed_at=datetime.now(timezone.utc).isoformat())
     try:
-        # Candidates never replace discovery; require a fresh successful arXiv
-        # query in this invocation, then accept only a matching history.
+        # Ứng viên không thay thế discovery; yêu cầu truy vấn arXiv mới thành công
+        # trong lượt gọi này, sau đó chỉ chấp nhận lịch sử khớp.
         index_path = os.environ.get("M1_KAGGLE_CANDIDATE_INDEX")
+        policy_version = os.environ.get("M1_KAGGLE_POLICY_VERSION")
         if index_path and paper["discovery"].get("action") == "queried" and paper["discovery"].get("http_status") == 200:
             try:
-                index = json.loads(Path(index_path).read_text(encoding="utf-8"))
+                index, index_sha256 = _load_kaggle_index(index_path)
                 candidate = index.get("candidates", {}).get(identifier)
-                if (index.get("status") == "complete" and candidate
-                        and re.fullmatch(r"[0-9a-f]{64}", index.get("snapshot_sha256", ""))):
+                valid_index = (
+                    index.get("status") == "complete"
+                    and re.fullmatch(r"[0-9a-f]{64}", index.get("snapshot_sha256", ""))
+                )
+                if policy_version:
+                    from src.kaggle_candidates import apply_verified_history
+                    snapshot_sha256 = os.environ.get("M1_KAGGLE_SNAPSHOT_SHA256")
+                    if (not valid_index or index.get("schema_version") != 2
+                            or index.get("snapshot_sha256") != snapshot_sha256
+                            or index.get("comparison_precision") != "calendar_day_utc"):
+                        raise ValueError("Kaggle snapshot/index provenance failed verification")
+                    if paper["discovery"].get("kaggle_comparison") == "match":
+                        apply_verified_history(store, mssv, identifier, candidate, {
+                            **index,
+                            "index_sha256": index_sha256,
+                            "downloaded_at": index.get("downloaded_at"),
+                            "provider_updated_at": index.get("provider_updated_at"),
+                            "provenance_policy": policy_version,
+                        })
+                    else:
+                        evidence_ref = paper["discovery"].get("comparison_evidence")
+                        if evidence_ref:
+                            paper["revision_history"]["comparison_evidence"] = evidence_ref
+                elif valid_index and candidate:
                     from src.kaggle_candidates import apply_verified_history
                     apply_verified_history(store, mssv, identifier, candidate, index)
             except (OSError, ValueError, KeyError, TypeError):
-                # Missing or invalid index leaves arXiv history as the fallback.
-                pass
+                # Bản chụp hoặc chỉ mục không hợp lệ không bao giờ thay thế lịch sử arXiv.
+                if policy_version:
+                    paper["revision_history"]["kaggle_error"] = "snapshot_or_index_validation_failed"
         result = arxiv_history.enrich_version_history(store, mssv, identifier, **options)
     except StorageError as exc:
         info.update(action="blocked", status="blocked", error=dict(type=type(exc).__name__))
@@ -389,7 +556,7 @@ def _run_history(store, paper, options):
         info["wall_seconds"] = max(0.0, time.perf_counter() - started)
     info.update(action=result["action"], status=result["status"],
                 http_status=result.get("http_status"), error=result["error"])
-    # Keep large raw XML in metadata provenance, not every run-log snapshot.
+    # Giữ XML thô dung lượng lớn trong xuất xứ metadata, không lặp lại ở mọi bản chụp nhật ký.
     info["received_versions"] = [r["versioned_id"] for r in result["records"]]
     metadata = store.read_metadata(mssv, identifier)
     provenance = metadata["provenance"]["version_history"]
@@ -405,8 +572,8 @@ def _run_history(store, paper, options):
         error = result["error"]
         version = error["versioned_id"][len(identifier):]
         _error(paper, "revision_history", error["type"], error["message"], version)
-        # Failed history leaves good checkpoint JSON intact. The existing paper
-        # callback persists its diagnostic and stop reason before the next paper.
+        # Lỗi lấy lịch sử vẫn giữ nguyên JSON điểm khôi phục hợp lệ. Callback bài báo hiện tại
+        # ghi chẩn đoán và lý do dừng trước khi chuyển sang bài tiếp theo.
         if result["stopped"]:
             raise _HttpPolicyStop(paper, "revision_history", result["http_status"],
                                   version, checkpoint_saved=False)
@@ -439,7 +606,7 @@ def _run_s2(store, paper, config, limiter):
     mssv, identifier = paper["mssv"], paper["arxiv_id"]
     if paper["discovery"]["status"] != "found":
         return
-    # Source corruption/orphans are audit conditions, not permission for more HTTP.
+    # Mã nguồn hỏng hoặc mồ côi là điều kiện cần kiểm toán, không phải lý do gửi thêm request HTTP.
     if any(row["action"] == "blocked" for row in paper["source"].values()):
         for stage in ("s2_metadata", "s2_references"):
             paper[stage]["action"] = "blocked"
@@ -505,15 +672,17 @@ def _run_s2(store, paper, config, limiter):
     except StorageError:
         paper["blocked"]["s2_references"] = "invalid_reference_result"
         _error(paper, "s2_references", "StorageError", "Reference result requires audit")
-        # Existing partial snapshots remain byte-for-byte intact on a conflict.
-        # Never roll back a result that Storage may already have saved.
+        # Khi có xung đột, các bản chụp một phần hiện có được giữ nguyên từng byte.
+        # Không hoàn tác kết quả mà Storage có thể đã lưu.
         raise
 
 
 def run_selected(
     pairs, corpus_root, *, run_id=None, timeout=30.0, max_attempts=3,
-    user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None, s2_config=None,
-    revision_history=True, should_stop=None,
+    user_agent=arxiv_client.USER_AGENT, versions=None, on_progress=None,
+    on_discovery_progress=None, s2_config=None,
+    revision_history=True, should_stop=None, bbl_artifact_dir=None,
+    discovery_batch_size=1, force_discovery_refresh=False,
 ):
     """Process a caller-supplied list of (MSSV, base ID), in order.
 
@@ -526,7 +695,7 @@ def run_selected(
     revision_history=True enriches confirmed version dates after source and
     before S2, including when versions limits only the source selection. False
     preserves the bounded legacy profile. History shares arXiv pacing/retries
-    and HTTP metrics; no new progress events are emitted.
+    and HTTP metrics; the history step itself emits no progress events.
 
     The returned summary separates operations from contract states: skipped,
     blocked and failed actions never replace a stored version's actual status.
@@ -534,8 +703,9 @@ def run_selected(
     The summary has stopped=True and stop_reason; intermediate retries are client-owned.
     StorageError blocks one paper/version; fatal I/O or unexpected exceptions
     raise PipelineStopped with a partial summary. KeyboardInterrupt propagates.
-    on_progress(event, summary_copy) runs before/after each paper. Callback
-    exceptions propagate immediately and prevent the next HTTP operation.
+    on_progress(event, summary_copy) runs before/after each paper.
+    on_discovery_progress(event, detail) reports actual Atom request boundaries.
+    Callback exceptions propagate immediately and prevent the next HTTP operation.
     should_stop is checked between papers. A true result returns a resumable
     session_budget stop without starting another paper or issuing another request.
     """
@@ -543,16 +713,117 @@ def run_selected(
         raise ValueError("revision_history must be bool")
     if on_progress is not None and not callable(on_progress):
         raise ValueError("on_progress must be callable or None")
+    if on_discovery_progress is not None and not callable(on_discovery_progress):
+        raise ValueError("on_discovery_progress must be callable or None")
     if should_stop is not None and not callable(should_stop):
         raise ValueError("should_stop must be callable or None")
+    if type(discovery_batch_size) is not int or not 1 <= discovery_batch_size <= 20:
+        raise ValueError("discovery_batch_size must be an integer from 1 to 20")
+    if type(force_discovery_refresh) is not bool:
+        raise ValueError("force_discovery_refresh must be bool")
     versions = _version_selection(versions)
-    store = CorpusStorage(corpus_root, run_id=run_id)
+    store = CorpusStorage(
+        corpus_root, run_id=run_id, bbl_artifact_root=bbl_artifact_dir,
+    )
     selected = _inputs(pairs, store, timeout, max_attempts, user_agent)
+    if bbl_artifact_dir is not None:
+        artifact_root = Path(bbl_artifact_dir).expanduser().resolve()
+        if artifact_root == store.root or artifact_root.is_relative_to(store.root) \
+                or store.root.is_relative_to(artifact_root):
+            raise ValueError("bbl_artifact_dir must be outside the source corpus")
     s2_config = s2_integration.configuration(s2_config)
     if s2_config is not None:
-        semantic_scholar._key_from_environment()  # Validate header before any I/O.
+        semantic_scholar._key_from_environment()  # Kiểm tra header trước mọi thao tác vào/ra.
     limiter = None if s2_config is None else semantic_scholar.RateLimiter(s2_config["min_interval"])
     options = dict(timeout=timeout, max_attempts=max_attempts, user_agent=user_agent)
+    prefetched: dict[tuple[str, str], dict] = {}
+    shared_seconds: dict[tuple[str, str], float] = {}
+    positions = {pair: index for index, pair in enumerate(selected)}
+
+    def notify_discovery(event: str, detail: dict) -> None:
+        if on_discovery_progress is not None:
+            on_discovery_progress(event, copy.deepcopy(detail))
+
+    def query_discovery(member: str, identifier: str) -> tuple[dict, float]:
+        key = (member, identifier)
+        if key in prefetched:
+            return prefetched.pop(key), shared_seconds.pop(key)
+        had_shared = key in shared_seconds
+        allocated = shared_seconds.pop(key, 0.0)
+        if not had_shared:
+            candidates = []
+            for candidate in selected[positions[key]:positions[key] + discovery_batch_size]:
+                if candidate[0] != member:
+                    break
+                if candidate in prefetched or candidate in shared_seconds:
+                    continue
+                if candidate != key:
+                    path = store._path(*candidate, "manifest.json")
+                    if path.exists():
+                        manifest = store.read_manifest(*candidate)
+                        if manifest["discovery_status"] in {"found", "not_found"}:
+                            metadata = store.read_metadata(*candidate)
+                            if not force_discovery_refresh and cached_discovery_is_fresh(metadata):
+                                continue
+                candidates.append(candidate[1])
+            if len(candidates) > 1:
+                request_detail = {
+                    "mssv": member, "first_arxiv_id": candidates[0],
+                    "last_arxiv_id": candidates[-1], "requested_count": len(candidates),
+                    "request_type": "batch",
+                }
+                notify_discovery("request_started", request_detail)
+                started_batch = time.perf_counter()
+                batch_result = arxiv_client.query_arxiv_batch(member, candidates, **options)
+                batch_elapsed = max(0.0, time.perf_counter() - started_batch)
+                share = batch_elapsed / len(candidates)
+                for candidate_id in candidates:
+                    shared_seconds[(member, candidate_id)] = share
+                allocated = shared_seconds.pop(key)
+                returned_ids = set(batch_result.get("results", {}))
+                notify_discovery("request_finished", {
+                    **request_detail,
+                    "http_status": batch_result.get("http_status"),
+                    "status": batch_result.get("status"),
+                    "attempts": batch_result.get("attempts"),
+                    "returned_count": len(returned_ids),
+                    "unresolved_count": len(set(candidates) - returned_ids),
+                    "wall_seconds": batch_elapsed,
+                })
+                if batch_result.get("http_status") in {403, 429}:
+                    return {
+                        "mssv": member, "arxiv_id": identifier,
+                        "status": batch_result["status"],
+                        "http_status": batch_result["http_status"],
+                        "attempts": batch_result.get("attempts", 0),
+                        "error": batch_result.get("error"),
+                    }, allocated
+                prefetched.update({
+                    (member, candidate_id): value
+                    for candidate_id, value in batch_result.get("results", {}).items()
+                    if candidate_id != identifier
+                })
+                if identifier in batch_result.get("results", {}):
+                    return batch_result["results"][identifier], allocated
+            elif len(candidates) == 1 and candidates[0] != identifier:
+                raise ValueError("Current discovery ID was omitted from its batch")
+        single_detail = {
+            "mssv": member, "first_arxiv_id": identifier,
+            "last_arxiv_id": identifier, "requested_count": 1,
+            "request_type": "single_fallback" if discovery_batch_size > 1 else "single",
+        }
+        notify_discovery("request_started", single_detail)
+        started_single = time.perf_counter()
+        result = arxiv_client.query_arxiv(member, identifier, **options)
+        single_elapsed = max(0.0, time.perf_counter() - started_single)
+        notify_discovery("request_finished", {
+            **single_detail, "http_status": result.get("http_status"),
+            "status": result.get("status"), "attempts": result.get("attempts"),
+            "returned_count": int(result.get("status") in {"found", "not_found"}),
+            "unresolved_count": int(result.get("status") not in {"found", "not_found"}),
+            "wall_seconds": single_elapsed,
+        })
+        return result, allocated + single_elapsed
     summary = dict(run_id=run_id, papers=[], stopped=False)
     for mssv, arxiv_id in selected:
         if should_stop is not None and should_stop():
@@ -581,7 +852,11 @@ def run_selected(
         if on_progress is not None:
             on_progress("paper_started", copy.deepcopy(summary))
         try:
-            if not _run_paper(store, paper, options, versions):
+            if not _run_paper(
+                store, paper, options, versions, bbl_artifact_dir=bbl_artifact_dir,
+                query_discovery=query_discovery if discovery_batch_size > 1 else None,
+                force_discovery_refresh=force_discovery_refresh,
+            ):
                 summary["stopped"] = True
                 raise PipelineStopped("Downloader reported storage_error; audit before continuing", summary)
             if revision_history:

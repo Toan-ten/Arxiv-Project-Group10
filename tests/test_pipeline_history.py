@@ -388,7 +388,7 @@ class HistoryIntegrationTests(unittest.TestCase):
         self.assertEqual(value['aggregation']['history']['http_requests'],7)
         path=next((self.root.parent/'logs/history-offline/attempts').glob('*.json'))
         result=json.loads(path.read_text())['papers'][0]['result']
-        self.assertEqual(result['revision_history']['wall_seconds'],9)
+        self.assertAlmostEqual(result['revision_history']['wall_seconds'], 9.0, places=9)
         self.assertEqual(value['aggregation']['status'],'verified')
         self.assertFalse(value['publication_complete']['all_complete'])
         self.assertEqual(value['data_coverage']['valid_tex_versions'],3)

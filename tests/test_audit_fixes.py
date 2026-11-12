@@ -125,6 +125,45 @@ def test_paper_timings_deduplicate_resumed_source_attempts():
     assert incomplete["missing_ids"] == ["missing"]
 
 
+def test_s2_429_cooldown_is_counted_once_in_assigned_paper_timings():
+    source = {"stage": "source", "cohort": 1, "result": {"timing_metrics": {
+        "paper_intervals": [
+            {"attempt_id": "a1", "arxiv_id": "x", "state": "processed", "wall_seconds": 1.0},
+            {"attempt_id": "a1", "arxiv_id": "y", "state": "processed", "wall_seconds": 3.0},
+        ]}}}
+    s2 = {"stage": "s2", "observation_id": "s2o", "result": {
+        "paper_timings": [
+            {"arxiv_id": "x", "s2_wall_seconds": 2.0},
+            {"arxiv_id": "y", "s2_wall_seconds": 4.0},
+        ]}}
+    cooldown = {
+        "stage": "s2_retry_wait", "session_id": "session", "observation_id": "wait1",
+        "execution_status": "returned", "wall_seconds": 5.0,
+        "configuration": {
+            "affected_ids": ["x", "y"],
+            "trigger_stage": "s2_metadata", "trigger_http_status": 429,
+        },
+        "result": {
+            "status": "waited", "retry_wait_seconds": 5.0,
+            "affected_ids": ["x", "y"],
+            "trigger_stage": "s2_metadata", "trigger_http_status": 429,
+        },
+    }
+
+    summary = summarize_paper_timings([source, s2, cooldown], ["x", "y"])
+
+    assert summary["status"] == "complete"
+    assert summary["s2_retry_wait_seconds"] == 5.0
+    assert summary["s2_retry_wait_observation_count"] == 1
+    assert summary["average_seconds"] == 7.5
+    assert summary["papers"] == [
+        {"arxiv_id": "x", "source_seconds": 1.0, "retry_wait_seconds": 0.0,
+         "s2_seconds": 2.0, "s2_retry_wait_seconds": 2.5, "total_seconds": 5.5},
+        {"arxiv_id": "y", "source_seconds": 3.0, "retry_wait_seconds": 0.0,
+         "s2_seconds": 4.0, "s2_retry_wait_seconds": 2.5, "total_seconds": 9.5},
+    ]
+
+
 def test_discovery_timing_deduplicates_source_attempts_and_counts_setup():
     row = {"attempt_id": "a1", "arxiv_id": "x", "state": "processed",
            "discovery_action": "queried", "discovery_seconds": 3.0,

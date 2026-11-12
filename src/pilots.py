@@ -33,7 +33,7 @@ def _validate_ranges(members: Sequence[AssignedRange]) -> None:
     for member in members:
         if member.start_month != member.end_month:
             raise ValueError(f"{member.mssv}: pilot sets require a same-month range")
-    # Index keys retain every range, including repeated ownership values.
+    # Khóa chỉ mục giữ mọi dải, kể cả các giá trị chủ sở hữu bị lặp.
     _ensure_no_overlaps({str(index): member for index, member in enumerate(members)})
 
 

@@ -91,7 +91,7 @@ def aggregate(base: Path) -> dict:
         cohorts_by_member={member: member_cohort_range(member) for member in MEMBERS},
         session_envelopes=envelopes,
     )
-    # The group audit is executed once by each member; require all four records.
+    # Mỗi thành viên chạy kiểm toán nhóm một lần; yêu cầu đủ cả bốn bản ghi.
     audited_members = {((row.get("configuration") or {}).get("mssv")) for row in rows
                        if row.get("stage") == "audit" and row.get("cohort") == 0
                        and row.get("execution_status") == "returned"
@@ -119,25 +119,61 @@ def aggregate(base: Path) -> dict:
     summary["observation_errors"] = errors
     summary["observed_interval_count"] = len(rows)
     summary["scope"] = ("end_to_end_wall_seconds sums each completed sequential phase session, including audit/export; "
-                         "environment installation and inter-session gaps are excluded. RAM is sampled process RSS; "
-                         "disk is sampled logical regular-file bytes under the disjoint roots recorded per stage; "
-                         "sampled peaks may miss short-lived spikes. Stage intervals separately support diagnostics.")
+                         "environment installation and inter-session gaps are excluded. Crawler process-tree RSS "
+                         "and host-wide used RAM are sampled separately. Disk is sampled logical regular-file bytes "
+                         "under the disjoint roots recorded per stage; sampled peaks may miss short-lived spikes. "
+                         "Stage intervals separately support diagnostics.")
     summary["member_campaign_count"] = len(member_summaries)
     missing_summaries = sorted(set(MEMBERS) - set(member_summaries))
     paper_rows = []
     discovery_seconds = []
+    arxiv_discovery_seconds = []
+    kaggle_preparation_seconds = []
+    combined_discovery_seconds = []
+    component_measurement_missing = []
     measurement_missing = []
+    assigned_measurement_missing = []
     for member in MEMBERS:
         value = member_summaries.get(member, {})
-        paper_metrics = value.get("paper_timings") or {}
+        paper_metrics = value.get("assigned_paper_timings")
+        assigned_metrics_available = isinstance(paper_metrics, dict)
+        if not assigned_metrics_available:
+            # Giữ khả năng đọc tổng phụ cũ chỉ tính bài báo, nhưng không xem chúng là
+            # phép đo bao phủ toàn bộ ID được giao.
+            paper_metrics = value.get("paper_timings") or {}
+            assigned_measurement_missing.append(member)
         discovery = value.get("discovery_timings") or {}
+        components = discovery.get("components") or {}
+        arxiv_component = components.get("arxiv_discovery_and_version_history") or {}
+        kaggle_component = components.get("kaggle_snapshot_and_index_preparation") or {}
+        combined_component = components.get("discovery_with_kaggle_preparation") or {}
+        component_values = (
+            arxiv_component.get("wall_seconds"),
+            kaggle_component.get("wall_seconds"),
+            combined_component.get("wall_seconds"),
+        )
+        if (all(component.get("status") == "complete" for component in
+                (arxiv_component, kaggle_component, combined_component))
+                and all(type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0
+                        for seconds in component_values)):
+            arxiv_discovery_seconds.append(component_values[0])
+            kaggle_preparation_seconds.append(component_values[1])
+            combined_discovery_seconds.append(component_values[2])
+        else:
+            component_measurement_missing.append(member)
         rows_for_member = paper_metrics.get("papers")
         seconds = discovery.get("wall_seconds")
+        expected_count = value.get("expected_id_count")
         if (paper_metrics.get("status") != "complete" or not isinstance(rows_for_member, list)
-                or not rows_for_member or discovery.get("status") != "complete"
+                or not rows_for_member
+                or (assigned_metrics_available and
+                    (type(expected_count) is not int or len(rows_for_member) != expected_count))
+                or discovery.get("status") != "complete"
                 or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0):
             measurement_missing.append(member)
             continue
+        if assigned_metrics_available and len(rows_for_member) != expected_count:
+            assigned_measurement_missing.append(member)
         paper_rows.extend(rows_for_member)
         discovery_seconds.append(seconds)
     ids = [row.get("arxiv_id") for row in paper_rows if isinstance(row, dict)]
@@ -145,10 +181,70 @@ def aggregate(base: Path) -> dict:
     measurements_valid = (not measurement_missing and len(ids) == len(paper_rows) and len(set(ids)) == len(ids)
                           and all(isinstance(aid, str) and aid for aid in ids)
                           and all(type(v) in (int, float) and math.isfinite(v) and v >= 0 for v in durations))
+    assigned_measurements_complete = (
+        measurements_valid and not assigned_measurement_missing
+        and len(paper_rows) == 20000
+    )
     summary["paper_timing_count"] = len(paper_rows)
+    summary["assigned_paper_measurement_status"] = (
+        "complete" if assigned_measurements_complete else "incomplete"
+    )
+    summary["assigned_paper_measurement_missing_members"] = sorted(set(assigned_measurement_missing))
+    summary["average_paper_denominator"] = (
+        "all assigned IDs, including confirmed not_found IDs"
+        if assigned_measurements_complete
+        else "legacy or partial paper population; not verified as all assigned IDs"
+    )
     summary["average_paper_seconds"] = sum(durations) / len(durations) if measurements_valid else None
     summary["discovery_wall_seconds"] = sum(discovery_seconds) if measurements_valid else None
-    summary["paper_and_discovery_measurement_status"] = "complete" if measurements_valid else "incomplete"
+    summary["paper_and_discovery_measurement_status"] = (
+        "complete" if assigned_measurements_complete
+        else "legacy_subtotal_only" if measurements_valid
+        else "incomplete"
+    )
+    components_complete = not component_measurement_missing and len(arxiv_discovery_seconds) == len(MEMBERS)
+    summary["arxiv_discovery_and_version_history_wall_seconds"] = (
+        sum(arxiv_discovery_seconds) if components_complete else None
+    )
+    summary["kaggle_snapshot_and_index_preparation_wall_seconds"] = (
+        sum(kaggle_preparation_seconds) if components_complete else None
+    )
+    summary["discovery_with_kaggle_preparation_wall_seconds"] = (
+        sum(combined_discovery_seconds) if components_complete else None
+    )
+    summary["discovery_component_measurement_status"] = (
+        "complete" if components_complete else "incomplete"
+    )
+    if component_measurement_missing:
+        summary["discovery_component_measurement_missing_members"] = sorted(component_measurement_missing)
+    storage_rows = [member_summaries.get(member, {}).get("storage_size_metrics") for member in MEMBERS]
+    storage_fields = {
+        "corpus_bytes": "corpus_bytes",
+        "source_archives_bytes": "source_archives_bytes",
+        "official_export_bytes": "official_export_bytes",
+        "final_output_storage_bytes": "final_output_storage_bytes",
+    }
+    storage_complete = all(
+        isinstance(row, dict) and row.get("status") == "complete"
+        and all(type(row.get(field)) is int and row[field] >= 0
+                for field in storage_fields.values())
+        for row in storage_rows
+    )
+    summary["final_storage_sizes"] = {
+        "status": "complete" if storage_complete else "incomplete",
+        **{
+            output_key: (sum(row[input_key] for row in storage_rows)
+                         if storage_complete else None)
+            for output_key, input_key in storage_fields.items()
+        },
+        "derived_bibliography_artifacts_bytes": None,
+        "derived_bibliography_status": "not_summed_shared_root; inspect member summaries",
+        "final_output_scope": "sum of the four members' selected source archives and official export directories; local corpora and derived bibliography artifacts are reported separately",
+    }
+    if not storage_complete:
+        summary["status"] = "incomplete"
+        summary["active_seconds"] = None
+        summary["end_to_end_complete"] = False
     size_rows = [member_summaries.get(member, {}).get("logical_size_metrics") for member in MEMBERS]
     size_valid = all(
         isinstance(row, dict)
@@ -216,6 +312,60 @@ def aggregate(base: Path) -> dict:
         summary["status"] = "incomplete"
         summary["active_seconds"] = None
         summary["end_to_end_complete"] = False
+    reference_id_rows = [
+        member_summaries.get(member, {}).get("reference_arxiv_id_coverage")
+        for member in MEMBERS
+    ]
+    reference_id_valid = all(
+        isinstance(row, dict)
+        and type(row.get("identified_records")) is int
+        and type(row.get("eligible_records")) is int
+        and 0 <= row["identified_records"] <= row["eligible_records"]
+        and isinstance(row.get("definition"), str)
+        for row in reference_id_rows
+    )
+    if reference_id_valid and len({row["definition"] for row in reference_id_rows}) == 1:
+        identified = sum(row["identified_records"] for row in reference_id_rows)
+        eligible = sum(row["eligible_records"] for row in reference_id_rows)
+        summary["reference_arxiv_id_coverage"] = {
+            "status": "complete" if eligible else "not_applicable_no_complete_references",
+            "identified_records": identified,
+            "eligible_records": eligible,
+            "coverage_rate_percent": round(100.0 * identified / eligible, 2) if eligible else None,
+            "definition": reference_id_rows[0]["definition"],
+        }
+    else:
+        summary["reference_arxiv_id_coverage"] = {"status": "incomplete"}
+        summary["status"] = "incomplete"
+        summary["active_seconds"] = None
+        summary["end_to_end_complete"] = False
+    average_rows = [
+        member_summaries.get(member, {}).get("average_references_per_paper")
+        for member in MEMBERS
+    ]
+    average_valid = all(
+        isinstance(row, dict)
+        and type(row.get("raw_reference_records")) is int
+        and type(row.get("eligible_papers")) is int
+        and row["raw_reference_records"] >= 0
+        and row["eligible_papers"] >= 0
+        and isinstance(row.get("definition"), str)
+        for row in average_rows
+    )
+    if average_valid and len({row["definition"] for row in average_rows}) == 1:
+        raw_records = sum(row["raw_reference_records"] for row in average_rows)
+        eligible_papers = sum(row["eligible_papers"] for row in average_rows)
+        summary["average_references_per_paper"] = {
+            "value": round(raw_records / eligible_papers, 2) if eligible_papers else None,
+            "raw_reference_records": raw_records,
+            "eligible_papers": eligible_papers,
+            "definition": average_rows[0]["definition"],
+        }
+    else:
+        summary["average_references_per_paper"] = {"status": "incomplete"}
+        summary["status"] = "incomplete"
+        summary["active_seconds"] = None
+        summary["end_to_end_complete"] = False
     expected_ids = {member: 5000 for member in MEMBERS}
     signature_fields = ("selection_fingerprint", "data_signature", "environment_fingerprint",
                         "starting_state_fingerprint", "measurement_protocol")
@@ -237,7 +387,7 @@ def aggregate(base: Path) -> dict:
             if any(not value for value in values):
                 summary[field] = None
             elif field == "selection_fingerprint":
-                # Each member notebook records the full group selection hash.
+                # Sổ tay của mỗi thành viên ghi hash của toàn bộ phạm vi nhóm.
                 summary[field] = values[0] if len(set(values)) == 1 else None
             else:
                 summary[field] = __import__("hashlib").sha256(
@@ -251,6 +401,14 @@ def aggregate(base: Path) -> dict:
             summary["status"] = "incomplete"
             summary["active_seconds"] = None
             summary["end_to_end_complete"] = False
+        protocols = {member_summaries[member].get("measurement_protocol") for member in MEMBERS}
+        if len(protocols) != 1 or None in protocols:
+            summary["status"] = "incomplete"
+            summary["active_seconds"] = None
+            summary["end_to_end_complete"] = False
+            summary["measurement_protocol_consistent"] = False
+        else:
+            summary["measurement_protocol_consistent"] = True
         arms = {arm for arm in arms_by_member.values() if arm is not None}
         summary["discovery_arm"] = next(iter(arms)) if len(arms) == 1 else "mixed_fallback"
     if missing_summaries or errors:
@@ -262,6 +420,7 @@ def aggregate(base: Path) -> dict:
         summary["end_to_end_complete"] = bool(summary.get("expected_id_count") == 20000
                                                and summary.get("data_signature")
                                                and summary.get("end_to_end_wall_seconds") is not None
+                                               and assigned_measurements_complete
                                                and measurements_valid)
     return summary
 

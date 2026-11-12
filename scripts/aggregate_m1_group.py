@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Add repo root to sys.path
+# Thêm thư mục gốc kho mã vào sys.path.
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -143,7 +143,7 @@ def _inspect_cohort_archive(
             ),
         }
 
-    # Validate cohort number in manifest
+    # Xác thực số lô trong manifest.
     manifest_cohort = manifest_data.get("cohort_number") if "cohort_number" in manifest_data else manifest_data.get("cohort_id")
     if manifest_cohort is not None and manifest_cohort != cohort_num:
         return {
@@ -231,7 +231,7 @@ def _inspect_cohort_archive(
         "issues": [],
     }
 
-    # Evaluate each expected paper in cohort_pairs
+    # Đánh giá từng bài báo dự kiến trong cohort_pairs.
     for folder_key, (mssv, aid) in expected_folder_keys.items():
         if folder_key not in seen_folder_keys:
             paper_results["unprocessed"] += 1
@@ -260,7 +260,7 @@ def _inspect_cohort_archive(
 
         if disc == "not_found":
             if p_man.get("status") == "not_found" and p_man.get("versions") == {}:
-                # Ensure no extra files exist for a not_found paper
+                # Đảm bảo bài not_found không có tệp thừa.
                 extra_files = False
                 for p_member in files_by_paper.get(folder_key, set()):
                     rel_p = "/".join(p_member.parts[1:])
@@ -292,7 +292,7 @@ def _inspect_cohort_archive(
                 paper_results["issues"].append(
                     f"Cohort {cohort_num}: Paper {aid} metadata_status '{p_man.get('metadata_status')}' is not complete"
                 )
-            # Verify metadata.json file exists in tar
+            # Xác minh archive có tệp metadata.json.
             meta_rel = f"{folder_key}/metadata.json"
             if meta_rel not in tar_members_map or not tar_members_map[meta_rel].isfile():
                 is_valid = False
@@ -307,7 +307,7 @@ def _inspect_cohort_archive(
                 paper_results["issues"].append(
                     f"Cohort {cohort_num}: Paper {aid} references_status '{p_man.get('references_status')}' is not complete"
                 )
-            # Verify references.json file exists in tar
+            # Xác minh archive có tệp references.json.
             ref_rel = f"{folder_key}/references.json"
             if ref_rel not in tar_members_map or not tar_members_map[ref_rel].isfile():
                 is_valid = False
@@ -323,7 +323,7 @@ def _inspect_cohort_archive(
                     f"Cohort {cohort_num}: Paper {aid} status '{p_man.get('status')}' is not in complete states"
                 )
 
-            # Check file checksums and version files
+            # Kiểm tra checksum và tệp phiên bản.
             versions = p_man.get("versions", {})
             if isinstance(versions, dict):
                 for v_name, v_data in versions.items():
@@ -360,7 +360,7 @@ def _inspect_cohort_archive(
                                         )
                                         break
 
-            # Verify no unmanaged extraneous files exist inside paper folder
+            # Xác minh thư mục bài báo không có tệp thừa ngoài quản lý.
             for p_member in files_by_paper.get(folder_key, set()):
                 rel_to_paper = "/".join(p_member.parts[1:])
                 if rel_to_paper not in managed_files_for_paper:
@@ -453,7 +453,7 @@ def _aggregate_member_benchmarks(reports_dir: Path) -> Dict[str, Any]:
             except Exception:
                 pass
 
-        # Deduplicate attempts
+        # Loại lượt chạy trùng lặp.
         attempt_ids = rep_data.get("attempt_ids", [])
         if attempt_ids:
             new_attempts = [aid for aid in attempt_ids if aid not in seen_attempt_ids]
@@ -614,7 +614,7 @@ def audit_group_campaign(
         archives_dir = root / "archives"
         reports_dir = root / "reports"
 
-        # Check for foreign cohort archives in member directory
+        # Tìm archive thuộc lô khác trong thư mục thành viên.
         if archives_dir.is_dir():
             import re
             for f in sorted(archives_dir.glob("cohort_*_corpus.tar.gz")):
@@ -699,7 +699,7 @@ def audit_group_campaign(
                     audit_summary["unprocessed"] += p_res["unprocessed"]
                     audit_summary["integrity_failures"] += p_res["integrity_failures"]
 
-                # Global cross-cohort duplicate paper ID tracking
+                # Theo dõi ID bài báo trùng giữa các lô.
                 expected_map = {arxiv_id_to_folder_key(aid): aid for _, aid in pairs}
                 for s_key in insp.get("seen_folder_keys", []):
                     if s_key in expected_map:
@@ -717,7 +717,7 @@ def audit_group_campaign(
                         else:
                             global_seen_paper_ids[p_aid] = cohort_num
             else:
-                # Fast unverified inspection fallback (never PASS)
+                # Nhánh kiểm tra nhanh chưa xác minh (không bao giờ trả PASS).
                 try:
                     m_data = json.loads(manifest_path.read_text(encoding="utf-8"))
                     included = m_data.get("included_count", 0)
@@ -733,7 +733,7 @@ def audit_group_campaign(
                         f"Corrupted manifest for cohort {cohort_num}: {exc}"
                     )
 
-        # Aggregate actual benchmark artifacts
+        # Tổng hợp artifact đo hiệu năng thực tế.
         bench = _aggregate_member_benchmarks(reports_dir)
         member_report = dict(bench)
         if member_report.get("status") == "COLLECTED":
@@ -762,7 +762,7 @@ def audit_group_campaign(
 
         audit_summary["members"][mssv] = member_data
 
-    # Group benchmark roll-up
+    # Tổng hợp phép đo toàn nhóm.
     if any_member_benchmark_collected:
         audit_summary["benchmark"]["status"] = "PARTIAL_STAGE_MEASUREMENTS"
         audit_summary["benchmark"]["known_stage_active_seconds"] = round(group_active_seconds, 2)
@@ -781,7 +781,7 @@ def audit_group_campaign(
         bool(m["archive_issues"]) for m in audit_summary["members"].values()
     )
 
-    # Distinct Gates
+    # Các điều kiện xét riêng.
     data_integrity_pass = bool(
         verify_archives
         and audit_summary["integrity_failures"] == 0
@@ -809,7 +809,7 @@ def audit_group_campaign(
     audit_summary["coverage_20k_pass"] = coverage_20k_pass
     audit_summary["group_handoff_pass"] = group_handoff_pass
 
-    # Evaluate final status
+    # Đánh giá trạng thái cuối.
     if group_handoff_pass:
         audit_summary["status"] = "PASS"
     elif missing_members or len(audit_summary["missing_cohorts"]) > 0:

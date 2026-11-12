@@ -172,7 +172,14 @@ def _extract_payload(payload, directory, metrics):
     raise SourceError("unsupported_source", "Unrecognized source format; TeX availability is unknown")
 
 
-def extract_source(source_path: str | Path, destination: str | Path) -> dict:
+def extract_source(
+    source_path: str | Path,
+    destination: str | Path,
+    *,
+    bbl_artifact_dir: str | Path | None = None,
+    mssv: str | None = None,
+    versioned_id: str | None = None,
+) -> dict:
     destination = Path(destination).absolute()
     result = {"status": None, "files": [], "error": None}
     if destination.exists() or destination.is_symlink():
@@ -194,13 +201,34 @@ def extract_source(source_path: str | Path, destination: str | Path) -> dict:
                 payload = unpacked
             metrics = {"extracted_bytes": 0, "removed_files": 0}
             files = _extract_payload(payload, directory, metrics)
+            bbl_policy = None
+            if mssv is not None and versioned_id is not None:
+                match = ID_PATTERN.fullmatch(versioned_id)
+                if match is None or match.group("version") is None:
+                    raise SourceError("invalid_response", "Invalid version identity for BBL filtering")
+                from src.bbl_handling import BblConversionError, apply_bbl_source_policy
+
+                try:
+                    files, bbl_policy = apply_bbl_source_policy(
+                        directory,
+                        files,
+                        artifact_root=bbl_artifact_dir,
+                        mssv=mssv,
+                        arxiv_id=match.group("base"),
+                        version=f"v{match.group('version')}",
+                    )
+                except BblConversionError as exc:
+                    raise SourceError("storage_error", str(exc)) from exc
             has_tex = any(PurePosixPath(f).suffix.lower() == ".tex" for f in files)
             status = "success" if has_tex else "no_tex_source"
             if files:
                 if destination.exists() or destination.is_symlink():
                     raise SourceError("output_exists", "Destination already exists")
                 directory.rename(destination)
-            return {**result, **metrics, "status": status, "files": sorted(files)}
+            return {
+                **result, **metrics, "status": status, "files": sorted(files),
+                **({"bbl_policy": bbl_policy} if bbl_policy is not None else {}),
+            }
     except SourceError as exc:
         return {**result, "status": exc.status, "error": str(exc)}
     except (tarfile.TarError, zipfile.BadZipFile, gzip.BadGzipFile,
@@ -233,6 +261,7 @@ def download_source(
     timeout: float = 30.0,
     max_attempts: int = 3,
     user_agent: str = arxiv_client.USER_AGENT,
+    bbl_artifact_dir: str | Path | None = None,
 ) -> dict:
     if not isinstance(mssv, str) or not re.fullmatch(r"[0-9]+", mssv):
         raise ValueError("mssv must be a non-empty string of digits")
@@ -349,7 +378,13 @@ def download_source(
             )
             result.update(response)
             if result["status"] == "downloaded":
-                result.update(extract_source(payload, destination))
+                result.update(extract_source(
+                    payload,
+                    destination,
+                    bbl_artifact_dir=bbl_artifact_dir,
+                    mssv=mssv,
+                    versioned_id=versioned_id,
+                ))
             return result
     except OSError as exc:
         return {**result, "status": "storage_error", "error": str(exc)}

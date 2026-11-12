@@ -118,7 +118,7 @@ def _resource_peak_rss_bytes() -> int | None:
         peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     except (OSError, ValueError):
         return None
-    # Linux reports KiB; macOS reports bytes.
+    # Linux báo KiB; macOS báo byte.
     return int(peak * 1024) if sys.platform.startswith("linux") else int(peak)
 
 
@@ -262,7 +262,7 @@ def benchmark_pipeline(
 
     try:
         crawler_main_func()
-    except BaseException as exc:  # record and re-raise after writing the report
+    except BaseException as exc:  # ghi nhận rồi phát sinh lại lỗi sau khi lưu báo cáo.
         failure = exc
         failure_info = {
             "type": type(exc).__name__,
@@ -281,6 +281,7 @@ def benchmark_pipeline(
         def optional_mb(value):
             return _mb(value) if value is not None else None
         total_ram = _total_ram_bytes()
+        system_ram = sampled.get("system_ram") or {}
         report = {
             "status": "failed" if failure is not None else "success",
             "crawler": getattr(crawler_main_func, "__name__", repr(crawler_main_func)),
@@ -293,6 +294,13 @@ def benchmark_pipeline(
             "peak_ram_mb": optional_mb(ram["sampled_peak_bytes"]),
             "average_ram_mb": optional_mb(ram["average_bytes"]),
             "ram_source": ram["source"],
+            "system_peak_ram_mb": optional_mb(
+                system_ram.get("sampled_peak_bytes")
+            ),
+            "system_average_ram_mb": optional_mb(
+                system_ram.get("average_bytes")
+            ),
+            "system_ram_scope": system_ram.get("scope"),
             "ram_sample_interval_seconds": sampled["sampling"]["ram_interval_seconds"],
             "disk_corpus_size_mb": optional_mb(disk["final_corpus_bytes"]),
             "disk_used_diff_mb": (_mb(final_disk_used - initial_disk_used)

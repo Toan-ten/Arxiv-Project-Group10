@@ -6,6 +6,7 @@ only for an existing, resolved checkpoint, with one corpus writer at a time.
 import copy
 from datetime import datetime, timezone
 import math
+import os
 import re
 from urllib.parse import parse_qs, urlencode, urlsplit
 import xml.etree.ElementTree as ET
@@ -56,7 +57,7 @@ def parse_version_response(xml, versioned_id):
     if isinstance(xml, str):
         xml = xml.encode("utf-8")
     _require(isinstance(xml, bytes) and len(xml) <= MAX_XML_BYTES, "XML size/type")
-    # Only UTF-8 Atom, with no entity declarations; never expand a DTD.
+    # Chỉ nhận Atom UTF-8, không có khai báo entity; không phân tích mở rộng DTD.
     try:
         text = xml.decode("utf-8-sig")
         _require("<!DOCTYPE" not in text.upper() and "<!ENTITY" not in text.upper(), "DTD")
@@ -146,11 +147,37 @@ def _cached(metadata):
              "unknown history provenance requires audit")
     _instant(history.get("retrieved_at"))
     if provider == "kaggle_snapshot":
+        # Điểm khôi phục Kaggle cũ có snapshot_time="unknown" và không có
+        # mã kiểm tra chỉ mục. Vẫn đọc được dữ liệu này nhưng không xem là bằng chứng
+        # theo chính sách đối chiếu bản chụp; bên gọi sẽ truy vấn arXiv.
+        strict_policy = os.environ.get("M1_KAGGLE_POLICY_VERSION") == "m1-kaggle-reconcile-v2"
+        if history.get("provenance_policy") != "m1-kaggle-reconcile-v2" and strict_policy:
+            return False
+        if history.get("provenance_policy") != "m1-kaggle-reconcile-v2":
+            _require(isinstance(history.get("snapshot_sha256"), str)
+                     and re.fullmatch(r"[0-9a-f]{64}", history["snapshot_sha256"]) is not None
+                     and history.get("dataset") == "Cornell-University/arxiv"
+                     and isinstance(history.get("snapshot_time"), str)
+                     and bool(history["snapshot_time"]), "invalid legacy Kaggle history provenance")
+            discovery = (metadata.get("provenance", {}).get("arxiv") or {}).get("snapshot") or {}
+            _require(discovery.get("status") == "found" and discovery.get("http_status") == 200
+                     and discovery.get("version_status") == "resolved"
+                     and discovery.get("version_ids") == [v["versioned_id"] for v in metadata["versions"]],
+                     "legacy Kaggle dates do not match arXiv-confirmed versions")
+            _require(all(v["date_status"] == "verified" for v in metadata["versions"])
+                     and metadata["revised_dates"] is not None
+                     and [v["date"] for v in metadata["versions"][1:]] == metadata["revised_dates"],
+                     "legacy Kaggle history disagreements")
+            return True
         _require(isinstance(history.get("snapshot_sha256"), str)
                  and re.fullmatch(r"[0-9a-f]{64}", history["snapshot_sha256"]) is not None
+                 and isinstance(history.get("index_sha256"), str)
+                 and re.fullmatch(r"[0-9a-f]{64}", history["index_sha256"]) is not None
                  and history.get("dataset") == "Cornell-University/arxiv"
-                 and isinstance(history.get("snapshot_time"), str)
-                 and bool(history["snapshot_time"]), "invalid Kaggle history provenance")
+                 and history.get("comparison_precision") == "calendar_day_utc"
+                 and (history.get("downloaded_at") is None
+                      or isinstance(history.get("downloaded_at"), str)),
+                 "invalid Kaggle history provenance")
         discovery = (metadata.get("provenance", {}).get("arxiv") or {}).get("snapshot") or {}
         _require(discovery.get("status") == "found" and discovery.get("http_status") == 200
                  and discovery.get("version_status") == "resolved"
@@ -162,11 +189,18 @@ def _cached(metadata):
                  "kaggle history disagreements")
         return True
     dates = _verified_dates(metadata, history.get("snapshot"))
+    def same_date(left, right):
+        if isinstance(left, str) and len(left) == 10 or isinstance(right, str) and len(right) == 10:
+            from src.kaggle_candidates import _calendar_day_utc
+            return _calendar_day_utc(left) == _calendar_day_utc(right)
+        return _instant(left) == _instant(right)
+
     _require(metadata["submission_date"] is not None
-             and _instant(metadata["submission_date"]) == _instant(dates[0])
+             and same_date(metadata["submission_date"], dates[0])
              and all(v["date_status"] == "verified" for v in metadata["versions"])
              and metadata["revised_dates"] is not None
-             and [_instant(d) for d in metadata["revised_dates"]] == [_instant(d) for d in dates[1:]],
+             and all(same_date(left, right)
+                     for left, right in zip(metadata["revised_dates"], dates[1:])),
              "history cache disagrees with dates")
     return True
 
@@ -212,7 +246,14 @@ def enrich_version_history(store, mssv, arxiv_id, *, timeout=30.0, max_attempts=
     metadata = _checkpoint(store, mssv, arxiv_id)
     if _cached(metadata) or _single_version_cached(metadata):
         return dict(action="cached", status="complete", stopped=False, records=[], error=None)
-    _require(metadata["status"] != "complete", "complete metadata is immutable")
+    legacy_kaggle_history = (
+        isinstance(metadata.get("provenance", {}).get("version_history"), dict)
+        and metadata["provenance"]["version_history"].get("provider") == "kaggle_snapshot"
+        and metadata["provenance"]["version_history"].get("provenance_policy")
+        != "m1-kaggle-reconcile-v2"
+    )
+    _require(metadata["status"] != "complete" or legacy_kaggle_history,
+             "complete metadata is immutable")
     records = []
     for version in metadata["versions"]:
         identifier = version["versioned_id"]
@@ -241,10 +282,10 @@ def enrich_version_history(store, mssv, arxiv_id, *, timeout=30.0, max_attempts=
         records.append({k: result[k] for k in (
             "versioned_id", "published", "date", "raw_xml", "http_status", "attempts")})
     dates = _verified_dates(metadata, records)
-    # Detect a changed checkpoint before persistence; still requires one writer.
+    # Phát hiện điểm khôi phục đã đổi trước khi ghi; thao tác vẫn yêu cầu một tiến trình ghi duy nhất.
     _require(_checkpoint(store, mssv, arxiv_id) == metadata, "checkpoint changed during fetch")
     value = copy.deepcopy(metadata)
-    # Preserve the original v1 spelling/provenance if it denotes the same instant.
+    # Giữ nguyên cách ghi và xuất xứ ban đầu của v1 nếu chúng chỉ cùng một thời điểm.
     value["submission_date"] = metadata["submission_date"] or dates[0]
     for index, version in enumerate(value["versions"]):
         old_date = version["date"]
@@ -257,7 +298,7 @@ def enrich_version_history(store, mssv, arxiv_id, *, timeout=30.0, max_attempts=
     if s2_integration.metadata_cached(metadata):
         original = copy.deepcopy(metadata["provenance"]["semantic_scholar"])
         value = s2_integration.metadata_snapshot(value, original["snapshot"])
-        # No new S2 request was made. Preserve its real retrieval timestamp.
+        # Không có request S2 mới; giữ nguyên thời điểm truy xuất thực tế.
         value["provenance"]["semantic_scholar"] = original
     else:
         value["missing_fields"] = [f for f in value["missing_fields"] if f != "version_history"]

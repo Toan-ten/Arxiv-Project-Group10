@@ -5,8 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from src.bbl_handling import BblConversionError, apply_bbl_source_policy
 from src.storage import CorpusStorage, IntegrityError
 from scripts.generate_m1_report import (
+    _validate_bbl_artifacts,
     compute_m1_statistics,
     format_markdown_summary,
     METRIC_DEFINITION_VERSION,
@@ -126,6 +128,40 @@ class TestGenerateM1Report(unittest.TestCase):
         # Because metadata and references are not complete yet, m1_complete must be 0
         self.assertEqual(stats["m1_complete_papers"], 0)
         self.assertEqual(stats["m1_completion_rate"], 0.0)
+
+    def test_report_preflight_requires_and_verifies_bbl_artifact_root(self):
+        arxiv_id = self.arxiv_id_1
+        self._setup_found_paper(arxiv_id, ["v1"])
+        version_dir = self.store.begin_version(self.mssv, arxiv_id, "v1")
+        version_dir.mkdir(parents=True)
+        (version_dir / "main.tex").write_bytes(b"\\documentclass{article}\\begin{document}\\cite{x}\\end{document}")
+        (version_dir / "refs.bbl").write_bytes(
+            b"\\begin{thebibliography}{1}\\bibitem{x} Entry\\end{thebibliography}"
+        )
+        artifact_root = Path(self.td.name) / "bbl-artifacts"
+        files, policy = apply_bbl_source_policy(
+            version_dir, ["main.tex", "refs.bbl"], artifact_root=artifact_root,
+            mssv=self.mssv, arxiv_id=arxiv_id, version="v1",
+        )
+        configured_store = CorpusStorage(
+            self.store.root, bbl_artifact_root=artifact_root,
+        )
+        configured_store.record_source_result({
+            "mssv": self.mssv, "arxiv_id": arxiv_id,
+            "versioned_id": f"{arxiv_id}v1", "status": "success",
+            "files": sorted(files), "downloaded_bytes": 100, "error": None,
+            "bbl_policy": policy,
+        })
+
+        with self.assertRaisesRegex(BblConversionError, "bbl_artifact_root_unconfigured"):
+            _validate_bbl_artifacts(self.store, [(self.mssv, arxiv_id)])
+
+        _validate_bbl_artifacts(configured_store, [(self.mssv, arxiv_id)])
+
+        index_path = artifact_root / policy["index_path"]
+        index_path.write_bytes(b"corrupt")
+        with self.assertRaisesRegex(BblConversionError, "bbl_policy_index_checksum_mismatch"):
+            _validate_bbl_artifacts(configured_store, [(self.mssv, arxiv_id)])
 
     def test_multi_version_paper(self):
         """Verify paper with multiple versions sums counts correctly."""

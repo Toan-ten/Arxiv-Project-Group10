@@ -237,6 +237,60 @@ class TestFastProduction(unittest.TestCase):
         self.assertEqual(runner.retry_wait_budget, 150.0)
         self.assertEqual(runner.timeout, 20.0)
 
+    def test_bbl_artifact_archive_restores_index_and_evidence_before_resume(self):
+        from src.bbl_handling import apply_bbl_source_policy
+
+        runner = FastProductionRunner(self.local_root, self.drive_root)
+        mssv, arxiv_id = cohort_pairs(1)[0]
+        runner.store.record_discovery({
+            "mssv": mssv,
+            "arxiv_id": arxiv_id,
+            "status": "found",
+            "version_status": "resolved",
+            "version_ids": [f"{arxiv_id}v1"],
+            "latest_version_id": f"{arxiv_id}v1",
+            "title": "Archive test",
+            "authors": ["Author"],
+            "published": "2025-08-01",
+            "updated": "2025-08-01",
+            "missing_fields": [],
+        })
+        version_dir = runner.store.begin_version(mssv, arxiv_id, "v1")
+        version_dir.mkdir(parents=True)
+        (version_dir / "main.tex").write_bytes(b"\\documentclass{article}")
+        (version_dir / "refs.bib").write_bytes(b"@misc{x, title={X}}")
+        (version_dir / "refs.bbl").write_bytes(b"source bibliography")
+        files, policy = apply_bbl_source_policy(
+            version_dir,
+            ["main.tex", "refs.bib", "refs.bbl"],
+            artifact_root=runner.bbl_artifact_dir,
+            mssv=mssv,
+            arxiv_id=arxiv_id,
+            version="v1",
+        )
+        runner.store.record_source_result({
+            "mssv": mssv,
+            "arxiv_id": arxiv_id,
+            "versioned_id": f"{arxiv_id}v1",
+            "status": "success",
+            "files": sorted(files),
+            "downloaded_bytes": 100,
+            "error": None,
+            "bbl_policy": policy,
+        })
+
+        bundle = runner._archive_bbl_artifacts(1)
+        self.assertIsNotNone(bundle)
+        self.assertEqual(bundle["file_count"], len(bundle["files"]))
+        self.assertEqual(runner._cohort_bbl_policy_state(1), "complete")
+        runner._validate_bbl_artifact_archive(1, bundle, restore=False)
+        for relative in bundle["files"]:
+            (runner.bbl_artifact_dir / relative).unlink()
+
+        runner._validate_bbl_artifact_archive(1, bundle, restore=True)
+
+        self.assertTrue(runner.store.should_skip_version(mssv, arxiv_id, "v1"))
+
     def test_archive_and_restore_cohort(self):
         runner = FastProductionRunner(
             self.local_root,

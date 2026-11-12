@@ -139,7 +139,7 @@ def _atomic_json(path, payload):
             os.fsync(stream.fileno())
         os.replace(temporary, path)
         if os.name != "nt":
-            # Directory fsync is not supported by every filesystem.
+            # Không phải hệ thống tệp nào cũng hỗ trợ fsync thư mục.
             try:
                 directory = os.open(path.parent, os.O_RDONLY)
                 try:
@@ -159,10 +159,14 @@ class CorpusStorage:
     after an interrupted session; a plan never performs a download.
     """
 
-    def __init__(self, root, *, run_id=None):
+    def __init__(self, root, *, run_id=None, bbl_artifact_root=None):
         _require(run_id is None or isinstance(run_id, str) and run_id.strip(),
                  "run_id must be a nonempty string or None")
         self.root = Path(root).expanduser().resolve()
+        self.bbl_artifact_root = (
+            Path(bbl_artifact_root).expanduser().resolve()
+            if bbl_artifact_root is not None else None
+        )
         self.run_id = run_id
         self.assignments = load_config()
 
@@ -389,6 +393,45 @@ class CorpusStorage:
             _require(record["content_type"] is None or isinstance(record["content_type"], str),
                      "Invalid content type")
             _require(record["source_url"] == SOURCE_URL + arxiv_id + name, "Wrong source URL")
+            bbl_policy = record.get("bbl_policy")
+            if bbl_policy is not None:
+                _require(isinstance(bbl_policy, dict), "Invalid BBL policy record")
+                _require(
+                    bbl_policy.get("policy_version") == "bbl-exception-v1"
+                    and bbl_policy.get("status") == "complete"
+                    and isinstance(bbl_policy.get("items"), list),
+                    "Invalid BBL policy status",
+                )
+                index_path = bbl_policy.get("index_path")
+                index_sha = bbl_policy.get("index_sha256")
+                _require(index_path is None or isinstance(index_path, str),
+                         "Invalid BBL policy index path")
+                _require(index_sha is None or isinstance(index_sha, str)
+                         and re.fullmatch(r"[0-9a-f]{64}", index_sha),
+                         "Invalid BBL policy index checksum")
+                if index_path is not None:
+                    _relative(index_path)
+                for item in bbl_policy["items"]:
+                    _require(isinstance(item, dict), "Invalid BBL policy item")
+                    _relative(item.get("bbl_path"))
+                    _require(
+                        isinstance(item.get("bbl_sha256"), str)
+                        and re.fullmatch(r"[0-9a-f]{64}", item["bbl_sha256"]),
+                        "Invalid BBL source checksum",
+                    )
+                    for field in ("source_evidence_path", "derived_bib_path"):
+                        path_value = item.get(field)
+                        _require(path_value is None or isinstance(path_value, str),
+                                 "Invalid BBL artifact path")
+                        if path_value is not None:
+                            _relative(path_value)
+                    digest = item.get("derived_bib_sha256")
+                    _require(digest is None or isinstance(digest, str)
+                             and re.fullmatch(r"[0-9a-f]{64}", digest),
+                             "Invalid derived BibTeX checksum")
+                    entry_count = item.get("entry_count")
+                    _require(entry_count is None or type(entry_count) is int and entry_count >= 0,
+                             "Invalid derived BibTeX entry count")
             _require(record["archive_sha256"] is None
                      or isinstance(record["archive_sha256"], str)
                      and re.fullmatch(r"[0-9a-f]{64}", record["archive_sha256"]),
@@ -419,7 +462,7 @@ class CorpusStorage:
     def initialize_paper(self, mssv, arxiv_id):
         paper = self.paper_path(mssv, arxiv_id)
         if paper.exists() and any(paper.iterdir()):
-            # Fail closed on incomplete initialization/orphaned source.
+            # Từ chối an toàn khi khởi tạo chưa đầy đủ hoặc mã nguồn bị mồ côi.
             manifest = self.read_manifest(mssv, arxiv_id)
             self.read_metadata(mssv, arxiv_id)
             self.read_references(mssv, arxiv_id)
@@ -455,7 +498,7 @@ class CorpusStorage:
             http_status=None, content_type=None, source_url=SOURCE_URL + arxiv_id + name,
             archive_bytes=None, archive_sha256=None, files=[], file_checksums={},
             kept_bytes=None, extracted_bytes=None, removed_files=None, attempts=0,
-            run_id=None, completed_at=None, error=None,
+            run_id=None, completed_at=None, error=None, bbl_policy=None,
         )
 
     def _sync(self, manifest, metadata, references):
@@ -523,8 +566,15 @@ class CorpusStorage:
         _require(value["version_status"] == old["version_status"]
                  and self._versions(value, arxiv_id) == self._versions(old, arxiv_id),
                  "Use record_discovery to change version coverage")
-        _require(old["status"] != "complete" or value == old,
-                 "Do not overwrite complete metadata")
+        if old["status"] == "complete" and value != old:
+            previous = _clone(old)
+            replacement = _clone(value)
+            previous["provenance"]["version_history"] = None
+            replacement["provenance"]["version_history"] = None
+            _require(previous == replacement
+                     and old["provenance"]["version_history"]
+                     != value["provenance"]["version_history"],
+                     "Complete metadata only allows a provenance-only history revalidation")
         _require(all(old[field] is None or value[field] is not None for field in
                      ("title", "authors", "submission_date", "revised_dates", "venue")),
                  "Do not erase previously known metadata with unknown values")
@@ -589,7 +639,7 @@ class CorpusStorage:
                 if supplied:
                     field_sources[field] = dict(provenance)
                 elif previous_source is not None and metadata[target]:
-                    # Old v2 checkpoints may have only the single arXiv snapshot.
+                    # Điểm khôi phục v2 cũ có thể chỉ chứa một bản chụp arXiv.
                     source = previous_source.get("field_sources", {}).get(field, previous_source)
                     if source["snapshot"].get(field) == metadata[target]:
                         field_sources[field] = {
@@ -777,8 +827,19 @@ class CorpusStorage:
             has_tex = any(PurePosixPath(x).suffix.lower() == ".tex" for x in files)
             _require(has_tex == (record["status"] == "success"), "Source status contradicts TeX files")
             _require(bool(files) or not destination.exists(), "Unexpected empty version directory")
+            from src.bbl_handling import validate_bbl_source_policy
+
+            validate_bbl_source_policy(
+                destination,
+                files,
+                record.get("bbl_policy"),
+                artifact_root=self.bbl_artifact_root,
+                mssv=mssv,
+                arxiv_id=arxiv_id,
+                version=version,
+            )
             _require(record["completed_at"] is not None, "Missing source commit timestamp")
-        except (OSError, StorageError) as exc:
+        except (OSError, ValueError) as exc:
             raise IntegrityError(str(exc)) from exc
 
     def should_skip_version(self, mssv, arxiv_id, version):
@@ -851,6 +912,8 @@ class CorpusStorage:
             error=None if result["error"] is None else dict(
                 stage="source", type=status, message=str(result["error"])),
         )
+        if "bbl_policy" in result:
+            record["bbl_policy"] = result["bbl_policy"]
         if "withdrawal_evidence" in result:
             record["withdrawal_evidence"] = result["withdrawal_evidence"]
         if status in TERMINAL:
@@ -898,13 +961,13 @@ class CorpusStorage:
     def resume(self, mssv, arxiv_id):
         """Return skip/retry/blocked version sets; preserve all existing source."""
         manifest = self.read_manifest(mssv, arxiv_id)
-        # Validate every mandatory JSON before changing any interrupted stage.
+        # Kiểm tra mọi JSON bắt buộc trước khi thay đổi trạng thái của pha bị gián đoạn.
         stages = {
             "metadata": self.read_metadata(mssv, arxiv_id),
             "references": self.read_references(mssv, arxiv_id),
         }
-        # Preflight cross-file coverage before persisting any recovery changes.
-        # Newer metadata may add versions after an interrupted manifest commit.
+        # Kiểm tra độ bao phủ giữa các tệp trước khi ghi thay đổi phục hồi.
+        # Metadata mới hơn có thể bổ sung phiên bản sau khi ghi manifest bị gián đoạn.
         self._sync(manifest, stages["metadata"], stages["references"])
         for name, value in stages.items():
             if value["status"] == "in_progress":

@@ -661,6 +661,14 @@ class SemanticScholarTests(unittest.TestCase):
         self.assertEqual(result[0]["attempts"], 1)
         self.assertEqual(self.transport.open.call_count, 1)
 
+    def test_rate_limiter_exposes_remaining_retry_after_for_outer_resume(self):
+        self.outcomes = [http_error(429, after=45)]
+
+        result = self.fetch(max_attempts=1)
+
+        self.assertEqual(result[0]["http_status"], 429)
+        self.assertEqual(self.limiter.cooldown_remaining_seconds, 45.0)
+
     def test_413_does_not_split_retry_or_lose_later_ids(self):
         ids = identifiers(3)
         self.outcomes = [http_error(413), self.success(ids[2:])]

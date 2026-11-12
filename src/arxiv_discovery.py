@@ -167,3 +167,48 @@ def parse_arxiv_response(xml: str | bytes, mssv: str, arxiv_id: str) -> dict:
     except ValueError as exc:
         result.update(status="invalid_response", error=str(exc))
     return result
+
+
+def parse_arxiv_batch_response(xml: str | bytes, mssv: str, arxiv_ids: list[str]) -> dict[str, dict]:
+    """Map an Atom feed to exact requested base IDs without inferring missing IDs."""
+    if not arxiv_ids or len(arxiv_ids) != len(set(arxiv_ids)):
+        raise ValueError("Batch IDs must be nonempty and unique")
+    requested = set(arxiv_ids)
+    if any((match := ID_PATTERN.fullmatch(identifier)) is None
+           or match.group("version") is not None for identifier in arxiv_ids):
+        raise ValueError("Batch IDs must be base arXiv IDs")
+    feed = ET.fromstring(xml)
+    if feed.tag != f"{{{NS['atom']}}}feed":
+        raise ValueError("Expected an Atom feed")
+    entries = feed.findall("atom:entry", NS)
+    for node in feed.iter():
+        if node.tag.rsplit("}", 1)[-1] == "entry" and node not in entries:
+            raise ValueError("Unexpected entry namespace or nested entry")
+    for link in feed.findall("atom:link", NS):
+        if link.get("rel") == "self" and link.get("href"):
+            query = parse_qs(urlsplit(link.get("href")).query, keep_blank_values=True)
+            if "id_list" in query and query["id_list"] != [",".join(arxiv_ids)]:
+                raise ValueError("Batch feed self link does not match requested IDs")
+    count = _text(feed, "opensearch:totalResults")
+    if count is not None and (not re.fullmatch(r"[0-9]+", count) or int(count) != len(entries)):
+        raise ValueError("Batch feed totalResults does not match returned entries")
+    start = _text(feed, "opensearch:startIndex")
+    if start is not None and start != "0":
+        raise ValueError("Batch feed must start at the first result")
+    results: dict[str, dict] = {}
+    for entry in entries:
+        identifier = _text(entry, "atom:id")
+        if identifier is None:
+            raise ValueError("Batch entry is missing its ID")
+        base_id, _version = _entry_id(identifier)
+        if base_id not in requested or base_id in results:
+            raise ValueError("Batch entry ID is unexpected or duplicated")
+        single = ET.Element(f"{{{NS['atom']}}}feed")
+        single_count = ET.SubElement(single, f"{{{NS['opensearch']}}}totalResults")
+        single_count.text = "1"
+        single.append(entry)
+        parsed = parse_arxiv_response(ET.tostring(single), mssv, base_id)
+        if parsed.get("status") != "found":
+            raise ValueError("Batch entry cannot confirm its paper/version")
+        results[base_id] = parsed
+    return results

@@ -40,7 +40,7 @@ class _Once(argparse.Action):
 
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
-        # argparse can echo arbitrary input, including accidentally pasted keys.
+        # argparse có thể in lại đầu vào tùy ý, kể cả khóa bị dán nhầm.
         self.exit(2, "Invalid arguments. Use --help; put API keys in the environment.\n")
 
 
@@ -75,7 +75,7 @@ def _local_drive(path):
     import ctypes
     drive_type = ctypes.windll.kernel32.GetDriveTypeW
     drive_type.argtypes = [ctypes.c_wchar_p]
-    return drive_type(path.anchor) in (2, 3, 6)  # removable, fixed, RAM disk
+    return drive_type(path.anchor) in (2, 3, 6)  # có thể xóa, cố định, ổ RAM.
 
 
 def _safe_output(value):
@@ -86,7 +86,7 @@ def _safe_output(value):
         raise SmokeError("Output must be an absolute path without parent traversal")
     if not _local_drive(path):
         raise SmokeError("Output requires a local drive; mapped network drives are forbidden")
-    _relative("/".join(path.parts[1:]))  # Reject device names and unsafe Windows components.
+    _relative("/".join(path.parts[1:]))  # Từ chối tên thiết bị và thành phần đường dẫn Windows không an toàn.
     path = batch._safe(path)
     if path == Path(path.anchor) or any(
             root == path or root.is_relative_to(path) or path.is_relative_to(root)
@@ -139,7 +139,7 @@ def _resume_preflight(plan):
                 raise SmokeError("Source checksum is not valid")
         elif store.version_destination(*pair, version).exists():
             raise SmokeError("Unfinished or orphan source requires audit")
-    # A manual restart after a policy stop needs a separate quota/cooldown review.
+    # Khởi động thủ công sau khi dừng theo chính sách cần được xem xét lại hạn mức và thời gian chờ.
     return any((attempt.get("stop_reason") or {}).get("http_status") in (403, 429)
                for attempt in history)
 
@@ -234,7 +234,7 @@ def verify_output(plan):
 
 @contextmanager
 def _single_writer():
-    # Global to this tool/user TEMP, including invocations with different outputs.
+    # Dùng chung trong TEMP của công cụ/người dùng này, kể cả các lượt gọi có đầu ra khác nhau.
     lock = batch._safe(LOCK_PATH)
     try:
         descriptor = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -246,9 +246,9 @@ def _single_writer():
         yield
     finally:
         try:
-            lock.unlink()  # Only this invocation's own lock; never a stale lock.
+            lock.unlink()  # Chỉ dùng khóa của lượt gọi hiện tại; không dùng khóa cũ.
         except OSError:
-            # Preserve an already recorded HTTP stop/result rather than masking it.
+            # Giữ nguyên trạng thái dừng/kết quả HTTP đã ghi, không che khuất nó.
             print("Smoke lock cleanup failed; inspect it before retrying", file=sys.stderr)
 
 
@@ -257,11 +257,11 @@ def _execute_live(plan):
     if plan["mode"] != "live":
         raise SmokeError("Explicit live authorization is required")
     root = _safe_output(plan["output"])
-    semantic_scholar._key_from_environment()  # Validate without logging the value.
+    semantic_scholar._key_from_environment()  # Xác thực mà không ghi giá trị vào nhật ký.
     if arxiv_client.MIN_INTERVAL < 3:
         raise SmokeError("arXiv pacing must be at least three seconds")
     with _single_writer():
-        # Recheck ownership/path/checkpoint immediately before any writes or HTTP.
+        # Kiểm tra lại quyền sở hữu, đường dẫn và điểm khôi phục ngay trước khi ghi hoặc gửi HTTP.
         if plan["resume"]:
             if _resume_preflight(plan):
                 raise SmokeError("Previous 403/429 requires review; live resume is blocked")
@@ -325,7 +325,7 @@ def main(argv=None):
         print("Smoke refused: " + str(exc), file=sys.stderr)
         return 1
     except (OSError, ValueError) as exc:
-        # Never print arbitrary exception text, response bodies or credentials.
+        # Không in nội dung exception tùy ý, phần thân response hoặc thông tin xác thực.
         print("Smoke refused: " + type(exc).__name__, file=sys.stderr)
         return 1
 

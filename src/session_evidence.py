@@ -162,12 +162,22 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
         result = operation()
         record["execution_status"] = "returned"
         if isinstance(result, dict):
-            # Explicit allowlist prevents storing credentials or large paper records.
-            record["result"] = {k: result[k] for k in ("status", "reason", "source", "download_seconds", "validation_seconds", "snapshot_sha256", "reused", "stopped", "stop_reason", "attempted_papers",
+            # Danh sách cho phép tường minh ngăn lưu thông tin xác thực hoặc bản ghi bài báo lớn.
+            record["result"] = {k: result[k] for k in ("status", "reason", "source",
+                                "download_seconds", "extraction_seconds",
+                                "json_validation_seconds", "checksum_seconds", "publish_seconds",
+                                "validation_seconds", "snapshot_prepare_seconds",
+                                "snapshot_precheck_seconds", "index_checksum_seconds",
+                                "checksum_in_scan", "index_scan_seconds", "index_scanned_lines",
+                                "snapshot_size_bytes",
+                                "candidate_count", "snapshot_sha256", "reused", "stopped", "stop_reason", "attempted_papers",
                                 "metadata_complete", "references_complete", "fully_enriched", "archive_state",
                                 "is_reconciled", "integrity_failed_papers", "is_cohort_complete",
-                                "snapshot_size_bytes", "corpus_size_bytes", "archive_size_bytes",
-                                "export_size_bytes", "paper_timings") if k in result}
+                                "corpus_size_bytes", "archive_size_bytes",
+                                "export_size_bytes", "paper_timings", "phase_metrics",
+                                "retry_wait_seconds", "arxiv_id", "trigger_stage",
+                                "trigger_http_status", "resume_attempt_number",
+                                "affected_ids", "provider_cooldown_seconds") if k in result}
             if isinstance(result.get("fast_runner"), dict):
                 record["result"]["fast_runner"] = result["fast_runner"]
             if stage == "source" and isinstance(result.get("timing_metrics"), dict):
@@ -243,32 +253,76 @@ def summarize_observations(records: list[dict]) -> dict:
 
 
 def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | None) -> dict:
-    """Count snapshot/index and unique per-attempt discovery intervals."""
+    """Summarize arXiv discovery, retry waits and Kaggle preparation."""
     import math
 
-    total, seen, processed = 0.0, {}, set()
-    valid = True
+    total, arxiv_total, kaggle_total, retry_wait_total = 0.0, 0.0, 0.0, 0.0
+    seen, processed = {}, set()
+    valid = arxiv_valid = kaggle_valid = True
+    kaggle_observations = []
     for record in records:
         stage = record.get("stage")
-        if stage in {"snapshot_prepare", "kaggle_index"}:
+        if stage == "arxiv_retry_wait":
+            configuration = record.get("configuration") or {}
+            result = record.get("result") or {}
             seconds = record.get("wall_seconds")
-            if record.get("execution_status") != "returned" or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+            valid_measurement = (
+                configuration.get("trigger_stage") == "discovery"
+                and configuration.get("trigger_http_status") == 429
+                and isinstance(configuration.get("arxiv_id"), str)
+                and type(seconds) in (int, float)
+                and math.isfinite(seconds) and seconds >= 0
+            )
+            if not valid_measurement:
+                arxiv_valid = False
+                valid = False
+                continue
+            retry_wait_total += seconds
+            arxiv_total += seconds
+            total += seconds
+            valid_return = (
+                record.get("execution_status") == "returned"
+                and type(result.get("retry_wait_seconds")) in (int, float)
+                and math.isfinite(result["retry_wait_seconds"])
+                and result["retry_wait_seconds"] >= 0
+                and result.get("arxiv_id") == configuration.get("arxiv_id")
+                and result.get("trigger_stage") == "discovery"
+                and result.get("trigger_http_status") == 429
+            )
+            if not valid_return:
+                arxiv_valid = False
+                valid = False
+            continue
+        if stage in {"snapshot_prepare", "kaggle_index"}:
+            kaggle_observations.append(record)
+            seconds = record.get("wall_seconds")
+            if (type(seconds) not in (int, float) or not math.isfinite(seconds)
+                    or seconds < 0):
+                kaggle_valid = False
                 valid = False
             else:
-                total += seconds
+                kaggle_total += seconds
+                if record.get("execution_status") == "returned":
+                    total += seconds
+                else:
+                    kaggle_valid = False
+                    valid = False
         if stage != "source":
             continue
         timing = (record.get("result") or {}).get("timing_metrics")
         if not isinstance(timing, dict) or not isinstance(timing.get("paper_intervals"), list):
+            arxiv_valid = False
             valid = False
             continue
         for row in timing["paper_intervals"]:
             key = (record.get("cohort"), row.get("attempt_id"), row.get("arxiv_id"))
             if not all(key):
+                arxiv_valid = False
                 valid = False
                 continue
             if key in seen:
                 if seen[key] != row:
+                    arxiv_valid = False
                     valid = False
                 continue
             seen[key] = row
@@ -279,30 +333,126 @@ def summarize_discovery_timings(records: list[dict], expected_ids: list[str] | N
                 action, seconds = row.get(action_key), row.get(seconds_key)
                 if action == "cached" and seconds is None:
                     seconds = 0.0
-                if action_key == "revision_action" and row.get("discovery_status") == "not_found" and action in (None, "not_attempted", "skipped"):
+                if (action_key == "revision_action"
+                        and row.get("discovery_status") == "not_found"
+                        and action in (None, "not_attempted", "skipped")):
                     continue
-                if action in (None, "not_attempted") or type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
+                if (action in (None, "not_attempted")
+                        or type(seconds) not in (int, float)
+                        or not math.isfinite(seconds) or seconds < 0):
+                    arxiv_valid = False
                     valid = False
                 else:
                     total += seconds
+                    arxiv_total += seconds
     expected = set(expected_ids) if expected_ids is not None else None
     complete = bool(expected) and expected <= processed and valid
+    arxiv_complete = bool(expected) and expected <= processed and arxiv_valid
+
+    # Mỗi phiên mã nguồn chuẩn bị bản chụp; chỉ dựng chỉ mục khi
+    # bước chuẩn bị bản chụp của phiên đó trả về trạng thái sẵn sàng. Nhờ vậy,
+    # điểm khôi phục cũ vẫn đọc được nhưng thiếu phép đo chuẩn bị không bị gán là
+    # phép đo discovery tổng hợp hoàn chỉnh.
+    source_sessions = {
+        record.get("session_id") for record in records
+        if record.get("stage") == "source" and record.get("session_id")
+    }
+    prep_by_session: dict[str, dict[str, list[dict]]] = {}
+    prep_structure_complete = bool(source_sessions)
+    for record in kaggle_observations:
+        session_id = record.get("session_id")
+        if session_id:
+            prep_by_session.setdefault(session_id, {}).setdefault(record["stage"], []).append(record)
+        else:
+            prep_structure_complete = False
+    if set(prep_by_session) - source_sessions:
+        prep_structure_complete = False
+    for session_id in source_sessions:
+        session_prep = prep_by_session.get(session_id, {})
+        snapshots = session_prep.get("snapshot_prepare", [])
+        if len(snapshots) != 1:
+            prep_structure_complete = False
+            continue
+        snapshot = snapshots[0]
+        snapshot_ready = ((snapshot.get("result") or {}).get("status") == "ready")
+        indexes = session_prep.get("kaggle_index", [])
+        if (snapshot_ready and len(indexes) != 1) or (not snapshot_ready and indexes):
+            prep_structure_complete = False
+    kaggle_complete = bool(kaggle_observations) and kaggle_valid and prep_structure_complete
+    combined_complete = arxiv_complete and kaggle_complete
+    combined_known = arxiv_total + kaggle_total
     return {"status": "complete" if complete else "incomplete",
             "wall_seconds": total if complete else None,
             "known_wall_seconds": total, "missing_ids": sorted(expected - processed) if expected is not None else None,
-            "scope": "arXiv discovery and version history across observed attempts; includes waits and retries; Kaggle preparation is not included"}
+            "scope": ("Legacy aggregate of arXiv discovery/version history plus returned Kaggle snapshot/index "
+                      "preparation intervals; use components for explicit scopes."),
+            "components": {
+                "arxiv_discovery_and_version_history": {
+                    "status": "complete" if arxiv_complete else "incomplete",
+                    "wall_seconds": arxiv_total if arxiv_complete else None,
+                    "known_wall_seconds": arxiv_total,
+                    "retry_wait_seconds": retry_wait_total,
+                    "retry_wait_observation_count": sum(
+                        record.get("stage") == "arxiv_retry_wait" for record in records
+                    ),
+                    "scope": "arXiv discovery and version history across observed attempts, including bounded automatic 429 cooldowns and internal retries.",
+                },
+                "kaggle_snapshot_and_index_preparation": {
+                    "status": "complete" if kaggle_complete else "incomplete",
+                    "wall_seconds": kaggle_total if kaggle_complete else None,
+                    "known_wall_seconds": kaggle_total,
+                    "observation_count": len(kaggle_observations),
+                    "scope": "Observed snapshot preparation and index intervals; fallback attempts are included.",
+                },
+                "discovery_with_kaggle_preparation": {
+                    "status": "complete" if combined_complete else "incomplete",
+                    "wall_seconds": combined_known if combined_complete else None,
+                    "known_wall_seconds": combined_known,
+                    "scope": (
+                        "arXiv discovery/version history plus Kaggle snapshot/index preparation; "
+                        "includes waits and retries, excludes unrelated archive/audit/export stages."
+                    ),
+                },
+            }}
 
 
 def summarize_paper_timings(records: list[dict], found_ids: list[str] | None) -> dict:
-    """Combine durable source attempts and S2 intervals without double counting resumes."""
+    """Combine source, discovery retry waits and S2 for the requested ID population.
+
+    ``found_ids`` is retained as the parameter name for compatibility. Callers may
+    pass discovered papers for a diagnostic average or all assigned IDs for the
+    benchmark denominator.
+    """
     import math
 
-    source, s2, seen_source, seen_s2, processed = {}, {}, {}, set(), set()
+    source, source_retry_waits, s2, s2_retry_waits = {}, {}, {}, {}
+    seen_source, seen_s2, seen_waits, seen_s2_waits, processed = {}, set(), set(), set(), set()
     valid = True
     for record in records:
         result = record.get("result") or {}
         stage = record.get("stage")
-        if stage == "source":
+        if stage == "arxiv_retry_wait":
+            configuration = record.get("configuration") or {}
+            arxiv_id = configuration.get("arxiv_id")
+            seconds = record.get("wall_seconds")
+            key = (record.get("session_id"), record.get("observation_id"), arxiv_id)
+            if (configuration.get("trigger_stage") != "discovery"
+                    or configuration.get("trigger_http_status") != 429
+                    or not all(key)
+                    or key in seen_waits
+                    or type(seconds) not in (int, float)
+                    or not math.isfinite(seconds) or seconds < 0):
+                valid = False
+                continue
+            seen_waits.add(key)
+            source[arxiv_id] = source.get(arxiv_id, 0.0) + seconds
+            source_retry_waits[arxiv_id] = source_retry_waits.get(arxiv_id, 0.0) + seconds
+            if (record.get("execution_status") != "returned"
+                    or result.get("arxiv_id") != arxiv_id
+                    or result.get("trigger_stage") != "discovery"
+                    or result.get("trigger_http_status") != 429):
+                valid = False
+        elif stage == "source":
             for row in (result.get("timing_metrics") or {}).get("paper_intervals", []):
                 key = (record.get("cohort"), row.get("attempt_id"), row.get("arxiv_id"))
                 seconds = row.get("wall_seconds")
@@ -326,15 +476,54 @@ def summarize_paper_timings(records: list[dict], found_ids: list[str] | None) ->
                     continue
                 seen_s2.add(key)
                 s2[key[1]] = s2.get(key[1], 0.0) + seconds
+        elif stage == "s2_retry_wait":
+            configuration = record.get("configuration") or {}
+            affected_ids = configuration.get("affected_ids")
+            seconds = record.get("wall_seconds")
+            key = (record.get("session_id"), record.get("observation_id"))
+            if (configuration.get("trigger_stage") not in {"s2_metadata", "s2_references"}
+                    or configuration.get("trigger_http_status") != 429
+                    or not isinstance(affected_ids, list) or not affected_ids
+                    or any(not isinstance(aid, str) or not aid for aid in affected_ids)
+                    or len(affected_ids) != len(set(affected_ids))
+                    or not all(key) or key in seen_s2_waits
+                    or type(seconds) not in (int, float)
+                    or not math.isfinite(seconds) or seconds < 0):
+                valid = False
+                continue
+            wait_result = result
+            if (record.get("execution_status") != "returned"
+                    or wait_result.get("status") != "waited"
+                    or wait_result.get("trigger_stage") != configuration.get("trigger_stage")
+                    or wait_result.get("trigger_http_status") != 429
+                    or wait_result.get("affected_ids") != affected_ids
+                    or type(wait_result.get("retry_wait_seconds")) not in (int, float)
+                    or not math.isfinite(wait_result["retry_wait_seconds"])
+                    or wait_result["retry_wait_seconds"] < 0):
+                valid = False
+                continue
+            seen_s2_waits.add(key)
+            share = float(seconds) / len(affected_ids)
+            for aid in affected_ids:
+                s2[aid] = s2.get(aid, 0.0) + share
+                s2_retry_waits[aid] = s2_retry_waits.get(aid, 0.0) + share
     found = set(found_ids) if found_ids is not None else None
     covered = set(source) & set(s2) & processed
     complete = bool(found) and valid and found <= covered
-    items = [{"arxiv_id": aid, "source_seconds": source[aid], "s2_seconds": s2[aid],
-              "total_seconds": source[aid] + s2[aid]} for aid in sorted(covered & found if found is not None else covered)]
+    items = [{"arxiv_id": aid, "source_seconds": source[aid],
+              "retry_wait_seconds": source_retry_waits.get(aid, 0.0),
+              "s2_seconds": s2[aid] - s2_retry_waits.get(aid, 0.0),
+              "s2_retry_wait_seconds": s2_retry_waits.get(aid, 0.0),
+              "total_seconds": source[aid] + s2[aid]}
+             for aid in sorted(covered & found if found is not None else covered)]
     return {"status": "complete" if complete else "incomplete", "papers": items,
             "average_seconds": sum(row["total_seconds"] for row in items) / len(items) if complete else None,
             "missing_ids": sorted(found - covered) if found is not None else None,
+            "s2_retry_wait_seconds": sum(s2_retry_waits.values()),
+            "s2_retry_wait_observation_count": len(seen_s2_waits),
             "scope": "source paper intervals plus S2 request/processing intervals across recorded attempts; "
+                     "includes measured source and S2 429 cooldowns, allocating a metadata-batch cooldown "
+                     "equally across affected IDs; uses exactly the ID population passed by the caller; "
                      "excludes shared setup, snapshot, archive, audit and export overhead"}
 
 
@@ -369,11 +558,45 @@ def summarize_workflow(records: list[dict], required: list[tuple[str, int]], *,
     missing = sorted(set(required) - observed)
     import math
     ram_samples = []
+    system_ram_samples = []
+    system_ram_scopes = set()
+    system_ram_observations_complete = bool(records)
+    ram_scopes = set()
+    disk_scopes = set()
     disk_peaks = []
     resource_complete = bool(records)
     for r in records:
         resources = r.get('resources') or {}
         ram, disk = resources.get('ram') or {}, resources.get('disk') or {}
+        system_ram = resources.get('system_ram') or {}
+        if (system_ram.get('status') != 'collected'
+                or system_ram.get('unit') != 'bytes'):
+            system_ram_observations_complete = False
+        else:
+            count = system_ram.get('sample_count')
+            total = system_ram.get('sum_sample_bytes')
+            peak = system_ram.get('sampled_peak_bytes')
+            source = system_ram.get('source')
+            scope = system_ram.get('scope')
+            if (type(count) is not int or count <= 0
+                    or any(type(value) not in (int, float)
+                           or not math.isfinite(value) or value < 0
+                           for value in (total, peak))
+                    or not isinstance(source, str) or not source
+                    or not isinstance(scope, str) or not scope):
+                system_ram_observations_complete = False
+            else:
+                system_ram_samples.append((count, total, peak))
+                system_ram_scopes.add((source, scope))
+        ram_source = ram.get('source')
+        ram_scope = ram.get('scope')
+        disk_roots = disk.get('roots')
+        if (isinstance(ram_source, str) and ram_source
+                and isinstance(ram_scope, str) and ram_scope):
+            ram_scopes.add((ram_source, ram_scope))
+        if (isinstance(disk_roots, list) and disk_roots
+                and all(isinstance(root, str) and root for root in disk_roots)):
+            disk_scopes.add(tuple(sorted(disk_roots)))
         if ram.get('status') != 'collected' or disk.get('status') != 'collected':
             resource_complete = False
             continue
@@ -384,14 +607,49 @@ def summarize_workflow(records: list[dict], required: list[tuple[str, int]], *,
             continue
         ram_samples.append((count, total, peak))
         disk_peaks.append(disk_peak)
-    complete = bool(required) and not missing and timing['measured_wall_seconds'] is not None and resource_complete
+    resource_scope_complete = len(ram_scopes) == 1 and len(disk_scopes) == 1
+    resource_scope_status = 'collected' if resource_scope_complete else 'incomplete'
+    system_ram_complete = (
+        system_ram_observations_complete
+        and bool(system_ram_samples)
+        and len(system_ram_scopes) == 1
+    )
+    complete = (
+        bool(required) and not missing
+        and timing['measured_wall_seconds'] is not None
+        and resource_complete
+    )
+    system_ram_status = (
+        'collected' if system_ram_complete
+        else 'partial' if system_ram_samples else 'not_collected'
+    )
     summary = dict(status='measured_intervals' if complete else 'incomplete',
                 known_active_seconds=timing['measured_wall_seconds'],
                 active_seconds=timing['measured_wall_seconds'] if complete else None,
                 missing_stages=[list(x) for x in missing],
                 sampled_peak_ram_bytes=max((x[2] for x in ram_samples), default=None) if resource_complete else None,
                 sampled_average_ram_bytes=(sum(x[1] for x in ram_samples)/sum(x[0] for x in ram_samples)) if resource_complete and ram_samples else None,
+                system_ram_status=system_ram_status,
+                sampled_peak_system_ram_bytes=(
+                    max((x[2] for x in system_ram_samples), default=None)
+                    if system_ram_complete else None
+                ),
+                sampled_average_system_ram_bytes=(
+                    sum(x[1] for x in system_ram_samples) / sum(x[0] for x in system_ram_samples)
+                    if system_ram_complete else None
+                ),
+                system_ram_scope=(next(iter(system_ram_scopes))[1]
+                                  if len(system_ram_scopes) == 1 else None),
+                system_ram_source=(next(iter(system_ram_scopes))[0]
+                                   if len(system_ram_scopes) == 1 else None),
+                resource_scope_status=resource_scope_status,
                 sampled_peak_disk_bytes=max(disk_peaks, default=None) if resource_complete else None,
+                process_ram_source=(next(iter(ram_scopes))[0]
+                                    if len(ram_scopes) == 1 else None),
+                process_ram_scope=(next(iter(ram_scopes))[1]
+                                   if len(ram_scopes) == 1 else None),
+                disk_roots=(list(next(iter(disk_scopes)))
+                            if len(disk_scopes) == 1 else None),
                 scope='sum of explicit nonoverlapping measured intervals; excludes session gaps and unmeasured setup',
                 end_to_end_complete=False)
     if session_envelopes is not None:
@@ -543,6 +801,8 @@ def aggregate_group_observations(records: list[dict], *, members: list[str],
     summary['end_to_end_complete'] = (session_envelopes is not None
                                       and summary['status'] == 'measured_intervals'
                                       and summary.get('end_to_end_wall_seconds') is not None
+                                      and summary.get('system_ram_status') == 'collected'
+                                      and summary.get('resource_scope_status') == 'collected'
                                       and summary['expected_id_count'] == 20000)
     return summary
 

@@ -42,7 +42,7 @@ def _root_file_key():
             raise ValueError("Invalid root .env assignment")
         name, candidate = match.groups()
         if name != KEY_NAME:
-            continue  # Never load unrelated settings into the process.
+            continue  # Không nạp các thiết lập không liên quan vào tiến trình.
         if found:
             raise ValueError("Duplicate SEMANTIC_SCHOLAR_API_KEY in root .env")
         found = True

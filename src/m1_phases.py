@@ -10,8 +10,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
+import random
 import time
 import uuid
 from typing import Any, Callable
@@ -44,6 +46,7 @@ S2_DEFAULTS = {
     "backoff_base": 3.0,
     "backoff_cap": 60.0,
 }
+S2_METADATA_BATCH_SIZE = 50
 
 
 class M1PhaseError(RuntimeError):
@@ -346,6 +349,37 @@ def _source_state_manifest(path: Path, selection: dict, cohort: int) -> dict:
         or any(char not in "0123456789abcdef" for char in digest)
     ):
         raise M1PhaseError(f"Checksum archive trong checkpoint arXiv sai: {path}")
+    for field in ("kaggle_snapshot_sha256", "kaggle_index_sha256"):
+        value = saved.get(field)
+        if value is not None and (
+            not isinstance(value, str) or len(value) != 64
+            or any(char not in "0123456789abcdef" for char in value)
+        ):
+            raise M1PhaseError(f"Checksum Kaggle trong checkpoint arXiv sai: {path}")
+    policy = saved.get("kaggle_policy_version")
+    if policy is not None and policy != "m1-kaggle-reconcile-v2":
+        raise M1PhaseError(f"Phiên bản chính sách Kaggle trong checkpoint không được hỗ trợ: {path}")
+    auto_resume = saved.get("auto_resume_429")
+    if auto_resume is not None:
+        if (not isinstance(auto_resume, dict)
+                or auto_resume.get("schema_version") != 1
+                or not isinstance(auto_resume.get("events"), list)):
+            raise M1PhaseError(f"Checkpoint auto-resume 429 không hợp lệ: {path}")
+        for event in auto_resume["events"]:
+            if (not isinstance(event, dict)
+                    or event.get("stage") != "discovery"
+                    or event.get("http_status") != 429
+                    or event.get("outcome") not in {
+                        "not_resumed", "cooldown_scheduled", "cooldown_complete",
+                        "resume_started", "resumed",
+                    }):
+                raise M1PhaseError(f"Bằng chứng auto-resume 429 không hợp lệ: {path}")
+        policy = auto_resume.get("policy")
+        if policy is not None and (
+            not isinstance(policy, dict) or policy.get("schema_version") != 1
+            or policy.get("trigger") != {"stage": "discovery", "http_status": 429}
+        ):
+            raise M1PhaseError(f"Chính sách auto-resume 429 không hợp lệ: {path}")
     return saved
 
 
@@ -365,6 +399,156 @@ def _mark_archive_arxiv_only(runner: FastProductionRunner, cohort: int) -> None:
     _write_json(manifest_path, manifest)
 
 
+def _auto_resume_429_policy(
+    enabled: bool,
+    max_per_cohort: int,
+    max_per_session: int,
+    cooldown_min_seconds: float,
+    cooldown_max_seconds: float,
+) -> dict:
+    """Validate the opt-in, bounded discovery-429 resume settings."""
+    if type(enabled) is not bool:
+        raise ValueError("auto_resume_429 phải là bool.")
+    for name, value in (("max_per_cohort", max_per_cohort),
+                        ("max_per_session", max_per_session)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"auto_resume_429_{name} phải là số nguyên không âm.")
+    if (isinstance(cooldown_min_seconds, bool)
+            or not isinstance(cooldown_min_seconds, (int, float))
+            or not math.isfinite(cooldown_min_seconds)
+            or cooldown_min_seconds <= 0):
+        raise ValueError("Cooldown tối thiểu phải là số giây hữu hạn dương.")
+    if (isinstance(cooldown_max_seconds, bool)
+            or not isinstance(cooldown_max_seconds, (int, float))
+            or not math.isfinite(cooldown_max_seconds)
+            or cooldown_max_seconds < cooldown_min_seconds):
+        raise ValueError("Cooldown tối đa phải hữu hạn và không nhỏ hơn cooldown tối thiểu.")
+    return {
+        "schema_version": 1,
+        "enabled": enabled and max_per_cohort > 0 and max_per_session > 0,
+        "max_per_cohort": max_per_cohort,
+        "max_per_session": max_per_session,
+        "cooldown_min_seconds": float(cooldown_min_seconds),
+        "cooldown_max_seconds": float(cooldown_max_seconds),
+        "trigger": {"stage": "discovery", "http_status": 429},
+        "retry_wait_budget_seconds": 300.0,
+    }
+
+
+def _auto_resume_s2_429_policy(
+    enabled: bool,
+    max_per_cohort: int,
+    max_per_session: int,
+    cooldown_min_seconds: float,
+    cooldown_max_seconds: float,
+) -> dict:
+    """Validate bounded automatic resume for terminal S2 429 policy stops."""
+    if type(enabled) is not bool:
+        raise ValueError("auto_resume_429 phải là bool.")
+    for name, value in (("max_per_cohort", max_per_cohort),
+                        ("max_per_session", max_per_session)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"auto_resume_429_{name} phải là số nguyên không âm.")
+    if (isinstance(cooldown_min_seconds, bool)
+            or not isinstance(cooldown_min_seconds, (int, float))
+            or not math.isfinite(cooldown_min_seconds)
+            or cooldown_min_seconds <= 0):
+        raise ValueError("Cooldown S2 tối thiểu phải là số giây hữu hạn dương.")
+    if (isinstance(cooldown_max_seconds, bool)
+            or not isinstance(cooldown_max_seconds, (int, float))
+            or not math.isfinite(cooldown_max_seconds)
+            or cooldown_max_seconds < cooldown_min_seconds):
+        raise ValueError("Cooldown S2 tối đa phải hữu hạn và không nhỏ hơn cooldown tối thiểu.")
+    return {
+        "schema_version": 1,
+        "enabled": enabled and max_per_cohort > 0 and max_per_session > 0,
+        "max_per_cohort": max_per_cohort,
+        "max_per_session": max_per_session,
+        "cooldown_min_seconds": float(cooldown_min_seconds),
+        "cooldown_max_seconds": float(cooldown_max_seconds),
+        "trigger": {
+            "stages": ["s2_metadata", "s2_references"],
+            "http_status": 429,
+        },
+        "retry_wait_budget_seconds": float(S2_DEFAULTS["max_retry_wait"]),
+    }
+
+
+def _durable_discovery_429_checkpoint(
+    runner: FastProductionRunner, mssv: str, arxiv_id: str, cohort: int,
+    batch_id: str,
+) -> bool:
+    """Require the exact 429 attempt, valid paper checkpoint and archive."""
+    from src import benchmark_runner
+    from src.archive_validation import validate_archive_sidecars
+
+    try:
+        _, history = benchmark_runner._load(
+            runner.logs_dir / batch_id, batch_id, runner.corpus_dir,
+        )
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    matching_attempts = [
+        attempt for attempt in history
+        if isinstance(attempt.get("stop_reason"), dict)
+        and attempt["stop_reason"].get("type") == "http_policy"
+        and attempt["stop_reason"].get("stage") == "discovery"
+        and attempt["stop_reason"].get("http_status") == 429
+        and attempt["stop_reason"].get("arxiv_id") == arxiv_id
+    ]
+    if not matching_attempts:
+        return False
+    attempt = matching_attempts[-1]
+    paper_rows = [row for row in attempt.get("papers", [])
+                  if row.get("mssv") == mssv and row.get("arxiv_id") == arxiv_id]
+    if len(paper_rows) != 1 or paper_rows[0].get("state") != "processed":
+        return False
+    paper_result = paper_rows[0].get("result") or {}
+    discovery = paper_result.get("discovery") or {}
+    if discovery.get("action") != "queried" or discovery.get("http_status") != 429:
+        return False
+
+    manifest = runner.store.read_manifest(mssv, arxiv_id)
+    metadata = runner.store.read_metadata(mssv, arxiv_id)
+    provenance = metadata.get("provenance", {}).get("arxiv") or {}
+    snapshot = provenance.get("snapshot") or {}
+    # 429 ở discovery lần đầu được ghi là rate_limited. Nếu lượt làm mới gặp 429,
+    # phải giữ nguyên kết quả discovery đã được xác nhận trước đó.
+    first_discovery_failure = (
+        manifest.get("discovery_status") == "rate_limited"
+        and snapshot.get("mssv") == mssv
+        and snapshot.get("arxiv_id") == arxiv_id
+        and snapshot.get("status") == "rate_limited"
+        and snapshot.get("http_status") == 429
+    )
+    prior_confirmed_discovery = (
+        manifest.get("discovery_status") == "found"
+        and manifest.get("version_status") == "resolved"
+        and bool(manifest.get("versions"))
+        and snapshot.get("mssv") == mssv
+        and snapshot.get("arxiv_id") == arxiv_id
+        and snapshot.get("status") == "found"
+        and snapshot.get("http_status") == 200
+    )
+    if not (first_discovery_failure or prior_confirmed_discovery):
+        return False
+    archive = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
+    validate_archive_sidecars(archive, cohort, require_complete=True)
+    return True
+
+
+def _provider_cooldown_from_logs(runner: FastProductionRunner) -> tuple[float, str | None]:
+    """Return a still-active server Retry-After deadline, if one was recorded."""
+    from src import arxiv_client, batch
+
+    try:
+        batch.check_arxiv_cooldown(runner.logs_dir)
+    except arxiv_client.ArxivCooldownError as exc:
+        deadline = datetime.fromisoformat(exc.retry_at_utc.replace("Z", "+00:00"))
+        return max(0.0, deadline.timestamp() - time.time()), exc.retry_at_utc
+    return 0.0, None
+
+
 def run_m1_arxiv_member(
     mssv: str,
     *,
@@ -372,8 +556,25 @@ def run_m1_arxiv_member(
     local_root: str | Path,
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
+    kaggle_token: str | None = None,
+    auto_resume_429: bool = False,
+    auto_resume_429_max_per_cohort: int = 1,
+    auto_resume_429_max_per_session: int = 2,
+    auto_resume_429_cooldown_min_seconds: float = 300.0,
+    auto_resume_429_cooldown_max_seconds: float = 600.0,
 ) -> dict:
-    """Verify assigned IDs and archive every arXiv source version, without S2."""
+    """Verify assigned IDs and archive every source version, without S2.
+
+    Bounded automatic resume is opt-in and applies only to a checkpointed HTTP
+    429 during discovery. All other stop conditions retain the existing flow.
+    """
+    retry_policy = _auto_resume_429_policy(
+        auto_resume_429,
+        auto_resume_429_max_per_cohort,
+        auto_resume_429_max_per_session,
+        auto_resume_429_cooldown_min_seconds,
+        auto_resume_429_cooldown_max_seconds,
+    )
     selection = build_member_selection(mssv, cohort_limit)
     drive = Path(drive_root).expanduser().resolve()
     local = Path(local_root).expanduser().resolve()
@@ -387,17 +588,134 @@ def run_m1_arxiv_member(
     budget = SessionBudget(budget_seconds)
     session_id, envelope, started = _session_start(runner, selection, "arxiv")
     phase_root = _persist_selection(drive, selection)
+    from src.kaggle_candidates import (
+        file_sha256,
+        prepare_snapshot,
+        reuse_or_build_index,
+        validate_discrepancy_checkpoints,
+    )
+    evidence_root = phase_root / "arxiv" / "kaggle_discrepancies"
+    discrepancy_checkpoint_root = phase_root / "arxiv" / "kaggle_discrepancy_checkpoints"
+    kaggle_cache = drive.parent / "shared" / "kaggle_snapshot"
+    kaggle_index_root = drive / "kaggle_indices"
+    prior_environment = {
+        key: os.environ.get(key) for key in (
+            "M1_KAGGLE_CANDIDATE_INDEX", "M1_KAGGLE_SNAPSHOT_PATH",
+            "M1_KAGGLE_SNAPSHOT_SHA256", "M1_KAGGLE_INDEX_SHA256",
+            "M1_KAGGLE_POLICY_VERSION",
+            "M1_KAGGLE_EVIDENCE_ROOT", "M1_KAGGLE_CHECKPOINT_ROOT",
+            "M1_KAGGLE_EVIDENCE_SESSION",
+        )
+    }
+    kaggle_evidence: dict[str, Any] = {"status": "fallback", "reason": "not_prepared"}
+    index_path = None
     cohort_results = {}
     stopped = False
     stop_reason = None
+    automatic_resumes = 0
+    automatic_cooldown_seconds = 0.0
     try:
         with _member_writer_lock(drive, selection):
             _record_session(phase_root, selection, session_id, "arxiv")
             _ensure_starting_state(runner, phase_root, selection)
+            validate_discrepancy_checkpoints(discrepancy_checkpoint_root, evidence_root)
+            token = kaggle_token.strip() if isinstance(kaggle_token, str) and kaggle_token.strip() else None
+            snapshot_result = observe_stage(
+                runner, "snapshot_prepare", 0,
+                lambda: prepare_snapshot(kaggle_cache, token=token),
+                session_id=session_id,
+                configuration={"snapshot_scope": "shared_cache", "accelerator": "CPU"},
+            )
+            kaggle_evidence = {key: value for key, value in snapshot_result.items()
+                               if key not in {"snapshot_path", "token"}}
+            if snapshot_result.get("status") == "ready":
+                try:
+                    selected_pairs = [tuple(pair) for pair in selection["pairs"]]
+                    index_result = observe_stage(
+                        runner, "kaggle_index", 0,
+                        lambda: reuse_or_build_index(
+                            snapshot_result["snapshot_path"], selected_pairs,
+                            kaggle_index_root, snapshot_result["snapshot_sha256"],
+                        ),
+                        session_id=session_id,
+                        configuration={
+                            "run_scope": selection["scope"],
+                            "selection_fingerprint": selection["fingerprint"],
+                            "snapshot_sha256": snapshot_result["snapshot_sha256"],
+                        },
+                    )
+                    index_path = index_result["index_path"]
+                    index_sha256 = file_sha256(index_path)
+                    kaggle_evidence.update(
+                        status="ready", index_path=index_path, index_sha256=index_sha256,
+                        reused_index=index_result["reused"],
+                        candidate_count=index_result.get(
+                            "candidate_count",
+                            len(index_result["index"].get("candidates", {}))),
+                        snapshot_size_bytes=index_result.get(
+                            "snapshot_size_bytes",
+                            index_result["index"].get("snapshot_size_bytes")),
+                        snapshot_precheck_seconds=index_result.get("snapshot_precheck_seconds"),
+                        index_checksum_seconds=index_result.get("index_checksum_seconds"),
+                        checksum_in_scan=index_result["index"].get("checksum_in_scan"),
+                        index_scan_seconds=index_result.get("index_scan_seconds"),
+                        index_scanned_lines=index_result.get("index_scanned_lines"),
+                    )
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    index_path = None
+                    kaggle_evidence.update(status="fallback", reason="candidate_index_failed",
+                                           error_type=type(exc).__name__)
+            prep_path = runner.reports_dir / f"kaggle_preparation_{session_id}.json"
+            try:
+                _atomic_json(prep_path, {"session_id": session_id, **kaggle_evidence})
+            except OSError:
+                # Chỉ dùng Kaggle khi xuất xứ của dữ liệu đã được ghi bền vững.
+                index_path = None
+                kaggle_evidence = {
+                    **kaggle_evidence, "status": "fallback",
+                    "reason": "kaggle_preparation_evidence_not_persisted",
+                }
+            if index_path:
+                os.environ.update({
+                    "M1_KAGGLE_CANDIDATE_INDEX": str(index_path),
+                    "M1_KAGGLE_SNAPSHOT_PATH": snapshot_result["snapshot_path"],
+                    "M1_KAGGLE_SNAPSHOT_SHA256": snapshot_result["snapshot_sha256"],
+                    "M1_KAGGLE_INDEX_SHA256": index_sha256,
+                    "M1_KAGGLE_POLICY_VERSION": "m1-kaggle-reconcile-v2",
+                    "M1_KAGGLE_EVIDENCE_ROOT": str(evidence_root),
+                    "M1_KAGGLE_CHECKPOINT_ROOT": str(discrepancy_checkpoint_root),
+                    "M1_KAGGLE_EVIDENCE_SESSION": session_id,
+                })
+            else:
+                for key in ("M1_KAGGLE_CANDIDATE_INDEX", "M1_KAGGLE_SNAPSHOT_PATH",
+                            "M1_KAGGLE_SNAPSHOT_SHA256", "M1_KAGGLE_INDEX_SHA256"):
+                    os.environ.pop(key, None)
+                os.environ.update({
+                    "M1_KAGGLE_POLICY_VERSION": "m1-kaggle-reconcile-v2",
+                    "M1_KAGGLE_EVIDENCE_ROOT": str(evidence_root),
+                    "M1_KAGGLE_CHECKPOINT_ROOT": str(discrepancy_checkpoint_root),
+                    "M1_KAGGLE_EVIDENCE_SESSION": session_id,
+                })
+            annotate_session_envelope(
+                envelope,
+                kaggle_status=kaggle_evidence.get("status"),
+                kaggle_reason=kaggle_evidence.get("reason"),
+                kaggle_snapshot_sha256=kaggle_evidence.get("snapshot_sha256"),
+                kaggle_index_sha256=kaggle_evidence.get("index_sha256"),
+                kaggle_downloaded_at=kaggle_evidence.get("downloaded_at"),
+                kaggle_provider_updated_at=kaggle_evidence.get("provider_updated_at"),
+                auto_resume_429_policy=retry_policy,
+            )
             for cohort in selection["cohorts"]:
                 state_path = phase_root / "arxiv" / f"cohort_{cohort:04d}.json"
                 _ensure_directory(state_path.parent, drive)
                 state = _source_state_manifest(state_path, selection, cohort)
+                state.update(
+                    kaggle_status=kaggle_evidence.get("status"),
+                    kaggle_snapshot_sha256=kaggle_evidence.get("snapshot_sha256"),
+                    kaggle_index_sha256=kaggle_evidence.get("index_sha256"),
+                    kaggle_policy_version="m1-kaggle-reconcile-v2" if index_path else None,
+                )
                 if budget.should_stop():
                     stopped = True
                     stop_reason = {"type": "session_budget", "stage": "arxiv_before_cohort"}
@@ -414,7 +732,56 @@ def run_m1_arxiv_member(
                     ]
                     if any(path.exists() for path in sidecars):
                         runner.backup_cohort_archive(cohort_number, require_sidecars=True)
+                    print(
+                        f"[M1/arXiv] Lô {cohort_number}: đang khôi phục và kiểm tra checkpoint source.",
+                        flush=True,
+                    )
                     restored = runner.restore_cohort(cohort_number)
+                    cohort_started = time.perf_counter()
+                    cohort_total = len(cohort_pairs(cohort_number))
+                    print(
+                        f"[M1/arXiv] Lô {cohort_number}: bắt đầu discovery/source; "
+                        f"phạm vi {cohort_total} ID, đã khôi phục {restored}; "
+                        "Atom batch tối đa 20 ID.",
+                        flush=True,
+                    )
+
+                    def source_progress(event, detail):
+                        if event == "paper_finished":
+                            processed = len(detail.get("papers", []))
+                            if processed and (processed % 10 == 0 or processed == cohort_total
+                                              or detail.get("stopped")):
+                                terminal_in_attempt = sum(
+                                    item.get("paper_status") in {"complete", "not_found"}
+                                    for item in detail.get("papers", [])
+                                )
+                                print(
+                                    f"[M1/arXiv] Lô {cohort_number}: đã xử lý "
+                                    f"{processed}/{cohort_total} paper trong lượt này; "
+                                    f"{terminal_in_attempt} paper ở trạng thái source kết thúc trong lượt này.",
+                                    flush=True,
+                                )
+
+                    def discovery_progress(event, detail):
+                        if event == "request_started":
+                            print(
+                                f"[M1/arXiv] Atom {detail['request_type']}: "
+                                f"{detail['first_arxiv_id']}..{detail['last_arxiv_id']} "
+                                f"({detail['requested_count']} ID); đang chờ phản hồi.",
+                                flush=True,
+                            )
+                        elif event == "request_finished":
+                            print(
+                                f"[M1/arXiv] Atom {detail['request_type']} xong: "
+                                f"HTTP {detail.get('http_status')}, "
+                                f"{detail.get('returned_count', 0)}/"
+                                f"{detail['requested_count']} entry nhận được, "
+                                f"{detail.get('attempts')} attempt, "
+                                f"{detail.get('wall_seconds', 0.0):.1f}s; "
+                                f"còn cần xác minh riêng: {detail.get('unresolved_count', 0)}.",
+                                flush=True,
+                            )
+
                     result = runner.run_cohort(
                         cohort_number,
                         resume=True,
@@ -422,10 +789,21 @@ def run_m1_arxiv_member(
                         s2_config=None,
                         max_ids=100,
                         should_stop=budget.should_stop,
+                        on_progress=source_progress,
+                        on_discovery_progress=discovery_progress,
+                        discovery_batch_size=20,
+                        force_discovery_refresh=True,
                     )
                     _mark_archive_arxiv_only(runner, cohort_number)
                     source_count = runner.count_source_completed_papers(cohort_number)
                     complete = source_count == len(cohort_pairs(cohort_number))
+                    print(
+                        f"[M1/arXiv] Lô {cohort_number}: kết thúc lượt trong "
+                        f"{time.perf_counter() - cohort_started:.1f}s; "
+                        f"source hoàn tất {source_count}/{cohort_total}; "
+                        f"trạng thái {'đủ' if complete else 'còn tiếp tục'}.",
+                        flush=True,
+                    )
                     archive_sha = None
                     if archive.is_file():
                         archive_sha = runner._compute_sha256(archive)
@@ -450,22 +828,203 @@ def run_m1_arxiv_member(
                         "timing_metrics": result.get("timing_metrics"),
                     }
 
-                result = observe_stage(
-                    runner,
-                    "source",
-                    cohort,
-                    process_cohort,
-                    session_id=session_id,
-                    configuration={
-                        "selection_fingerprint": selection["fingerprint"],
-                        "mssv": selection["mssv"],
-                        "run_scope": selection["scope"],
-                        "resume": True,
-                        "revision_history": True,
-                        "s2_enabled": False,
-                        "session_budget_seconds": budget_seconds,
-                    },
-                )
+                saved_auto_state = state.get("auto_resume_429")
+                if saved_auto_state is None:
+                    saved_auto_state = {"schema_version": 1, "events": []}
+                saved_auto_state["policy"] = retry_policy
+                state["auto_resume_429"] = saved_auto_state
+                cohort_resume_count = 0
+                cohort_cooldown_seconds = 0.0
+                cohort_events = []
+                source_attempt_number = 0
+                pending_resume_event = None
+                while True:
+                    if pending_resume_event is not None:
+                        cohort_resume_count += 1
+                        automatic_resumes += 1
+                        pending_resume_event["outcome"] = "resume_started"
+                        pending_resume_event["resumed_source_attempt_number"] = source_attempt_number + 1
+                        _write_json(state_path, state)
+                        pending_resume_event = None
+                    source_attempt_number += 1
+                    result = observe_stage(
+                        runner,
+                        "source",
+                        cohort,
+                        process_cohort,
+                        session_id=session_id,
+                        configuration={
+                            "selection_fingerprint": selection["fingerprint"],
+                            "mssv": selection["mssv"],
+                            "run_scope": selection["scope"],
+                            "resume": True,
+                            "revision_history": True,
+                            "discovery_batch_size": 20,
+                            "force_discovery_refresh": True,
+                            "kaggle_snapshot_sha256": kaggle_evidence.get("snapshot_sha256"),
+                            "kaggle_index_sha256": kaggle_evidence.get("index_sha256"),
+                            "s2_enabled": False,
+                            "session_budget_seconds": budget_seconds,
+                            "auto_resume_429_policy": retry_policy,
+                            "source_attempt_number": source_attempt_number,
+                        },
+                    )
+                    if (cohort_events
+                            and cohort_events[-1].get("outcome") == "resume_started"):
+                        cohort_events[-1]["outcome"] = "resumed"
+                        _write_json(state_path, state)
+                    fast = result.get("fast_runner") or {}
+                    reason = result.get("stop_reason") or fast.get("stop_reason") or {}
+                    if not (
+                        retry_policy["enabled"]
+                        and result.get("stopped") is True
+                        and reason.get("type") == "http_policy"
+                        and reason.get("stage") == "discovery"
+                        and reason.get("http_status") == 429
+                    ):
+                        break
+
+                    event = {
+                        "session_id": session_id,
+                        "source_attempt_number": source_attempt_number,
+                        "arxiv_id": reason.get("arxiv_id"),
+                        "stage": "discovery",
+                        "http_status": 429,
+                        "checkpoint_saved": False,
+                        "outcome": "not_resumed",
+                    }
+                    batch_id = fast.get("batch_id")
+                    try:
+                        if isinstance(event["arxiv_id"], str) and isinstance(batch_id, str):
+                            event["checkpoint_saved"] = _durable_discovery_429_checkpoint(
+                                runner, selection["mssv"], event["arxiv_id"], cohort,
+                                batch_id,
+                            )
+                    except (OSError, ValueError, KeyError, TypeError, IntegrityError, StorageError):
+                        event["checkpoint_saved"] = False
+                        event["checkpoint_validation"] = "failed"
+                    if not event["checkpoint_saved"]:
+                        event["deferred_reason"] = "checkpoint_missing_or_invalid"
+                        cohort_events.append(event)
+                        saved_auto_state["events"].append(event)
+                        _write_json(state_path, state)
+                        break
+
+                    if cohort_resume_count >= retry_policy["max_per_cohort"]:
+                        event["deferred_reason"] = "cohort_resume_limit"
+                        cohort_events.append(event)
+                        saved_auto_state["events"].append(event)
+                        _write_json(state_path, state)
+                        break
+                    if automatic_resumes >= retry_policy["max_per_session"]:
+                        event["deferred_reason"] = "session_resume_limit"
+                        cohort_events.append(event)
+                        saved_auto_state["events"].append(event)
+                        _write_json(state_path, state)
+                        break
+
+                    try:
+                        provider_cooldown, provider_deadline = _provider_cooldown_from_logs(runner)
+                    except (OSError, ValueError, KeyError, TypeError, IntegrityError, StorageError):
+                        event["deferred_reason"] = "provider_cooldown_evidence_invalid"
+                        cohort_events.append(event)
+                        saved_auto_state["events"].append(event)
+                        _write_json(state_path, state)
+                        break
+                    cooldown_seconds = max(
+                        random.uniform(
+                            retry_policy["cooldown_min_seconds"],
+                            retry_policy["cooldown_max_seconds"],
+                        ),
+                        provider_cooldown,
+                    )
+                    # Chừa đủ ngân sách phiên để cơ chế thử lại hiện có
+                    # có thể chờ năm phút và chạy lại sau khi tiếp tục.
+                    required_budget = cooldown_seconds + runner.retry_wait_budget + 30.0
+                    if budget.remaining_seconds < required_budget:
+                        event.update(
+                            deferred_reason="session_budget",
+                            cooldown_seconds=cooldown_seconds,
+                            provider_retry_at_utc=provider_deadline,
+                        )
+                        cohort_events.append(event)
+                        saved_auto_state["events"].append(event)
+                        _write_json(state_path, state)
+                        break
+
+                    retry_not_before = datetime.fromtimestamp(
+                        time.time() + cooldown_seconds, timezone.utc,
+                    ).isoformat()
+                    event.update(
+                        outcome="cooldown_scheduled",
+                        cooldown_seconds=cooldown_seconds,
+                        provider_cooldown_seconds=provider_cooldown,
+                        provider_retry_at_utc=provider_deadline,
+                        retry_not_before_utc=retry_not_before,
+                    )
+                    cohort_events.append(event)
+                    saved_auto_state["events"].append(event)
+                    _write_json(state_path, state)
+                    print(
+                        f"[arXiv 429] Discovery {reason.get('arxiv_id')}: "
+                        f"checkpoint đã xác minh; tự resume sau {cooldown_seconds:.0f}s "
+                        f"(lần {cohort_resume_count + 1}/{retry_policy['max_per_cohort']}, "
+                        f"giới hạn phiên {automatic_resumes + 1}/"
+                        f"{retry_policy['max_per_session']}).",
+                        flush=True,
+                    )
+
+                    wait_started = time.perf_counter()
+
+                    def wait_for_arxiv_cooldown() -> dict:
+                        time.sleep(cooldown_seconds)
+                        return {
+                            "status": "waited",
+                            "retry_wait_seconds": max(0.0, time.perf_counter() - wait_started),
+                            "arxiv_id": reason["arxiv_id"],
+                            "trigger_stage": "discovery",
+                            "trigger_http_status": 429,
+                            "resume_attempt_number": cohort_resume_count + 1,
+                        }
+
+                    wait_result = observe_stage(
+                        runner,
+                        "arxiv_retry_wait",
+                        cohort,
+                        wait_for_arxiv_cooldown,
+                        session_id=session_id,
+                        configuration={
+                            "selection_fingerprint": selection["fingerprint"],
+                            "mssv": selection["mssv"],
+                            "arxiv_id": reason["arxiv_id"],
+                            "trigger_stage": "discovery",
+                            "trigger_http_status": 429,
+                            "resume_attempt_number": cohort_resume_count + 1,
+                            "scheduled_seconds": cooldown_seconds,
+                            "provider_retry_at_utc": provider_deadline,
+                        },
+                    )
+                    measured_cooldown = float(wait_result["retry_wait_seconds"])
+                    event.update(
+                        outcome="cooldown_complete",
+                        measured_cooldown_seconds=measured_cooldown,
+                    )
+                    saved_auto_state["events"][-1] = event
+                    _write_json(state_path, state)
+                    cohort_cooldown_seconds += measured_cooldown
+                    automatic_cooldown_seconds += measured_cooldown
+                    if budget.should_stop():
+                        event["deferred_reason"] = "session_budget_after_cooldown"
+                        _write_json(state_path, state)
+                        break
+                    pending_resume_event = event
+
+                result["auto_resume_429"] = {
+                    "enabled": retry_policy["enabled"],
+                    "resume_attempts": cohort_resume_count,
+                    "cooldown_seconds": cohort_cooldown_seconds,
+                    "events": cohort_events,
+                }
                 cohort_results[str(cohort)] = result
                 if result.get("stopped"):
                     stopped = True
@@ -486,8 +1045,19 @@ def run_m1_arxiv_member(
             "m1_complete": False,
             "checkpoint_root": str(phase_root / "arxiv"),
             "session_id": session_id,
+            "kaggle": kaggle_evidence,
+            "auto_resume_429": {
+                "policy": retry_policy,
+                "resume_attempts": automatic_resumes,
+                "cooldown_seconds": automatic_cooldown_seconds,
+            },
         }
     finally:
+        for key, value in prior_environment.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         finish_session_envelope(envelope, started_monotonic=started)
 
 
@@ -588,6 +1158,66 @@ def _read_s2_paper(manifest: dict, cohort_root: Path, arxiv_id: str) -> tuple[di
     return metadata_result, references_result
 
 
+def _durable_s2_429_checkpoint(
+    phase_root: Path,
+    selection: dict,
+    cohort: int,
+    stop_reason: dict,
+) -> bool:
+    """Verify the S2 checkpoint and the evidence that caused the 429 stop."""
+    if (not isinstance(stop_reason, dict)
+            or stop_reason.get("type") != "http_policy"
+            or stop_reason.get("stage") not in {"s2_metadata", "s2_references"}
+            or stop_reason.get("http_status") != 429
+            or stop_reason.get("checkpoint_saved") is not True):
+        return False
+    cohort_root, checkpoint_path = _cohort_s2_paths(phase_root, cohort)
+    try:
+        manifest = _load_s2_manifest(checkpoint_path, selection, cohort)
+        saved_reason = manifest.get("stop_reason") or {}
+        if (manifest.get("status") != "partial"
+                or manifest.get("stopped") is not True
+                or saved_reason.get("type") != "http_policy"
+                or saved_reason.get("stage") != stop_reason["stage"]
+                or saved_reason.get("http_status") != 429):
+            return False
+        affected_ids = stop_reason.get("affected_ids")
+        if (not isinstance(affected_ids, list) or not affected_ids
+                or any(not isinstance(identifier, str) for identifier in affected_ids)
+                or len(affected_ids) != len(set(affected_ids))
+                or not set(affected_ids).issubset(set(manifest["ids"]))):
+            return False
+        evidence = {
+            identifier: _read_s2_paper(manifest, cohort_root, identifier)
+            for identifier in manifest["ids"]
+        }
+        if stop_reason["stage"] == "s2_metadata":
+            return any(
+                evidence[identifier][0] is not None
+                and evidence[identifier][0].get("http_status") == 429
+                for identifier in affected_ids
+            )
+        if len(affected_ids) != 1:
+            return False
+        references = evidence[affected_ids[0]][1]
+        return (
+            isinstance(references, dict)
+            and isinstance(references.get("error"), dict)
+            and references["error"].get("http_status") == 429
+        )
+    except (OSError, ValueError, TypeError, KeyError, M1PhaseError, StorageError, IntegrityError):
+        return False
+
+
+def _s2_provider_cooldown_seconds(limiter: Any) -> float:
+    """Read the limiter's remaining Retry-After wait without trusting bad values."""
+    value = getattr(limiter, "cooldown_remaining_seconds", 0.0)
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not math.isfinite(value) or value < 0):
+        return 0.0
+    return float(value)
+
+
 def _save_s2_metadata(manifest: dict, cohort_root: Path, arxiv_id: str, result: dict) -> None:
     path, relative = _evidence_file(cohort_root, arxiv_id, "metadata")
     _ensure_directory(path.parent, cohort_root)
@@ -659,6 +1289,96 @@ def _reuse_corpus_s2(runner: FastProductionRunner, mssv: str, arxiv_id: str) -> 
     return meta_result, refs_result
 
 
+def _fetch_s2_metadata_batch(
+    manifest: dict,
+    cohort_root: Path,
+    identifiers: list[str],
+    config: dict,
+    limiter: Any,
+    checkpoint_write: Callable[[], None],
+) -> tuple[bool, int | None, int, list[str]]:
+    """Fetch and commit one identity-checked metadata batch, one ID at a time."""
+    from src import s2_integration, semantic_scholar
+
+    calls = 0
+
+    def request(chunk: list[str]) -> list[dict]:
+        nonlocal calls
+        calls += 1
+        rows = semantic_scholar.fetch_metadata(
+            chunk,
+            batch_size=S2_METADATA_BATCH_SIZE,
+            limiter=limiter,
+            require_arxiv_identity=True,
+            **{
+                name: config[name]
+                for name in (
+                    "timeout", "max_attempts", "max_response_bytes",
+                    "max_retry_wait", "backoff_base", "backoff_cap",
+                )
+            },
+        )
+        if (len(rows) != len(chunk)
+                or any(not isinstance(row, dict) or row.get("arxiv_id") != identifier
+                       for identifier, row in zip(chunk, rows))):
+            raise M1PhaseError("S2 metadata batch không khớp danh sách ID; chưa ghi bằng chứng.")
+        if (len(chunk) > 1 and all(
+            row.get("status") == "invalid_response"
+            or row.get("error") == "http_413_request_too_large"
+            for row in rows
+        )):
+            midpoint = len(chunk) // 2
+            left = request(chunk[:midpoint])
+            if any(row.get("http_status") in {403, 429} for row in left):
+                return left + [
+                    {"arxiv_id": identifier, "status": "rate_limited",
+                     "http_status": None, "attempts": 0, "paper": None,
+                     "error": "not_attempted_after_rate_limit"}
+                    for identifier in chunk[midpoint:]
+                ]
+            return left + request(chunk[midpoint:])
+        return rows
+
+    batch_started = time.perf_counter()
+    print(
+        f"[M1/S2] Metadata batch: bắt đầu {len(identifiers)} ID "
+        f"({identifiers[0]}..{identifiers[-1]}).",
+        flush=True,
+    )
+    try:
+        responses = request(identifiers)
+    except Exception as exc:
+        print(
+            f"[M1/S2] Metadata batch thất bại sau {time.perf_counter() - batch_started:.1f}s "
+            f"({type(exc).__name__}); checkpoint trước đó vẫn được giữ.",
+            flush=True,
+        )
+        raise
+    policy_status = None
+    policy_ids = []
+    for identifier, row in zip(identifiers, responses):
+        error = row.get("error")
+        if row.get("attempts") == 0 and isinstance(error, str) and error.startswith("not_attempted_"):
+            continue
+        result = s2_integration.metadata_result(row, identifier)
+        _save_s2_metadata(manifest, cohort_root, identifier, result)
+        checkpoint_write()
+        if result.get("http_status") in {403, 429}:
+            policy_status = result["http_status"]
+            if result["http_status"] == 429:
+                policy_ids.append(identifier)
+    status_counts: dict[str, int] = {}
+    for row in responses:
+        status = row.get("status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    print(
+        f"[M1/S2] Metadata batch xong: {len(identifiers)} ID, {calls} request, "
+        f"{time.perf_counter() - batch_started:.1f}s; trạng thái {status_counts}.",
+        flush=True,
+    )
+    return policy_status is not None, policy_status, calls, policy_ids
+
+
 def _save_cached_evidence(manifest: dict, cohort_root: Path, arxiv_id: str,
                           metadata_result: dict | None, references_result: dict | None) -> None:
     if metadata_result is not None:
@@ -690,15 +1410,65 @@ def _process_s2_cohort(
     _write_json(checkpoint_path, manifest)
     config = s2_integration.configuration(S2_DEFAULTS)
     limiter = semantic_scholar.RateLimiter(config["min_interval"])
-    timings = []
+    timing_by_id: dict[str, float] = {}
+    prefetched: set[str] = set()
+    phase_metrics = {
+        "metadata_batch_calls": 0,
+        "metadata_fetch_calls": 0,
+        "metadata_ids_requested": 0,
+        "metadata_batch_wall_seconds": 0.0,
+        "references_wall_seconds": 0.0,
+        "checkpoint_wall_seconds": 0.0,
+    }
+
+    def checkpoint_write() -> None:
+        started_write = time.perf_counter()
+        try:
+            _write_json(checkpoint_path, manifest)
+        finally:
+            phase_metrics["checkpoint_wall_seconds"] += max(
+                0.0, time.perf_counter() - started_write,
+            )
+
     stopped = False
     stop_reason = None
     attempted = 0
-
     pairs = [(member, aid) for member, aid in cohort_pairs(cohort) if member == selection["mssv"]]
+    cohort_started = time.perf_counter()
+    initially_metadata_complete = sum(
+        record.get("metadata_status") in {"found", "not_found"}
+        for record in manifest["papers"].values()
+    )
+    initially_references_complete = sum(
+        record.get("references_status") in {"complete", "not_found"}
+        for record in manifest["papers"].values()
+    )
+    print(
+        f"[M1/S2] Lô {cohort}: bắt đầu/tiếp tục {len(pairs)} ID; "
+        f"đã có metadata {initially_metadata_complete}, references "
+        f"{initially_references_complete}; metadata batch tối đa "
+        f"{S2_METADATA_BATCH_SIZE} ID.",
+        flush=True,
+    )
+
     with _api_key_environment(s2_key):
         semantic_scholar._key_from_environment()
         for index, (member, arxiv_id) in enumerate(pairs, start=1):
+            if index == 1 or (index - 1) % 10 == 0:
+                metadata_done = sum(
+                    item.get("metadata_status") in {"found", "not_found"}
+                    for item in manifest["papers"].values()
+                )
+                references_done = sum(
+                    item.get("references_status") in {"complete", "not_found"}
+                    for item in manifest["papers"].values()
+                )
+                print(
+                    f"[M1/S2] Lô {cohort}: đang xử lý ID {index}/{len(pairs)} "
+                    f"({arxiv_id}); metadata {metadata_done}/{len(pairs)}, "
+                    f"references {references_done}/{len(pairs)}.",
+                    flush=True,
+                )
             record = manifest["papers"][arxiv_id]
             try:
                 metadata_result, references_result = _read_s2_paper(
@@ -718,7 +1488,7 @@ def _process_s2_cohort(
                         manifest, cohort_root, arxiv_id, cached_meta, cached_refs
                     )
                     metadata_result, references_result = cached_meta, cached_refs
-                    _write_json(checkpoint_path, manifest)
+                    checkpoint_write()
 
             if (
                 metadata_result is not None
@@ -733,32 +1503,59 @@ def _process_s2_cohort(
                 break
 
             started = time.perf_counter()
+            batch_elapsed = 0.0
             attempted += 1
             try:
-                if metadata_result is None or metadata_result["status"] not in {"found", "not_found"}:
-                    response = semantic_scholar.fetch_metadata(
-                        [arxiv_id],
-                        batch_size=1,
-                        limiter=limiter,
-                        require_arxiv_identity=True,
-                        **{
-                            name: config[name]
-                            for name in (
-                                "timeout", "max_attempts", "max_response_bytes",
-                                "max_retry_wait", "backoff_base", "backoff_cap",
+                if (arxiv_id not in prefetched
+                        and (metadata_result is None
+                             or metadata_result["status"] not in {"found", "not_found"})):
+                    batch_started = time.perf_counter()
+                    try:
+                        candidates = []
+                        for future_member, future_id in pairs[index - 1:index - 1 + S2_METADATA_BATCH_SIZE]:
+                            if future_id in prefetched or manifest["papers"][future_id]["metadata_status"] in {"found", "not_found"}:
+                                continue
+                            future_record = manifest["papers"][future_id]
+                            if (future_record["metadata_status"] == "not_attempted"
+                                    and future_record["references_status"] == "not_attempted"):
+                                cached_meta, cached_refs = _reuse_corpus_s2(
+                                    runner, future_member, future_id,
+                                )
+                                if cached_meta is not None or cached_refs is not None:
+                                    _save_cached_evidence(
+                                        manifest, cohort_root, future_id, cached_meta, cached_refs,
+                                    )
+                                    checkpoint_write()
+                            if manifest["papers"][future_id]["metadata_status"] not in {"found", "not_found"}:
+                                candidates.append(future_id)
+                        if candidates:
+                            phase_metrics["metadata_batch_calls"] += 1
+                            phase_metrics["metadata_ids_requested"] += len(candidates)
+                            policy_stop, policy_status, fetch_calls, policy_ids = _fetch_s2_metadata_batch(
+                                manifest, cohort_root, candidates,
+                                config, limiter, checkpoint_write,
                             )
-                        },
-                    )[0]
-                    response = s2_integration.metadata_result(response, arxiv_id)
-                    _save_s2_metadata(manifest, cohort_root, arxiv_id, response)
-                    metadata_result = response
-                    _write_json(checkpoint_path, manifest)
-                    if response.get("http_status") in {403, 429}:
+                            phase_metrics["metadata_fetch_calls"] += fetch_calls
+                        else:
+                            policy_stop, policy_status = False, None
+                    finally:
+                        batch_elapsed = max(0.0, time.perf_counter() - batch_started)
+                        phase_metrics["metadata_batch_wall_seconds"] += batch_elapsed
+                        if candidates:
+                            share = batch_elapsed / len(candidates)
+                            for candidate in candidates:
+                                timing_by_id[candidate] = timing_by_id.get(candidate, 0.0) + share
+                            prefetched.update(candidates)
+                    metadata_result, references_result = _read_s2_paper(
+                        manifest, cohort_root, arxiv_id,
+                    )
+                    if policy_stop:
                         stopped = True
                         stop_reason = {
                             "type": "http_policy", "stage": "s2_metadata",
-                            "http_status": response["http_status"],
-                            "checkpoint_saved": True,
+                            "http_status": policy_status, "checkpoint_saved": True,
+                            "affected_ids": policy_ids,
+                            "provider_cooldown_seconds": _s2_provider_cooldown_seconds(limiter),
                         }
                         break
 
@@ -769,25 +1566,31 @@ def _process_s2_cohort(
 
                 if references_result is None or references_result.get("status") not in {"complete", "not_found"}:
                     previous_snapshot = references_result
-                    reference_response = semantic_scholar.fetch_references(
-                        arxiv_id,
-                        limit=config["reference_limit"],
-                        max_pages=config["max_pages"],
-                        timeout=config["timeout"],
-                        max_attempts=config["max_attempts"],
-                        limiter=limiter,
-                        max_response_bytes=config["max_response_bytes"],
-                        resume_from=previous_snapshot if previous_snapshot else None,
-                        max_retry_wait=config["max_retry_wait"],
-                        backoff_base=config["backoff_base"],
-                        backoff_cap=config["backoff_cap"],
-                    )
+                    reference_started = time.perf_counter()
+                    try:
+                        reference_response = semantic_scholar.fetch_references(
+                            arxiv_id,
+                            limit=config["reference_limit"],
+                            max_pages=config["max_pages"],
+                            timeout=config["timeout"],
+                            max_attempts=config["max_attempts"],
+                            limiter=limiter,
+                            max_response_bytes=config["max_response_bytes"],
+                            resume_from=previous_snapshot if previous_snapshot else None,
+                            max_retry_wait=config["max_retry_wait"],
+                            backoff_base=config["backoff_base"],
+                            backoff_cap=config["backoff_cap"],
+                        )
+                    finally:
+                        phase_metrics["references_wall_seconds"] += max(
+                            0.0, time.perf_counter() - reference_started,
+                        )
                     s2_integration.references_evidence(
                         reference_response, arxiv_id, for_resume=True
                     )
                     _save_s2_references(manifest, cohort_root, arxiv_id, reference_response)
                     references_result = reference_response
-                    _write_json(checkpoint_path, manifest)
+                    checkpoint_write()
                     http_status = (reference_response.get("error") or {}).get("http_status")
                     if http_status in {403, 429}:
                         stopped = True
@@ -795,6 +1598,8 @@ def _process_s2_cohort(
                             "type": "http_policy", "stage": "s2_references",
                             "http_status": http_status,
                             "checkpoint_saved": True,
+                            "affected_ids": [arxiv_id],
+                            "provider_cooldown_seconds": _s2_provider_cooldown_seconds(limiter),
                         }
                         break
             except KeyboardInterrupt:
@@ -802,11 +1607,9 @@ def _process_s2_cohort(
                 stop_reason = {"type": "interrupted", "stage": "s2"}
                 break
             finally:
-                elapsed = max(0.0, time.perf_counter() - started)
-                timings.append({"arxiv_id": arxiv_id, "s2_wall_seconds": elapsed})
-                _write_json(checkpoint_path, manifest)
-            if index % 10 == 0 or index == len(pairs):
-                print(f"[M1/S2] Lô {cohort}: đã xét {index}/{len(pairs)} ID; hiện tại {arxiv_id}.")
+                elapsed = max(0.0, time.perf_counter() - started - batch_elapsed)
+                timing_by_id[arxiv_id] = timing_by_id.get(arxiv_id, 0.0) + elapsed
+                checkpoint_write()
             if stopped:
                 break
 
@@ -824,6 +1627,13 @@ def _process_s2_cohort(
         references_complete=references_complete,
     )
     _write_json(checkpoint_path, manifest)
+    print(
+        f"[M1/S2] Lô {cohort}: kết thúc lượt trong "
+        f"{time.perf_counter() - cohort_started:.1f}s; metadata "
+        f"{metadata_complete}/{len(pairs)}, references "
+        f"{references_complete}/{len(pairs)}; trạng thái {manifest['status']}.",
+        flush=True,
+    )
     return {
         "status": manifest["status"],
         "cohort": cohort,
@@ -837,7 +1647,11 @@ def _process_s2_cohort(
         ),
         "stopped": stopped,
         "stop_reason": stop_reason,
-        "paper_timings": timings,
+        "paper_timings": [
+            {"arxiv_id": identifier, "s2_wall_seconds": seconds}
+            for identifier, seconds in timing_by_id.items()
+        ],
+        "phase_metrics": phase_metrics,
         "selection_fingerprint": selection["fingerprint"],
         "checkpoint_path": str(checkpoint_path),
     }
@@ -851,8 +1665,20 @@ def run_m1_s2_member(
     semantic_scholar_api_key: str | None = None,
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
+    auto_resume_429: bool = False,
+    auto_resume_429_max_per_cohort: int = 1,
+    auto_resume_429_max_per_session: int = 2,
+    auto_resume_429_cooldown_min_seconds: float = 300.0,
+    auto_resume_429_cooldown_max_seconds: float = 600.0,
 ) -> dict:
-    """Collect S2 metadata and all references independently of arXiv source state."""
+    """Collect S2 metadata/references, optionally resuming bounded 429 stops."""
+    retry_policy = _auto_resume_s2_429_policy(
+        auto_resume_429,
+        auto_resume_429_max_per_cohort,
+        auto_resume_429_max_per_session,
+        auto_resume_429_cooldown_min_seconds,
+        auto_resume_429_cooldown_max_seconds,
+    )
     selection = build_member_selection(mssv, cohort_limit)
     drive = Path(drive_root).expanduser().resolve()
     local = Path(local_root).expanduser().resolve()
@@ -863,34 +1689,227 @@ def run_m1_s2_member(
     cohort_results = {}
     stopped = False
     stop_reason = None
+    automatic_resumes = 0
+    automatic_cooldown_seconds = 0.0
+    auto_events: list[dict] = []
+    auto_events_path = None
+
+    def persist_auto_events() -> None:
+        if auto_events_path is not None:
+            payload = {
+                "schema_version": 1,
+                "stage": "s2",
+                "mssv": selection["mssv"],
+                "selection_fingerprint": selection["fingerprint"],
+                "session_id": session_id,
+                "policy": retry_policy,
+                "events": auto_events,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            _write_json(auto_events_path, payload)
+
     try:
         with _member_writer_lock(drive, selection):
             _record_session(phase_root, selection, session_id, "s2")
             _ensure_starting_state(runner, phase_root, selection)
+            if retry_policy["enabled"]:
+                event_root = phase_root / "s2" / "auto_resume_429"
+                _ensure_directory(event_root, drive)
+                auto_events_path = event_root / f"{session_id}.json"
+                if auto_events_path.exists() or auto_events_path.is_symlink():
+                    raise M1PhaseError("S2 auto-resume evidence path already exists; preserve it for inspection.")
+                persist_auto_events()
             for cohort in selection["cohorts"]:
-                result = observe_stage(
-                    runner,
-                    "s2",
-                    cohort,
-                    lambda number=cohort: _process_s2_cohort(
-                        runner, selection, number, phase_root,
-                        semantic_scholar_api_key, budget, session_id,
-                    ),
-                    session_id=session_id,
-                    configuration={
-                        "selection_fingerprint": selection["fingerprint"],
-                        "mssv": selection["mssv"],
-                        "run_scope": selection["scope"],
-                        "authenticated": bool(semantic_scholar_api_key),
-                        "s2_min_interval": S2_DEFAULTS["min_interval"],
-                        "max_attempts": S2_DEFAULTS["max_attempts"],
-                        "max_retry_wait": S2_DEFAULTS["max_retry_wait"],
-                        "backoff_base": S2_DEFAULTS["backoff_base"],
-                        "backoff_cap": S2_DEFAULTS["backoff_cap"],
-                        "session_budget_seconds": budget_seconds,
-                    },
-                )
+                cohort_resume_count = 0
+                pending_resume_event = None
+                while True:
+                    result = observe_stage(
+                        runner,
+                        "s2",
+                        cohort,
+                        lambda number=cohort: _process_s2_cohort(
+                            runner, selection, number, phase_root,
+                            semantic_scholar_api_key, budget, session_id,
+                        ),
+                        session_id=session_id,
+                        configuration={
+                            "selection_fingerprint": selection["fingerprint"],
+                            "mssv": selection["mssv"],
+                            "run_scope": selection["scope"],
+                            "authenticated": bool(semantic_scholar_api_key),
+                            "metadata_batch_size": S2_METADATA_BATCH_SIZE,
+                            "s2_min_interval": S2_DEFAULTS["min_interval"],
+                            "max_attempts": S2_DEFAULTS["max_attempts"],
+                            "max_retry_wait": S2_DEFAULTS["max_retry_wait"],
+                            "backoff_base": S2_DEFAULTS["backoff_base"],
+                            "backoff_cap": S2_DEFAULTS["backoff_cap"],
+                            "auto_resume_429_policy": retry_policy,
+                            "session_budget_seconds": budget_seconds,
+                        },
+                    )
+                    reason = result.get("stop_reason") or {}
+                    if pending_resume_event is not None:
+                        pending_resume_event.update(
+                            outcome="resumed",
+                            resumed_status=result.get("status"),
+                            resumed_stop_reason=reason or None,
+                        )
+                        persist_auto_events()
+                        pending_resume_event = None
+
+                    is_s2_429 = (
+                        retry_policy["enabled"]
+                        and result.get("stopped") is True
+                        and reason.get("type") == "http_policy"
+                        and reason.get("stage") in {"s2_metadata", "s2_references"}
+                        and reason.get("http_status") == 429
+                    )
+                    if not is_s2_429:
+                        break
+
+                    affected_ids = reason.get("affected_ids")
+                    event = {
+                        "session_id": session_id,
+                        "cohort": cohort,
+                        "stage": reason["stage"],
+                        "http_status": 429,
+                        "affected_ids": affected_ids if isinstance(affected_ids, list) else [],
+                        "checkpoint_saved": False,
+                        "outcome": "not_resumed",
+                    }
+                    auto_events.append(event)
+                    try:
+                        event["checkpoint_saved"] = _durable_s2_429_checkpoint(
+                            phase_root, selection, cohort, reason,
+                        )
+                    except (OSError, ValueError, TypeError, KeyError,
+                            M1PhaseError, StorageError, IntegrityError):
+                        event["checkpoint_saved"] = False
+                        event["checkpoint_validation"] = "failed"
+                    if not event["checkpoint_saved"]:
+                        event["deferred_reason"] = "checkpoint_missing_or_invalid"
+                        persist_auto_events()
+                        break
+                    if cohort_resume_count >= retry_policy["max_per_cohort"]:
+                        event["deferred_reason"] = "cohort_resume_limit"
+                        persist_auto_events()
+                        break
+                    if automatic_resumes >= retry_policy["max_per_session"]:
+                        event["deferred_reason"] = "session_resume_limit"
+                        persist_auto_events()
+                        break
+
+                    provider_cooldown = reason.get("provider_cooldown_seconds", 0.0)
+                    if (isinstance(provider_cooldown, bool)
+                            or not isinstance(provider_cooldown, (int, float))
+                            or not math.isfinite(provider_cooldown)
+                            or provider_cooldown < 0):
+                        event["deferred_reason"] = "provider_cooldown_evidence_invalid"
+                        persist_auto_events()
+                        break
+                    cooldown_seconds = max(
+                        random.uniform(
+                            retry_policy["cooldown_min_seconds"],
+                            retry_policy["cooldown_max_seconds"],
+                        ),
+                        float(provider_cooldown),
+                    )
+                    required_budget = (
+                        cooldown_seconds + S2_DEFAULTS["max_retry_wait"] + 30.0
+                    )
+                    if budget.remaining_seconds < required_budget:
+                        event.update(
+                            deferred_reason="session_budget",
+                            cooldown_seconds=cooldown_seconds,
+                            provider_cooldown_seconds=float(provider_cooldown),
+                        )
+                        persist_auto_events()
+                        break
+
+                    retry_not_before = datetime.fromtimestamp(
+                        time.time() + cooldown_seconds, timezone.utc,
+                    ).isoformat()
+                    event.update(
+                        outcome="cooldown_scheduled",
+                        cooldown_seconds=cooldown_seconds,
+                        provider_cooldown_seconds=float(provider_cooldown),
+                        retry_not_before_utc=retry_not_before,
+                        resume_attempt_number=cohort_resume_count + 1,
+                    )
+                    persist_auto_events()
+                    display_ids = event["affected_ids"]
+                    affected_label = (
+                        f"{len(display_ids)} ID metadata"
+                        if reason["stage"] == "s2_metadata"
+                        else ", ".join(display_ids)
+                    )
+                    print(
+                        f"[Semantic Scholar 429] {reason['stage']} ({affected_label}): "
+                        f"checkpoint đã xác minh; tự resume sau {cooldown_seconds:.0f}s "
+                        f"(lần {cohort_resume_count + 1}/{retry_policy['max_per_cohort']} "
+                        f"của lô, {automatic_resumes + 1}/"
+                        f"{retry_policy['max_per_session']} của phiên).",
+                        flush=True,
+                    )
+                    wait_started = time.perf_counter()
+
+                    def wait_for_s2_cooldown() -> dict:
+                        time.sleep(cooldown_seconds)
+                        return {
+                            "status": "waited",
+                            "retry_wait_seconds": max(0.0, time.perf_counter() - wait_started),
+                            "affected_ids": list(event["affected_ids"]),
+                            "trigger_stage": reason["stage"],
+                            "trigger_http_status": 429,
+                            "resume_attempt_number": cohort_resume_count + 1,
+                        }
+
+                    wait_result = observe_stage(
+                        runner,
+                        "s2_retry_wait",
+                        cohort,
+                        wait_for_s2_cooldown,
+                        session_id=session_id,
+                        configuration={
+                            "selection_fingerprint": selection["fingerprint"],
+                            "mssv": selection["mssv"],
+                            "affected_ids": list(event["affected_ids"]),
+                            "trigger_stage": reason["stage"],
+                            "trigger_http_status": 429,
+                            "resume_attempt_number": cohort_resume_count + 1,
+                            "scheduled_seconds": cooldown_seconds,
+                            "provider_cooldown_seconds": float(provider_cooldown),
+                            "retry_not_before_utc": retry_not_before,
+                        },
+                    )
+                    measured_cooldown = float(wait_result["retry_wait_seconds"])
+                    event.update(
+                        outcome="cooldown_complete",
+                        measured_cooldown_seconds=measured_cooldown,
+                    )
+                    automatic_cooldown_seconds += measured_cooldown
+                    if budget.should_stop():
+                        event["deferred_reason"] = "session_budget_after_cooldown"
+                        persist_auto_events()
+                        break
+
+                    cohort_resume_count += 1
+                    automatic_resumes += 1
+                    event["outcome"] = "resume_started"
+                    pending_resume_event = event
+                    persist_auto_events()
+                    continue
+
                 cohort_results[str(cohort)] = result
+                result["auto_resume_429"] = {
+                    "policy": retry_policy,
+                    "resume_attempts": cohort_resume_count,
+                    "cooldown_seconds": sum(
+                        item.get("measured_cooldown_seconds", 0.0)
+                        for item in auto_events if item.get("cohort") == cohort
+                    ),
+                    "events": [item for item in auto_events if item.get("cohort") == cohort],
+                }
                 if result.get("stopped"):
                     stopped = True
                     stop_reason = result.get("stop_reason")
@@ -908,6 +1927,14 @@ def run_m1_s2_member(
             "m1_complete": False,
             "checkpoint_root": str(phase_root / "s2"),
             "session_id": session_id,
+            "auto_resume_429": {
+                "policy": retry_policy,
+                "resume_attempts": automatic_resumes,
+                "cooldown_seconds": automatic_cooldown_seconds,
+                "events": auto_events,
+                "events_path": str(auto_events_path) if auto_events_path else None,
+                "events_sha256": _sha256_file(auto_events_path) if auto_events_path else None,
+            },
         }
     finally:
         finish_session_envelope(envelope, started_monotonic=started)
@@ -1074,6 +2101,7 @@ def _load_phase_observations(runner: FastProductionRunner, phase_root: Path,
 
 def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
                               selection: dict, audit_result: dict) -> dict:
+    from src.benchmark_metrics import directory_bytes
     from src.session_evidence import (
         fingerprint_complete_corpus,
         summarize_discovery_timings,
@@ -1082,6 +2110,7 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
     )
 
     observations, envelopes = _load_phase_observations(runner, phase_root, selection)
+    assigned_ids = [arxiv_id for _member, arxiv_id in selection["pairs"]]
     starting_state_path = phase_root / "starting_state.json"
     starting_state = (
         _validate_starting_state(_read_json(starting_state_path), selection, starting_state_path)
@@ -1102,6 +2131,7 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
         except Exception:
             continue
     paper_timings = summarize_paper_timings(observations, found_ids)
+    assigned_paper_timings = summarize_paper_timings(observations, assigned_ids)
     discovery_timings = summarize_discovery_timings(
         observations, [aid for _member, aid in selection["pairs"]]
     )
@@ -1132,14 +2162,68 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
                  and type(logical_after) in (int, float)
                  and all(value >= 0 and value < float("inf") for value in (logical_before, logical_after))))
     )
+
+    def measured_tree_size(path: Path | None) -> int | None:
+        if path is None or not Path(path).is_dir():
+            return None
+        try:
+            return directory_bytes(Path(path))
+        except OSError:
+            return None
+
+    corpus_size_bytes = measured_tree_size(runner.corpus_dir)
+    archive_sizes = []
+    for cohort in selection["cohorts"]:
+        archive_path = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
+        if not archive_path.is_file():
+            archive_sizes = []
+            break
+        try:
+            archive_sizes.append(directory_bytes(archive_path))
+        except OSError:
+            archive_sizes = []
+            break
+    archive_size_bytes = sum(archive_sizes) if len(archive_sizes) == len(selection["cohorts"]) else None
+    export_info = audit_result.get("export") or {}
+    export_dir = export_info.get("output_dir") if audit_result.get("export_status") == "exported" else None
+    export_size_bytes = measured_tree_size(Path(export_dir)) if isinstance(export_dir, str) else None
+    bbl_artifact_root = getattr(runner, "bbl_artifact_dir", None)
+    try:
+        bbl_artifact_size_bytes = directory_bytes(Path(bbl_artifact_root)) if bbl_artifact_root else None
+    except OSError:
+        bbl_artifact_size_bytes = None
+    storage_size_complete = all(
+        type(value) is int and value >= 0
+        for value in (corpus_size_bytes, archive_size_bytes, export_size_bytes)
+    )
+    storage_size_metrics = {
+        "status": "complete" if storage_size_complete else "incomplete",
+        "corpus_bytes": corpus_size_bytes,
+        "source_archives_bytes": archive_size_bytes,
+        "official_export_bytes": export_size_bytes,
+        "derived_bibliography_artifacts_bytes": bbl_artifact_size_bytes,
+        "derived_bibliography_status": (
+            "collected" if type(bbl_artifact_size_bytes) is int else "not_collected"
+        ),
+        "derived_bibliography_scope": "configured shared artifact root; may include other selections and is not summed across members",
+        "final_output_storage_bytes": (
+            archive_size_bytes + export_size_bytes
+            if archive_size_bytes is not None and export_size_bytes is not None else None
+        ),
+        "final_output_scope": "selected source archives plus official export directory; local corpus and derived bibliography artifacts are reported separately",
+        "size_scope": "logical regular-file bytes; archive size includes selected cohort .tar.gz files, not their sidecars",
+    }
     all_m1 = (
         audit_result.get("is_reconciled") is True
         and workflow.get("status") == "measured_intervals"
-        and paper_timings.get("status") == "complete"
+        and workflow.get("system_ram_status") == "collected"
+        and workflow.get("resource_scope_status") == "collected"
+        and assigned_paper_timings.get("status") == "complete"
         and discovery_timings.get("status") == "complete"
         and data_signature is not None
         and len(runtime_commits) == 1
         and logical_size_complete
+        and storage_size_complete
     )
     summary = {
         "schema_version": PHASE_SCHEMA_VERSION,
@@ -1170,8 +2254,19 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
         "end_to_end_complete": bool(all_m1 and selection["expected_count"] == 5000),
         "sampled_peak_ram_bytes": workflow.get("sampled_peak_ram_bytes"),
         "sampled_average_ram_bytes": workflow.get("sampled_average_ram_bytes"),
+        "process_ram_source": workflow.get("process_ram_source"),
+        "process_ram_scope": workflow.get("process_ram_scope"),
+        "system_ram_status": workflow.get("system_ram_status"),
+        "sampled_peak_system_ram_bytes": workflow.get("sampled_peak_system_ram_bytes"),
+        "sampled_average_system_ram_bytes": workflow.get("sampled_average_system_ram_bytes"),
+        "system_ram_scope": workflow.get("system_ram_scope"),
+        "system_ram_source": workflow.get("system_ram_source"),
         "sampled_peak_disk_bytes": workflow.get("sampled_peak_disk_bytes"),
+        "disk_roots": workflow.get("disk_roots"),
         "paper_timings": paper_timings,
+        "assigned_paper_timings": assigned_paper_timings,
+        "assigned_paper_count": len(assigned_ids),
+        "average_assigned_paper_seconds": assigned_paper_timings.get("average_seconds"),
         "discovery_timings": discovery_timings,
         "measurement_scope": (
             "Sequential arXiv source and S2 intervals across recorded sessions; "
@@ -1179,13 +2274,20 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
             "and environment installation are excluded."
         ),
         "resource_measurement_scope": (
-            "RAM is sampled process RSS; disk is sampled logical regular-file bytes "
-            "under the disjoint roots listed in each stage observation. Sampled peaks "
-            "can miss short-lived files or memory spikes."
+            "Crawler RAM is sampled process-tree RSS; system RAM is sampled host-wide "
+            "used RAM and includes unrelated Colab processes. Disk is sampled logical "
+            "regular-file bytes under each stage observation's disjoint roots. Sampled "
+            "peaks can miss short-lived files or memory spikes."
         ),
+        "storage_size_metrics": storage_size_metrics,
+        "corpus_size_bytes": corpus_size_bytes,
+        "archive_size_bytes": archive_size_bytes,
+        "export_size_bytes": export_size_bytes,
+        "final_output_storage_bytes": storage_size_metrics["final_output_storage_bytes"],
+        "final_output_storage_scope": storage_size_metrics["final_output_scope"],
         "measurement_protocol": (
-            "m1-independent-phases-v1; source/S2 retry and delays included; "
-            "sequential session wall time includes audit/export; inter-session gaps excluded"
+            "m1-independent-phases-v2; source/S2 retry and automatic 429 cooldown included; "
+            "all-assigned-ID average; process RSS and host-wide RAM sampled; inter-session gaps excluded"
         ),
         "logical_size_metrics": {
             key: (audit_result.get("statistics") or {}).get(key)
@@ -1202,6 +2304,18 @@ def _member_benchmark_summary(runner: FastProductionRunner, phase_root: Path,
             "eligible_records": audit_stats.get("total_complete_reference_records"),
             "success_rate_percent": audit_stats.get("reference_metadata_success_rate"),
             "definition": audit_stats.get("reference_metadata_success_definition"),
+        },
+        "reference_arxiv_id_coverage": {
+            "identified_records": audit_stats.get("reference_arxiv_id_records"),
+            "eligible_records": audit_stats.get("total_complete_reference_records"),
+            "coverage_rate_percent": audit_stats.get("reference_arxiv_id_coverage_rate"),
+            "definition": audit_stats.get("reference_arxiv_id_coverage_definition"),
+        },
+        "average_references_per_paper": {
+            "value": audit_stats.get("average_references_per_paper"),
+            "eligible_papers": audit_stats.get("complete_reference_papers"),
+            "raw_reference_records": audit_stats.get("total_complete_reference_records"),
+            "definition": audit_stats.get("average_references_per_paper_definition"),
         },
         "missing_stages": workflow.get("missing_stages", []),
         "session_gaps_seconds": workflow.get("session_gaps_seconds"),
@@ -1234,8 +2348,31 @@ def run_m1_audit_member(
     phase_root = _persist_selection(drive, selection)
 
     def audit_and_reconcile() -> dict:
+        from src.kaggle_candidates import validate_discrepancy_checkpoints
+
         source_issues = []
         source_states = {}
+        discrepancy_checkpoint_root = phase_root / "arxiv" / "kaggle_discrepancy_checkpoints"
+        discrepancy_evidence_root = phase_root / "arxiv" / "kaggle_discrepancies"
+        kaggle_evidence_issues = []
+        kaggle_evidence_summary = {"status": "valid", "verified_ids": 0}
+        try:
+            verified_discrepancies = validate_discrepancy_checkpoints(
+                discrepancy_checkpoint_root, discrepancy_evidence_root,
+            )
+            selected_ids = {arxiv_id for _member, arxiv_id in selection["pairs"]}
+            unrelated = [item.get("arxiv_id") for item in verified_discrepancies
+                         if item.get("arxiv_id") not in selected_ids]
+            if unrelated:
+                raise ValueError("discrepancy checkpoint contains IDs outside this selection")
+            kaggle_evidence_summary["verified_ids"] = len(verified_discrepancies)
+            kaggle_evidence_summary["checkpoints"] = verified_discrepancies
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            kaggle_evidence_summary = {"status": "invalid", "error_type": type(exc).__name__}
+            kaggle_evidence_issues.append({
+                "issue": "kaggle_discrepancy_evidence_invalid",
+                "error_type": type(exc).__name__,
+            })
         for cohort in selection["cohorts"]:
             state_path = phase_root / "arxiv" / f"cohort_{cohort:04d}.json"
             state = _source_state_manifest(state_path, selection, cohort)
@@ -1243,9 +2380,11 @@ def run_m1_audit_member(
                 key: state.get(key) for key in (
                     "status", "source_complete_papers", "expected_count",
                     "archive_sha256", "stop_reason", "updated_at",
+                    "kaggle_status", "kaggle_snapshot_sha256",
+                    "kaggle_index_sha256", "kaggle_policy_version",
                 )
             }
-            # Resume and validate any archive already present in this selection.
+            # Tiếp tục và xác minh mọi archive đã có trong phạm vi này.
             runner.restore_cohort(cohort)
             for member, arxiv_id in cohort_pairs(cohort):
                 if member != selection["mssv"]:
@@ -1270,7 +2409,7 @@ def run_m1_audit_member(
         if not source_issues and not s2_issues and len(s2_evidence) == selection["expected_count"]:
             preflight_issues = _preflight_merge(runner, selection, s2_evidence)
             merge_conflicts.extend(preflight_issues)
-        issues = source_issues + s2_issues + preflight_issues
+        issues = source_issues + s2_issues + preflight_issues + kaggle_evidence_issues
         merged_ids = []
         if not issues:
             if budget.should_stop():
@@ -1278,8 +2417,8 @@ def run_m1_audit_member(
             else:
                 try:
                     merged_ids = _merge_s2(runner, selection, s2_evidence)
-                    # Refresh durable archives after S2 reconciliation; preserve the
-                    # source-stage archive before publishing each replacement.
+                    # Làm mới archive bền vững sau khi đối soát S2; giữ lại
+                    # archive của pha mã nguồn trước khi công bố bản thay thế.
                     for cohort in selection["cohorts"]:
                         archive = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
                         if archive.exists():
@@ -1377,6 +2516,8 @@ def run_m1_audit_member(
             "expected_id_count": selection["expected_count"],
             "source_issues": source_issues,
             "source_checkpoints": source_states,
+            "kaggle_evidence": kaggle_evidence_summary,
+            "kaggle_evidence_issues": kaggle_evidence_issues,
             "s2_issues": s2_issues,
             "merge_conflicts": merge_conflicts,
             "merged_s2_ids": len(merged_ids),
