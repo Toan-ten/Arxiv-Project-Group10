@@ -108,8 +108,21 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertIn("run_m1_arxiv_member(", phases)
         self.assertIn("run_m1_s2_member(", phases)
         self.assertIn("audit_bbl_sources", phases)
-        self.assertIn("arXiv là nguồn xác nhận bài và phiên bản", self.text)
+        self.assertIn("arXiv là nguồn xác nhận bài và danh sách phiên bản", self.text)
         self.assertIn("COHORT_LIMIT = None", self.text)
+
+    def test_notebook_enables_bounded_s2_429_auto_resume(self):
+        s2_cell = next(cell for cell in self.code if "run_m1_s2_member(" in cell)
+        for fragment in (
+            "auto_resume_429=True",
+            "auto_resume_429_max_per_cohort=1",
+            "auto_resume_429_max_per_session=2",
+            "auto_resume_429_cooldown_min_seconds=300",
+            "auto_resume_429_cooldown_max_seconds=600",
+            "\"auto_resume_429\"",
+        ):
+            with self.subTest(fragment=fragment):
+                self.assertIn(fragment, s2_cell)
 
     def test_data_handling_rules_live_in_the_data_contract(self):
         contract = (self.root / "docs" / "contracts" / "source_data_contracts.md").read_text(encoding="utf-8")
@@ -123,7 +136,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
     def test_runtime_pins_match_implementation_commit(self):
         setup = self.code[0]
         expected = re.search(r'M1_RUNTIME_COMMIT = "([0-9a-f]{40})"', setup).group(1)
-        self.assertEqual(expected, "41c62a3e6b721640b2e395a4590ed2eaea1addbe")
+        self.assertEqual(expected, "3326330c38b8e69b99110493c1f25e9869632b9d")
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
