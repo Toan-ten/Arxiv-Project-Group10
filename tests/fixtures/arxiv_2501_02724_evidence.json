@@ -1,0 +1,25 @@
+{
+  "arxiv_id": "2501.02724",
+  "versioned_id": "2501.02724v2",
+  "title": "Confirmed answer to the Schiffer conjecture and the Berenstein conjecture",
+  "authors": [
+    "Guowei Dai"
+  ],
+  "primary_category": "math.AP",
+  "versions": [
+    {
+      "version": "v1",
+      "created": "2025-01-06T14:52:12Z"
+    },
+    {
+      "version": "v2",
+      "created": "2025-01-15T08:21:45Z"
+    }
+  ],
+  "comments": "The proof of constant breadth of domain is insufficient. After the modification, I will upload it again.",
+  "abstract": "This paper has been withdrawn by the author due to an insufficient proof of constant breadth of domain.",
+  "is_withdrawn": true,
+  "withdrawal_reason": "Withdrawn by the author: The proof of constant breadth of domain is insufficient. After the modification, I will upload it again.",
+  "official_url": "https://arxiv.org/abs/2501.02724v2",
+  "source_http_status": 404
+}

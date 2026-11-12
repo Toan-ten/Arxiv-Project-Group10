@@ -1,48 +1,76 @@
-# arXiv — Group 10
+# Thu thập dữ liệu arXiv — Nhóm 10
 
-Đồ án môn Introduction to Data Science, HCMUS — Milestone 1: Data Crawling.
-Hiện có module kiểm tra cấu hình và sinh arXiv ID offline. Crawler và phần
-tích hợp API arXiv/Semantic Scholar chưa được triển khai.
+[![Kiểm thử tự động](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml/badge.svg)](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml)
+[![Python 3.11 và 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
+[![Mở sổ tay Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/feat%2Fm1-pipeline-optimization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb)
 
-## Cấu trúc repository
+Kho mã này chứa quy trình thu thập và kiểm toán dữ liệu arXiv của Nhóm 10. Mỗi thành viên xử lý dải ID đã cấu hình; tổng phạm vi gồm 20.000 vị trí. Số vị trí được giao, số bài báo tồn tại và số phiên bản là các đại lượng riêng.
+
+## Bắt đầu
+
+Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
+
+1. Mở sổ tay bằng Colab và chọn CPU.
+2. Thêm `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi cấp quyền truy cập cho notebook.
+3. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
+4. Chạy ô arXiv để xác minh ID, phiên bản và tải mã nguồn; sau đó chạy ô S2.
+5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
+
+Chỉ trạng thái `handoff_status = verified` mới xác nhận lô đạt điều kiện bàn giao. Một phiên dừng, mã nguồn đã tải xong hoặc báo cáo đã đối chiếu không tự chứng minh M1 hoàn tất.
+
+## Phạm vi ID
+
+| MSSV | Thành viên | Dải ID | Số vị trí | Lô |
+|---|---|---|---:|---:|
+| `24120010` | Trần Văn Tấn Khôi | `2508.07872`–`2508.12871` | 5.000 | 1–50 |
+| `24120035` | Lê Thành Đạt | `2507.16659`–`2507.21658` | 5.000 | 51–100 |
+| `24120232` | Nguyễn Văn Toàn | `2502.08235`–`2502.13234` | 5.000 | 101–150 |
+| `24120260` | Trương Tuấn Anh | `2501.02642`–`2501.07641` | 5.000 | 151–200 |
+
+Cấu hình JSON là nguồn duy nhất để tạo các cặp thành viên–ID. `COHORT_LIMIT` chỉ thu hẹp số lô trong một lượt; mọi giai đoạn M1 vẫn chạy.
+
+## Dữ liệu và trạng thái
+
+- arXiv xác nhận bài báo và danh sách phiên bản. Quy trình tải mã nguồn riêng cho từng phiên bản, giữ các tệp `.tex`, `.bib`, `.bbl` và loại tệp nhị phân khỏi kho dữ liệu.
+- Pha arXiv yêu cầu `KAGGLE_API_TOKEN` và snapshot/index Kaggle hợp lệ trước khi discovery bắt đầu. Atom xác nhận ID và phiên bản theo lô tối đa 20 ID; mỗi phiên bản vẫn được tải riêng từ endpoint arXiv có mã phiên bản. Snapshot hoặc index không sẵn sàng sẽ dừng pha, không chuyển sang đường arXiv-only.
+- Semantic Scholar cung cấp siêu dữ liệu và tài liệu tham khảo theo trang trong pha riêng. Trạng thái S2 `not_found` không kết luận arXiv không tồn tại; lỗi API không được xem là danh sách tài liệu tham khảo rỗng.
+- Pha S2 yêu cầu `SEMANTIC_SCHOLAR_API_KEY`; M1 không gửi request S2 ẩn danh.
+- Điểm khôi phục, manifest và mã kiểm tra giúp tiếp tục sau khi phiên dừng. Lỗi toàn vẹn hoặc dữ liệu M1 còn thiếu sẽ chặn bàn giao.
+
+Kho dữ liệu dùng hợp đồng lưu trữ v2. Cấu trúc, xuất xứ và ý nghĩa các trường được mô tả trong [hợp đồng lưu trữ](docs/contracts/corpus_storage_contract.md) và [hợp đồng dữ liệu nguồn](docs/contracts/source_data_contracts.md).
+
+## Môi trường và kiểm tra
+
+CI chạy trên Python 3.11 và 3.12. Để thiết lập môi trường phát triển:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+Chạy kiểm thử và kiểm tra cú pháp:
+
+```bash
+pytest
+python -m compileall src scripts tests
+```
+
+Các kiểm thử thay kết nối mạng bằng dữ liệu giả lập. Không cần khóa API để chạy chúng.
+
+## Cấu trúc kho mã
 
 ```text
-config/group10_id_ranges.json  Khoảng ID theo MSSV
-src/__init__.py
-src/id_ranges.py               Đọc cấu hình, kiểm tra và sinh ID
-tests/test_id_ranges.py        Unit tests offline
-docs/id_ranges.md             Hướng dẫn module ID
-.gitignore
-LICENSE
-README.md
+config/      Dải ID và tập mẫu
+docs/        Hướng dẫn, hợp đồng dữ liệu và kiến trúc
+notebooks/   Sổ tay Colab M1
+scripts/     Công cụ báo cáo và tổng hợp dữ liệu nhóm
+src/         Quy trình, mô-đun gọi API, lưu trữ, kiểm toán và đo lường
+tests/       Kiểm thử ngoại tuyến
 ```
 
-## Chạy module ID
+Xem [hướng dẫn vận hành Colab](docs/guides/colab.md), [quy trình M1](docs/operations/m1_production.md) và [cấu trúc kho mã](docs/architecture/repository-structure.md).
 
-Dùng Python 3.10 trở lên; đã kiểm thử trên Python 3.14.1. Chỉ cần thư viện
-chuẩn Python, không cần cài package. Chạy từ thư mục gốc repository:
+## Đóng góp và giấy phép
 
-```powershell
-python -B -m src.id_ranges
-```
-
-Lệnh trên hiển thị cấu hình và hai mốc đã định dạng. Để sinh từng ID từ Python:
-
-```python
-from src.id_ranges import iter_assigned_ids
-
-ids = iter_assigned_ids()
-print(next(ids))  # ('24120010', '2508.07872')
-```
-
-Hàm dùng generator, bao gồm cả hai đầu khoảng và chỉ hỗ trợ khoảng cùng tháng.
-Cấu hình hiện tại có 5.000 vị trí mỗi thành viên, tổng **20.000 ID ứng viên**;
-không đồng nghĩa 20.000 publication hợp lệ. Xem [hướng dẫn chi tiết](docs/id_ranges.md).
-
-## Chạy unit tests
-
-```powershell
-python -B -m unittest discover -s tests -v
-```
-
-`-B` ngăn tạo cache `.pyc`. Bộ kiểm thử gồm 28 tests, chạy hoàn toàn offline.
+Quy trình phát triển nằm trong [`CONTRIBUTING.md`](CONTRIBUTING.md). Kho mã được phân phối theo [Giấy phép MIT](LICENSE).
