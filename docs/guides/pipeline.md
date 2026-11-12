@@ -1,6 +1,6 @@
 # Xử lý ID trong thư viện
 
-`src.pipeline` xử lý danh sách `(mssv, arxiv_id)` theo thứ tự ở tầng thư viện. `src.m1_phases` cung cấp API vận hành riêng `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()` với cùng lựa chọn/fingerprint và checkpoint độc lập. Notebook gọi từng API để có thể chạy lại một pha hoặc chạy S2 trước arXiv. `run_m1_member()` vẫn là wrapper tương thích, thực hiện arXiv → S2 → kiểm toán trong một lời gọi.
+Tài liệu này mô tả `src.pipeline`, API mức thấp dùng để xử lý các cặp `(mssv, arxiv_id)`. Notebook M1 không gọi trực tiếp API đó; notebook gọi ba pha vận hành trong `src.m1_phases`: `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`. Mỗi pha dùng chung phạm vi/fingerprint nhưng có checkpoint riêng. `run_m1_member()` là wrapper tương thích, gọi lần lượt arXiv → S2 → kiểm toán.
 
 ## Kiểm thử ngoại tuyến trên Windows PowerShell
 
@@ -29,7 +29,7 @@ Toàn bộ input, ownership, ID trùng và HTTP options được kiểm tra trư
 hoặc ghi checkpoint. ID trùng bị từ chối; list rỗng không tạo output.
 Storage dùng config mặc định của repository; chưa hỗ trợ config riêng cho pipeline.
 
-## Chọn phiên bản trong lời gọi thư viện mức thấp
+## Chọn phiên bản trong lời gọi thư viện cấp thấp
 
 `versions=None` (mặc định) giữ hành vi xử lý mọi version. Có thể truyền list/tuple
 không rỗng, gồm các tên duy nhất theo dạng `v1`, `v2`...; không nhận string đơn,
@@ -59,7 +59,7 @@ ngân sách pilot; cần duyệt riêng lần thử mạng tiếp theo. Các tes
 lần gọi fake HTTP opener, không gọi API thật. Ví dụ trên chưa phải bằng chứng
 ID tồn tại, có TeX hoặc pilot đã thành công.
 
-## Luồng xử lý và resume
+## Luồng xử lý và tiếp tục
 
 1. Khởi tạo/đọc đủ ba JSON và gọi `resume()` để phục hồi checkpoint.
 2. Dùng lại discovery `found`/`not_found`; không query lại chỉ vì paper còn partial.
@@ -83,7 +83,7 @@ retry bên trong HTTP client vẫn theo `max_attempts`, gồm lần thử đầu
 Dùng chung pacing/lock, backoff và Retry-After của client hiện tại; không reset limiter.
 Chỉ chạy một process/writer; chưa có khóa giữa nhiều process.
 
-## Summary và lỗi
+## Tóm tắt và lỗi
 
 Top-level có `run_id`, `papers`, `stopped`. Khi dừng do HTTP 403/429, summary
 còn có `stop_reason` với `type="http_policy"`, `stage`, `http_status`,
@@ -151,7 +151,7 @@ dummy benchmark hoặc fixtures làm kết quả corpus thật.
 Nguồn quy định: [hợp đồng lưu trữ](../contracts/corpus_storage_contract.md),
 [HTTP client](arxiv_client.md), [Source Downloader](arxiv_source.md).
 
-## Progress callback
+## Hàm gọi lại báo tiến độ
 
 `on_progress(event, summary_copy)` nhận `paper_started` trước xử lý và
 `paper_finished` sau mỗi paper, kể cả khi dừng 403/429. Snapshot là bản sao độc lập.
@@ -160,7 +160,7 @@ hoặc KeyboardInterrupt có thể không có callback kết thúc; bên gọi p
 cuối từ exception. [Batch Runner](batch.md) dùng callback để lưu tiến độ atomic.
 
 
-## Tự động bổ sung lịch sử version
+## Tự động bổ sung lịch sử phiên bản
 
 `revision_history=True` là mặc định khi gọi Pipeline trực tiếp. Sau khi xử lý
 source, Pipeline gọi `enrich_version_history()` một lần cho paper đã resolve,

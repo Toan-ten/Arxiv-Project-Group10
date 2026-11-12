@@ -49,6 +49,7 @@ Không thêm số kiểm thử cố định vào tài liệu; số lượng thay
 - Dùng PEP 8, bốn khoảng trắng, type hints cho API công khai và docstring nêu rõ hành vi.
 - Tên module và kiểm thử dùng `snake_case`; tên tệp kiểm thử bắt đầu bằng `test_`.
 - Viết tài liệu bằng tiếng Việt tự nhiên, câu ngắn và rõ chủ thể. Giữ nguyên tên API, biến, trường dữ liệu, giao thức và thông báo chính thức khi dịch làm sai nghĩa.
+- Tiêu đề, nội dung giải thích, ghi chú trong `src/` và `scripts/`, cùng văn bản notebook dùng tiếng Việt. Chỉ giữ tiếng Anh cho tên kỹ thuật cần chính xác như tên API, biến, schema, trạng thái máy đọc được và giao thức. Ghi chú chỉ được giữ khi giải thích quyết định hoặc ràng buộc không hiển nhiên; xóa ghi chú chỉ nhắc lại lệnh kế tiếp.
 - Tài liệu hướng dẫn phải khớp mã hiện hành. Nêu rõ phạm vi, điều kiện chạy, kết quả và cách tiếp tục sau khi dừng.
 
 ## Tích hợp liên tục

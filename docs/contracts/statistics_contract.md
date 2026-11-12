@@ -1,6 +1,6 @@
 # Hợp đồng chỉ số thống kê
 
-Phiên bản định nghĩa: `2.1.0`. Phạm vi dữ liệu và quy tắc lưu trữ được quy định trong [hợp đồng lưu trữ corpus](corpus_storage_contract.md).
+Phiên bản định nghĩa: `2.2.0`. Phạm vi dữ liệu và quy tắc lưu trữ được quy định trong [hợp đồng lưu trữ corpus](corpus_storage_contract.md).
 
 ## Nguyên tắc
 
@@ -78,6 +78,8 @@ Kiểm tra source áp dụng cho tệp đã khai báo và bằng chứng tương
 | `invalid_reference_papers` | Số paper có tệp references hỏng hoặc sai schema. |
 | `total_complete_reference_records` | Tổng số items của các paper có references hoàn tất. |
 | `total_observed_reference_records` | Tổng số items đọc được từ các tệp references. |
+| `reference_arxiv_id_records` | Số items thô trong danh sách references hoàn tất có `arxiv_id` không rỗng. Đây là số bản ghi đủ điều kiện xét đưa vào bảng; xuất bảng có thể gộp cạnh `(arxiv_id, ref_arxiv_id)` trùng. |
+| `reference_metadata_complete_records` | Số items trong danh sách references hoàn tất có title, authors, submission/publication date và Semantic Scholar paper ID đều không rỗng. `arxiv_id` không bắt buộc cho chỉ số metadata này. |
 
 ## Tỷ lệ
 
@@ -92,6 +94,10 @@ Tỷ lệ phần trăm bằng tử số chia mẫu số rồi nhân 100. Trung b
 | `version_extraction_success_rate` | `successful_tex_versions` | `total_discovered_versions` |
 | `no_tex_rate` | `no_tex_versions` | `total_discovered_versions` |
 | `average_references_per_paper` | `total_complete_reference_records` | `complete_reference_papers` |
+| `reference_metadata_success_rate` | `reference_metadata_complete_records` | `total_complete_reference_records` |
+| `reference_arxiv_id_coverage_rate` | `reference_arxiv_id_records` | `total_complete_reference_records` |
+
+`average_references_per_paper` tính trên tất cả item thô trong các danh sách hoàn tất, kể cả item không có arXiv ID; mẫu số chỉ gồm paper có danh sách references hoàn tất, không phải toàn bộ paper được giao. `reference_metadata_success_rate` mô tả mức đầy đủ metadata theo các trường ở trên, không đo tỷ lệ được xuất vào `references.csv`. `reference_arxiv_id_coverage_rate` đo phần item thô có arXiv ID; số dòng CSV thực tế có thể thấp hơn do xuất bảng loại item thiếu ID và gộp cạnh trùng.
 
 ## Quy tắc đối chiếu
 

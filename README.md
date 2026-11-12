@@ -2,19 +2,19 @@
 
 [![Kiểm thử tự động](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml/badge.svg)](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml)
 [![Python 3.11 và 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![Mở sổ tay Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/feat%2Fm1-t02-colab-resume/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb)
+[![Mở sổ tay Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/feat%2Fm1-pipeline-optimization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb)
 
 Kho mã này chứa quy trình thu thập và kiểm toán dữ liệu arXiv của Nhóm 10. Mỗi thành viên xử lý dải ID đã cấu hình; tổng phạm vi gồm 20.000 vị trí. Số vị trí được giao, số bài báo tồn tại và số phiên bản là các đại lượng riêng.
 
 ## Bắt đầu
 
-Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các cell arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có checkpoint riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
+Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
 
 1. Mở sổ tay bằng Colab và chọn CPU.
-2. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy cell cấu hình.
-3. Chạy cell arXiv để xác minh ID, phiên bản và tải source.
-4. Thêm `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, bật Notebook access rồi chạy cell S2.
-5. Sau khi hai pha đủ bằng chứng, chạy cell kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng cell đó với cùng MSSV và Drive.
+2. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
+3. Chạy ô arXiv để xác minh ID, phiên bản và tải mã nguồn.
+4. Thêm `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, bật quyền truy cập notebook rồi chạy ô S2.
+5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
 
 Chỉ trạng thái `handoff_status = verified` mới xác nhận lô đạt điều kiện bàn giao. Một phiên dừng, mã nguồn đã tải xong hoặc báo cáo đã đối chiếu không tự chứng minh M1 hoàn tất.
 
@@ -32,9 +32,9 @@ Cấu hình JSON là nguồn duy nhất để tạo các cặp thành viên–ID
 ## Dữ liệu và trạng thái
 
 - arXiv xác nhận bài báo và danh sách phiên bản. Quy trình tải mã nguồn riêng cho từng phiên bản, giữ các tệp `.tex`, `.bib`, `.bbl` và loại tệp nhị phân khỏi kho dữ liệu.
-- Discovery theo ID dùng arXiv trực tiếp; Kaggle không phải đầu vào bắt buộc của notebook M1.
-- Semantic Scholar cung cấp siêu dữ liệu và toàn bộ references theo trang trong pha riêng. Trạng thái S2 `not_found` không kết luận arXiv không tồn tại; lỗi API không được xem là danh sách references rỗng.
-- Điểm khôi phục, manifest và checksum giúp tiếp tục sau khi phiên dừng. Lỗi toàn vẹn hoặc dữ liệu M1 còn thiếu sẽ chặn bàn giao.
+- Pha arXiv xác nhận ID và phiên bản bằng Atom theo lô tối đa 20 ID. Bản chụp Kaggle là nguồn tùy chọn để lập chỉ mục ứng viên và đối chiếu lịch sử; khi thiếu hoặc lệch, quy trình dùng kết quả arXiv. Mỗi phiên bản vẫn được tải riêng từ endpoint arXiv có mã phiên bản.
+- Semantic Scholar cung cấp siêu dữ liệu và tài liệu tham khảo theo trang trong pha riêng. Trạng thái S2 `not_found` không kết luận arXiv không tồn tại; lỗi API không được xem là danh sách tài liệu tham khảo rỗng.
+- Điểm khôi phục, manifest và mã kiểm tra giúp tiếp tục sau khi phiên dừng. Lỗi toàn vẹn hoặc dữ liệu M1 còn thiếu sẽ chặn bàn giao.
 
 Kho dữ liệu dùng hợp đồng lưu trữ v2. Cấu trúc, xuất xứ và ý nghĩa các trường được mô tả trong [hợp đồng lưu trữ](docs/contracts/corpus_storage_contract.md) và [hợp đồng dữ liệu nguồn](docs/contracts/source_data_contracts.md).
 
@@ -72,4 +72,4 @@ Xem [hướng dẫn vận hành Colab](docs/guides/colab.md), [quy trình M1](do
 
 ## Đóng góp và giấy phép
 
-Quy trình phát triển nằm trong [`CONTRIBUTING.md`](CONTRIBUTING.md). Repository được phân phối theo [MIT License](LICENSE).
+Quy trình phát triển nằm trong [`CONTRIBUTING.md`](CONTRIBUTING.md). Kho mã được phân phối theo [Giấy phép MIT](LICENSE).

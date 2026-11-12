@@ -22,13 +22,12 @@ Client chấp nhận ID new-style và legacy như `hep-th/9901001`, kiểm tra t
 trong JSON request. ID gốc, thứ tự và phần tử lặp được giữ nguyên; client không
 suy ra ownership/MSSV. Caller có thể ghép kết quả theo vị trí với mapping đã có.
 
-Ví dụ sau **sẽ gọi API thật nếu chạy**, chưa được thực hiện trong lượt triển khai
-offline này. Chỉ chạy sau khi duyệt quyền truy cập và phạm vi pilot:
+Ví dụ sau gọi API thật nếu được chạy. Dùng phạm vi nhỏ và khóa API được cấp cho người vận hành:
 
 ```python
 from src.semantic_scholar import RateLimiter, fetch_metadata
 
-# Dùng lại cùng instance cho mọi tác vụ S2 trong process.
+# Dùng lại cùng bộ giới hạn cho mọi tác vụ S2 trong tiến trình.
 s2_limiter = RateLimiter(min_interval=1.0)
 results = fetch_metadata(
     ["2502.09992"], batch_size=100, timeout=30.0,
@@ -211,7 +210,7 @@ quota/key hoặc response production bằng pilot thật. Client không lưu cac
 checkpoint hay metadata; không đánh dấu publication complete.
 Tích hợp Pipeline/Storage và chính sách dừng toàn Pipeline thuộc bước sau.
 
-## Lấy tài liệu tham khảo và snapshot v2
+## Lấy tài liệu tham khảo và bản chụp v2
 
 `fetch_references()` lấy một snapshot mới trong bộ nhớ theo schema references
 của [hợp đồng lưu trữ v2](../contracts/corpus_storage_contract.md#referencesjson).
@@ -240,13 +239,13 @@ metadata nằm ở `data[].citedPaper`; `contexts/intents/isInfluential` thuộc
 Có thể truyền tuple/list tên fields hoặc chuỗi phân cách dấu phẩy. Field không
 hỗ trợ, lặp hoặc cấu hình sai bị từ chối trước request; không âm thầm bỏ field.
 
-Ví dụ sau sẽ gọi mạng nếu được chạy; chưa chạy live trong triển khai offline:
+Ví dụ sau gọi mạng nếu được chạy:
 
 ```python
 from src.semantic_scholar import RateLimiter, fetch_metadata, fetch_references
 
 s2_limiter = RateLimiter(min_interval=1.0)  # Điều chỉnh theo quyền truy cập.
-# Dùng cùng s2_limiter cho cả metadata và references.
+# Dùng cùng s2_limiter cho metadata và references.
 snapshot = fetch_references(
     "2502.09992", limiter=s2_limiter, max_attempts=1, max_pages=10,
 )
@@ -258,7 +257,7 @@ chặn chuyển hướng dùng chung HTTP helper. `max_attempts` áp dụng cho
 mỗi trang, gồm lần đầu; tối đa `max_pages * max_attempts` transport attempts.
 Không có request phụ để tìm paperId của publication đang truy vấn.
 
-### Pagination và coverage
+### Phân trang và độ phủ
 
 `limit` mặc định 100, hợp lệ từ 1 đến 1000. Mỗi response phải có đúng offset
 đã yêu cầu và array `data` không vượt limit. Chỉ dùng `next` từ response, không
@@ -356,7 +355,7 @@ python -B -m unittest discover -s tests -p "test_semantic_scholar_references.py"
 Các tests schema gọi validator references hiện có ở chế độ chỉ đọc, không gọi
 Storage writer hoặc tạo corpus. Chưa kiểm chứng endpoint bằng live S2 pilot.
 
-## Tiếp tục bằng cách đọc lại và đối chiếu snapshot
+## Tiếp tục bằng cách đọc lại và đối chiếu bản chụp
 
 `fetch_references(..., resume_from=partial_snapshot)` không ghi vào Storage.
 Đây là cơ chế phục hồi dữ liệu trong bộ nhớ có kiểm tra lại, **không phải**
@@ -396,7 +395,7 @@ Khi giữ dữ liệu cũ, provenance cũ được giữ nguyên. Thời điểm
 snapshot không gắn với một HTTP attempt cụ thể có http_status/attempts/offset
 null, không suy số attempts từ số trang.
 
-Ví dụ sử dụng sau sẽ gọi API nếu được chạy; chưa chạy live:
+Ví dụ sử dụng sau gọi API nếu được chạy:
 
 ```python
 continued = fetch_references(
@@ -420,7 +419,7 @@ HTTP 413/oversize vẫn được báo hữu hạn và không tự chia chunk ho�
 Kiểm thử safety bổ sung nằm trong hai file tests S2 hiện có, dùng fake HTTP/clock.
 Hai ca metadata cũ về ID thiếu được điều chỉnh theo mặc định strict; mục đích
 kiểm tra metadata thiếu và explicit positional mode vẫn có regression riêng.
-Chưa thực hiện live smoke, chưa cấp phép chạy 20.000 ID.
+Client mức thấp không thay thế pilot hoặc benchmark Colab; xem quy trình M1 để biết phạm vi kiểm chứng.
 
 ## Thử lại có giới hạn và giãn cách yêu cầu
 
@@ -458,7 +457,10 @@ Ví dụ cấu hình kiểm thử:
 min_interval=2, max_attempts=3, max_retry_wait=60, backoff_base=5, backoff_cap=30.
 Retry-After dài hơn ngân sách sẽ dừng, không bị cap xuống để né giới hạn.
 
-Chưa lưu cooldown qua restart. Không tự retry sau policy stop bằng một process
-mới. Nếu cần bổ sung sau này, có thể dùng một sidecar provider/not_before_utc trong
-log root, ghi atomic và kiểm tra thời hạn/clock; không lưu key, không coi nó là
-khóa phối hợp nhiều máy. Hiện vẫn phải xem quota/cooldown trước một lần chạy mới.
+Client mức thấp không tự tiếp tục sau khi policy retry dừng và limiter không lưu
+cooldown qua restart. Riêng workflow M1 S2 có thể bật auto-resume giới hạn trong
+cùng process sau 429 ở metadata/references: chỉ khi checkpoint hợp lệ, tôn trọng
+Retry-After còn hiệu lực, chờ cooldown 5–10 phút và có đủ ngân sách để thử tiếp.
+Notebook bật một lần mỗi cohort, tối đa hai lần mỗi phiên; 403, checkpoint lỗi,
+hết ngân sách và lỗi khác vẫn dừng. Nếu process bị ngắt trong lúc chờ, lần chạy
+mới vẫn cần được khởi động lại thủ công từ cell S2 bằng cùng phạm vi/root.

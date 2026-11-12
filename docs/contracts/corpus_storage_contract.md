@@ -15,7 +15,7 @@ Mỗi bản ghi thuộc về một arXiv ID gốc và một thành viên đượ
   v2/
 ```
 
-Mỗi phiên bản đã phát hiện phải có bản ghi trạng thái, kể cả khi không có thư mục chứa tệp. Chỉ lưu tệp nguồn `.tex`, `.bib` và `.bbl` trong thư mục phiên bản. Giữ nguyên nội dung byte và đường dẫn tương đối; không sửa lệnh LaTeX hoặc lưu tệp hình ảnh trong corpus.
+Mỗi phiên bản đã phát hiện phải có bản ghi trạng thái, kể cả khi không có thư mục chứa tệp. Thư mục phiên bản lưu `.tex`, `.bib` gốc và chỉ giữ `.bbl` theo ngoại lệ ở mục Chính sách BBL. Giữ nguyên nội dung byte và đường dẫn tương đối; không sửa lệnh LaTeX hoặc lưu tệp hình ảnh trong corpus.
 
 ## `metadata.json`
 
@@ -70,3 +70,15 @@ Bài báo chỉ được coi là hoàn tất M1 khi discovery, danh sách phiên
 - Lưu lỗi cùng giai đoạn, định danh liên quan và trạng thái để có thể tiếp tục xử lý; không lưu thông tin xác thực trong dữ liệu hoặc log.
 - Không thay dữ liệu hợp lệ bằng phản hồi lỗi. Tệp tạm, thư mục rỗng hoặc đích đã tồn tại không chứng minh một phiên bản đã hoàn tất.
 - Khi khôi phục, kiểm tra định danh, trạng thái, tệp và checksum trước khi bỏ qua phần đã xử lý. Giữ dữ liệu không khớp để kiểm tra, không tự xóa hoặc ghi đè.
+
+## Chính sách BBL
+
+Chính sách bbl-exception-v1 được xét riêng cho từng version:
+
+- Nếu cùng version có `.bib`, hoặc `.tex` có lệnh `\bibitem` đang hoạt động ngoài comment TeX, loại `.bbl` khỏi corpus. Giữ bytes `.bbl` cùng checksum trong artifact bên ngoài corpus và ghi lý do.
+- Nếu thiếu cả `.bib` lẫn lệnh `\bibitem`, thử bộ chuyển đổi cục bộ. Chuyển đổi thành công thì loại `.bbl` khỏi corpus, giữ `.bbl` gốc và `.bib` dẫn xuất bên ngoài corpus. Nếu thất bại, giữ nguyên `.bbl` trong corpus kèm mã lý do.
+- Nếu TeX không đọc được để phân loại, không sửa/xóa `.bbl` và không đánh dấu version tuân thủ chính sách.
+
+Trường `versions.<version>.bbl_policy` lưu phiên bản chính sách, quyết định cho từng file, đường dẫn tương đối đến index bên ngoài corpus và SHA-256 của index. Index lưu đường dẫn tương đối, checksum `.bbl` gốc, checksum `.bib` dẫn xuất và số entry. Artifact được ghi bền vững, không thay file đã tồn tại có nội dung khác; archive cohort có gói artifact và checksum sidecar riêng.
+
+Checkpoint cũ không có trường `bbl_policy` vẫn đọc được. Nếu checkpoint đó còn `.bbl`, audit báo `legacy_unverified`; chỉ lượt đã xử lý hoặc đối chiếu mới được đánh dấu tuân thủ. Resume và restore xác minh cả checksum corpus lẫn index/artifact ngoài corpus.

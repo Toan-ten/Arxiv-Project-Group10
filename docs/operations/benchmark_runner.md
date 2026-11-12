@@ -13,7 +13,7 @@ run_benchmark(
     max_attempts=1, user_agent=arxiv_client.USER_AGENT, sample_interval=0.1,
     disk_interval=30.0, disk_roots=None, s2_config=None, revision_history=None,
 )
-aggregate_batch(corpus_root, *, batch_id, log_root)
+aggregate_batch(corpus_root, *, batch_id, log_root, bbl_artifact_root=None)
 ```
 
 Import không chạy crawler. `run_benchmark()` gọi Batch thật nên có thể gọi mạng;
@@ -27,6 +27,7 @@ from src.benchmark_runner import aggregate_batch
 
 audit = aggregate_batch(
     "data/pilot/corpus", batch_id="pilot-3-v1", log_root="logs/batches",
+    bbl_artifact_root="data/pilot/reports/derived_bibliography/bbl-exception-v1",
 )
 print(audit["status"], audit["issues"], audit["data_coverage"])
 ```
@@ -56,7 +57,7 @@ truyền lại exception gốc; không tự retry. Free-form message/traceback c
 gốc không được chuyển vào report: foundation chỉ nhận tín hiệu lỗi đã lược bỏ
 chi tiết. Headers, biến môi trường và remote URLs không được chép vào provenance.
 
-## Tổng hợp attempts và kiểm chứng
+## Tổng hợp các lượt chạy và kiểm chứng
 
 Batch definition xác định cohort và cấu hình cố định. Adapter dùng bộ đọc/validator
 log của Batch, kiểm tra thêm cấu trúc kết quả và thời gian. Thiếu log, JSON lỗi,
@@ -66,7 +67,14 @@ Khi log không đủ tin cậy, coverage/history để null thay vì tạo kết
 Mỗi paper được đọc bằng các API Storage. Adapter đối chiếu metadata, references
 và manifest qua `_sync()` trên bản sao trong RAM, không gọi `resume()` hoặc commit.
 Version terminal được kiểm bằng `should_skip_version()`, gồm file list, SHA-256,
-bytes và trạng thái TeX. Pending/error có thư mục source tồn tại bị báo cần audit.
+bytes, trạng thái TeX và chỉ mục/bằng chứng `.bbl` ngoài corpus. Truyền
+`bbl_artifact_root` trỏ tới `reports/derived_bibliography/bbl-exception-v1` khi
+đọc corpus có chính sách `.bbl`. Nếu thiếu root cho checkpoint cần artifact,
+paper được ghi `checkpoint_status=unverified`, tăng
+`unverified_checkpoints`, và tạo issue `bbl_artifact_root_unconfigured`; nó không
+bị tính nhầm là hỏng hoặc được tính là đã xác minh. Khi root được cấu hình nhưng
+artifact thiếu/sai checksum, checkpoint vẫn là `invalid`. Pending/error có thư
+mục source tồn tại bị báo cần audit.
 Paper chưa tới lượt và chưa có thư mục được ghi là not_created, khác checkpoint
 bị thiếu sau khi đã có bằng chứng ghi dữ liệu. Checkpoint lỗi được giữ nguyên. Đây là tích hợp với helper nội bộ hiện tại;
 khi đổi schema/helper phải chạy lại regression tests.
@@ -89,6 +97,19 @@ source success. `all_version_sources_terminal` kiểm tra mọi version đã bi�
 `publication_complete.all_complete` chỉ true khi mọi paper đủ điều kiện contract
 và không có lỗi bằng chứng. References chưa complete có `reference_items=null`;
 chỉ tập đã được xác nhận đầy đủ mới có thể là 0.
+
+`run_benchmark()` chuyển cùng `bbl_artifact_dir` mà Batch dùng sang lần
+`aggregate_batch()` tự động. Khi gọi aggregation riêng, truyền
+`bbl_artifact_root` rõ ràng. `scripts/generate_m1_report.py` nhận cùng đường dẫn
+qua `--bbl-artifact-root`; nếu corpus có checkpoint chính sách `.bbl` mà thiếu
+root hoặc artifact không hợp lệ, script dừng trước khi xuất báo cáo.
+
+```bash
+python3 scripts/generate_m1_report.py \
+  --corpus data/corpus \
+  --bbl-artifact-root data/reports/derived_bibliography/bbl-exception-v1 \
+  --output reports/m1_summary.md
+```
 
 ## Lược đồ báo cáo và xuất xứ dữ liệu
 
@@ -129,17 +150,20 @@ benchmark của quy trình M1 là Colab CPU-only.
 | --- | --- |
 | Wall time end-to-end | `metrics_v2.wall_seconds`: perf_counter trước/sau toàn callback Batch; gồm setup Batch, checkpoint, pacing, retry và log cuối của Batch |
 | Trung bình mỗi paper | `timing_metrics.average_paper_seconds`: tổng interval paper đã ghi qua các attempts / số ID duy nhất trong cohort |
+| M1 trung bình mỗi ID được giao | `assigned_paper_timings.average_seconds`: source và S2 cho toàn bộ ID được giao, gồm ID xác nhận `not_found`; để null nếu thiếu interval ở bất kỳ ID nào |
 | Entry Discovery | `timing_metrics.discovery_wall_seconds`: tổng thời gian quanh `query_arxiv()`, gồm chờ limiter, retry và parsing; không gồm cache hoặc ghi Storage |
-| RAM peak | `ram.sampled_peak_bytes`: RSS lớn nhất trong các mẫu hợp lệ |
-| RAM average | `ram.average_bytes = sum_sample_bytes / sample_count`; trung bình số học các quan sát, không phải trung bình theo thời gian |
+| RAM crawler | `ram.sampled_peak_bytes` và `ram.average_bytes`: RSS lấy mẫu của tiến trình crawler cùng descendant psutil quan sát được |
+| RAM toàn hệ thống | `system_ram.sampled_peak_bytes` và `system_ram.average_bytes`: RAM `used` toàn host theo psutil, gồm cả tiến trình không thuộc crawler |
 | Disk peak | `disk.sampled_peak_bytes`: tổng logical bytes các thư mục đo tại mỗi lần quét, lấy giá trị lớn nhất |
 | Final corpus size | `disk.final_corpus_bytes`: dung lượng file của riêng corpus tại lần quét cuối |
 
 Wall time không gồm khởi động Python, setup/final probes của sampler, serialize
 benchmark report và audit sau crawl. RAM endpoint probes nằm sát hai đầu callback;
-probe RAM cuối không chờ disk scan dài. Thời gian paper nằm giữa hai callback
-hiện có, không gồm toàn bộ overhead cấp Batch. Mẫu số là **ID ứng viên được chọn**,
-gồm cả not_found/failed và công việc lặp do resume, không phải số paper thành công.
+probe RAM cuối không chờ disk scan dài. Cả trung bình RSS crawler và RAM toàn host
+là trung bình số học theo mẫu hợp lệ, không time-weighted. Thời gian paper nằm giữa
+hai callback hiện có, không gồm toàn bộ overhead cấp Batch. Với M1 ba pha, summary
+phân biệt average trên paper tìm thấy (`paper_timings`) và average trên toàn bộ ID
+được giao (`assigned_paper_timings`); benchmark cuối dùng mẫu số toàn bộ ID được giao.
 Nếu còn ID chưa xử lý hoặc mất interval do gián đoạn, average để null; subtotal
 đã biết và số interval thiếu vẫn được ghi.
 
@@ -149,7 +173,7 @@ Cached có 0 giây gọi API và không tăng số queried. Không thêm observe
 sự kiện mới vào `on_progress`; Batch tiếp tục nhận đúng paper_started/paper_finished.
 Log cũ thiếu timing không được suy ra thời gian Discovery từ thời gian paper.
 
-### Lấy mẫu resource
+### Lấy mẫu tài nguyên
 
 `sample_interval` mặc định 0.1 giây cho RAM, tối thiểu hiệu dụng 0.01 giây.
 `disk_interval` mặc định 30 giây, tối thiểu hiệu dụng 1 giây; disk dùng thread
@@ -168,11 +192,15 @@ cộng RSS; có thể tính trùng shared pages giữa process. Child đã thoá
 Backend/version/scope được ghi rõ. Khi thiếu psutil trên Linux, fallback
 `/proc/self/statm` chỉ đo process hiện tại; không được gọi đó là RAM toàn hệ thống
 nếu có subprocess. Windows thiếu psutil ghi backend_missing/not_collected.
+RAM toàn host chỉ có khi psutil đọc được `virtual_memory().used`; nếu backend này
+thiếu, `system_ram` là `not_collected` và benchmark đầy đủ bị đánh incomplete.
 Không dùng ru_maxrss lịch sử để tính average RSS.
 
 Peak RAM/disk là **sampled peak**, có thể bỏ sót spike hoặc file tạm sống ngắn.
-Disk đo logical bytes của regular files, không phải allocated blocks hay toàn
-bộ dung lượng filesystem. Scan thiếu/lỗi không được thay bằng 0.
+RAM toàn host chịu ảnh hưởng bởi tiến trình nền của Colab; RSS crawler dùng để
+phân biệt footprint của chương trình. Disk đo logical bytes của regular files,
+không phải allocated blocks hay toàn bộ dung lượng filesystem. Scan thiếu/lỗi
+không được thay bằng 0.
 
 ### Kho dữ liệu, vùng tạm và Colab
 
@@ -191,7 +219,7 @@ Linux có fallback nêu trên. Chưa chạy Colab và chưa xác minh CPU-only r
 Benchmark cuối vẫn cần chạy trên Colab, chọn phạm vi disk đầy đủ và ghi môi trường
 thật. Không có notebook Colab hoặc crawler thật được chạy trong lượt triển khai.
 
-### Lưu và tổng hợp nhiều attempts
+### Lưu và tổng hợp nhiều lượt chạy
 
 Ngoài các file experiment, lượt đo mới ghi:
 `<log_root>/<batch_id>/measurements/<attempt_id>.json`.
@@ -249,7 +277,7 @@ Wall time/resource sampling bao gồm S2; Discovery timing vẫn chỉ thuộc a
 History nhận diện stage s2_metadata/s2_references, nhưng không suy HTTP counts
 từ attempts hoặc số items. References chưa complete vẫn có count unknown.
 
-## HTTP metrics bổ sung, tương thích báo cáo cũ
+## Số liệu HTTP bổ sung, tương thích báo cáo cũ
 
 Aggregation đọc http_metrics của từng attempt đã được kiểm tra ID/sequence.
 history.http_requests/http_errors là tổng các attempt khác nhau, chỉ có giá trị

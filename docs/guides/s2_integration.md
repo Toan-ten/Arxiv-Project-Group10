@@ -1,114 +1,42 @@
-# Tích hợp Semantic Scholar
+# Tích hợp Semantic Scholar trong M1
 
-Tài liệu này mô tả lớp thư viện nối Semantic Scholar với hợp đồng lưu trữ v2. Notebook M1 có cell S2 độc lập; nó truy vấn danh sách ID được giao mà không cần arXiv source đã chạy. Bằng chứng S2 được giữ ở staging riêng và chỉ được nhập vào corpus v2 sau kiểm toán đối soát. Thiếu siêu dữ liệu hoặc references cần thiết thì paper chưa đạt M1. Xem [hợp đồng dữ liệu](../contracts/source_data_contracts.md).
+## Luồng vận hành
 
-## Vai trò của S2 trong M1
+Notebook gọi `run_m1_s2_member()` từ `src.m1_workflow`; phần triển khai nằm trong `src.m1_phases`. Pha S2 nhận danh sách ID xác định theo MSSV, độc lập với tiến độ tải mã nguồn arXiv. Mỗi lô có điểm khôi phục S2 riêng. Kiểm toán chỉ hợp nhất bằng chứng S2 vào corpus sau khi xác minh dấu vân tay phạm vi, định danh và tính toàn vẹn.
 
-Các API mức thấp `run_selected()`, `run_batch()` và `run_benchmark()` nhận
-`s2_config=None` để hỗ trợ kiểm thử không gọi S2. Notebook M1 luôn truyền cấu
-hình S2. Ví dụ sau minh họa cấu hình thư viện, không phải điểm vào vận hành:
+Trạng thái S2 `not_found` chỉ mô tả kết quả tra cứu của Semantic Scholar. Trạng thái này không kết luận ID arXiv không tồn tại và không thay đổi kết quả arXiv.
 
-```python
-s2_config = {
-    "timeout": 15,
-    "max_attempts": 1,
-    "min_interval": 2.0,  # ví dụ cấu hình; không bảo đảm phù hợp mọi quota
-    "reference_limit": 100,
-    "max_pages": 10,
-    "max_response_bytes": 10_000_000,
-}
-# summary = run_selected(pairs, corpus_root, versions=("v1",), s2_config=s2_config)
-```
+## Truy vấn và cấu hình M1
 
-Timeout/attempts S2 độc lập với arXiv. Mặc định S2 là timeout 30 giây, attempts 1,
-interval 1 giây, limit 100, max_pages 1000, response cap 10.000.000 bytes.
-Cấu hình chỉ nhận các khóa trên; API key đọc từ SEMANTIC_SCHOLAR_API_KEY,
-không được đưa vào config/log/report. Gọi Pipeline ngoài fake HTTP sẽ dùng mạng thật.
+S2 dùng Semantic Scholar Graph API: metadata qua `POST /graph/v1/paper/batch` và references qua endpoint phân trang `/paper/{paper_id}/references`. Xem [tài liệu API chính thức](https://api.semanticscholar.org/api-docs) để biết trường dữ liệu và giới hạn dịch vụ.
 
-Một limiter S2 được tạo ngoài vòng lặp papers và dùng chung cho metadata/references.
-arXiv giữ limiter riêng hiện có. Chỉ một process/writer; limiter và cooldown không
-bền vững qua restart và không phối hợp các máy/runtime độc lập.
+| Tham số | Giá trị mặc định trong M1 | Phạm vi |
+|---|---:|---|
+| `timeout` | 30 giây | Mỗi request |
+| `max_attempts` | 8 | Gồm request đầu tiên |
+| `min_interval` | 1 giây | Giữa các request trong cùng tiến trình |
+| `metadata_batch_size` | 50 ID | Mỗi request metadata; references vẫn truy vấn riêng từng bài |
+| `reference_limit` | 100 | Mỗi trang references |
+| `max_pages` | 1.000 | Mỗi bài báo |
+| `max_retry_wait` | 600 giây | Ngân sách chờ thử lại |
+| `backoff_base` / `backoff_cap` | 3 / 60 giây | Thời gian chờ thử lại |
 
-## Luồng xử lý và metadata
+Pha M1 gom tối đa 50 ID chưa có metadata hợp lệ vào một request. Trước khi ghi bằng chứng, response phải có đúng số phần tử, đúng thứ tự và ID arXiv khớp từng vị trí. Sau đó điểm khôi phục được lưu riêng theo ID. Nếu response của cả lô không hợp lệ hoặc quá lớn, pha chia nhỏ lô để cô lập lỗi; sai số phần tử hoặc sai thứ tự sẽ chặn việc ghi bằng chứng. ID lỗi vẫn chưa hoàn tất và được thử lại khi tiếp tục. References được phân trang riêng theo từng bài. Cấu hình thực tế và số request metadata được ghi trong quan sát phiên.
 
-Sau phần arXiv của mỗi publication, Pipeline gọi metadata rồi references trước
-paper_finished. Mỗi publication dùng một metadata batch một ID; không gọi theo
-version. Không chạy S2 sau discovery not_found, policy stop, checkpoint sai hoặc
-source bị blocked cần audit. Discovery unresolved không bị suy thành v1.
+Notebook đọc khóa từ Colab Secret `SEMANTIC_SCHOLAR_API_KEY` và gửi qua header `x-api-key`. Không ghi khóa vào mã nguồn notebook, điểm khôi phục hoặc báo cáo. Nếu không có khóa, request không xác thực có thể chịu hạn mức khác.
 
-Integration kiểm tra ownership cùng cả hai cache trước khi Storage.resume có thể
-ghi phục hồi. Identity metadata luôn dùng policy strict externalIds.ArXiv.
-Cache hỏng bị blocked, không gọi API để thay thế checkpoint lỗi.
+## Kiểm tra metadata và references
 
-Metadata giữ MSSV, ID, versions, ngày và provenance arXiv. Title/authors tốt của
-arXiv được giữ khi S2 thiếu hoặc mâu thuẫn; chỉ điền fields còn thiếu. Authors
-chỉ được điền khi có đủ tên; venue dùng giá trị S2 thực có. Full envelope lưu trong
-provenance.semantic_scholar cùng provider, query_identifier và retrieved_at.
-Không dùng year/publicationDate làm ngày nộp/revision.
+Chỉ gắn metadata với ID yêu cầu khi `externalIds.ArXiv` khớp ID đó. Phần tử `null` trong response hợp lệ được ghi là `not_found`. Timeout, lỗi HTTP, response sai cấu trúc hoặc thiếu bằng chứng định danh vẫn là lỗi hay trạng thái chưa xác định.
 
-S2 found được cache riêng qua provenance, kể cả metadata M1 còn partial do thiếu
-ngày revision. Stage complete chỉ khi đủ điều kiện Storage v2; source và S2 xong
-không bảo đảm publication complete. S2 not_found không thay discovery found.
+References được lấy đến khi máy chủ xác nhận không còn trang. Corpus giữ nguyên thứ tự và dữ liệu `raw` của mọi mục quan sát được, kể cả mục thiếu `citedPaper` hoặc arXiv ID. Bảng xuất chỉ nhận mục đáp ứng lược đồ. Trường title, authors, ngày hoặc S2 paperId còn thiếu được ghi trong `missing_fields`; không tự tạo dữ liệu.
 
-## Tài liệu tham khảo và checkpoint
+`publicationDate` của S2 là ngày xuất bản theo nguồn đó. Theo Q&A môn học, có thể dùng trường này cho cột `ref_submission_date`. Báo cáo phải nêu xuất xứ của giá trị; ngày này không chứng minh ngày nộp arXiv.
 
-Snapshot đi qua Storage.save_references; giữ items, raw, thứ tự và duplicates,
-kể cả citedPaper null hoặc không có arXiv ID. Query phải khớp publication.
-Parent s2_paper_id vẫn null để tương thích resume hiện tại.
+## Tiếp tục và dừng
 
-Complete hợp lệ được skip, không cập nhật lại timestamp. Partial/failed/interrupted
-có continuation hợp lệ dùng resume_from: client đọc lại từ offset 0 và đối chiếu
-prefix, không nối hai lượt hoặc tiết kiệm request bằng offset. Prefix khác, raw
-không khớp normalization hoặc continuation hỏng bị blocked. Không reset checkpoint.
+Điểm khôi phục lưu metadata, bản chụp references, vị trí tiếp tục, lịch sử lỗi và checksum. Nếu references còn một phần, client đọc lại phần đầu đã lưu trước khi tiếp tục để tránh ghép các trang khác nhau. Điểm khôi phục không hợp lệ hoặc sai checksum được giữ nguyên để kiểm tra.
 
-Metadata và references mới có intent in_progress qua API Storage; resume phục hồi
-thành interrupted. Khi references đã có snapshot partial hoặc not_found, giữ nguyên snapshot đó
-trong lúc request chạy; chỉ lưu kết quả tương thích sau khi client trả về.
-Không đổi bản partial tốt thành intent và không ghi đè bằng tập items ngắn hơn.
-Mỗi JSON atomic riêng; Storage đồng bộ lại manifest sau một commit JSON bị ngắt.
+Khi các lượt thử nội bộ đã hết và gặp HTTP 429 ở metadata hoặc references, notebook có thể tự tiếp tục tối đa một lần mỗi lô và hai lần mỗi phiên. Cơ chế chờ ngẫu nhiên 5–10 phút, tôn trọng `Retry-After` nếu lâu hơn, và chỉ chạy khi điểm khôi phục đã được xác minh, giới hạn lượt chưa hết và còn đủ ngân sách. HTTP 403, lỗi điểm khôi phục hoặc hết ngân sách vẫn làm pha dừng. Nếu môi trường bị ngắt trong lúc chờ, người vận hành cần chạy lại ô S2 bằng cùng MSSV, phạm vi, dấu vân tay và thư mục gốc. Không chạy đồng thời hai tiến trình ghi cho cùng thành viên.
 
-Chưa có checkpoint từng trang. Hard kill giữa pagination giữ bản đã lưu, nhưng
-không giữ các trang mới của lời gọi chưa trả về. max_pages là số trang của lượt
-đọc lại từ đầu; cap thấp cố định có thể làm resume không tiến thêm. Snapshot không
-có continuation an toàn cần audit. coverage.complete chỉ xác nhận pagination S2,
-không xác nhận mọi reference trong LaTeX đã được S2 nhận diện.
-
-## Dừng, logs và metrics
-
-HTTP 403/429 cuối cùng ở metadata hoặc error.http_status của references làm
-stopped=true, stop_reason ghi stage và HTTP status. Pipeline thử ghi kết quả trước
-khi dừng; nếu validation/save thất bại vẫn dừng, checkpoint_saved=false, không gửi
-request tiếp theo. Lỗi I/O khác vẫn dùng PipelineStopped hiện có.
-
-429 trung gian được retry theo cấu hình của caller. Sổ tay Colab M1 đặt
-max_attempts=8, max_retry_wait=600 giây cho mỗi request, backoff_base=3 giây,
-backoff_cap=60 giây; Retry-After dài hơn ngân sách không bị cắt ngắn để gửi sớm.
-Nếu hết ngân sách mà vẫn nhận 429, pipeline ghi attempts/ngân sách chờ vào
-stop_reason, lưu checkpoint và dừng lô. Không khởi chạy lại request vô hạn.
-Smoke cần attempts=1 ở cả arXiv và S2.
-
-Summary thêm s2_metadata/s2_references với action, status, http_status, attempts,
-error. Action queried/resumed không có nghĩa dữ liệu complete. Metadata attempts
-là attempts của request batch; references attempts khi lỗi chỉ thuộc trang lỗi,
-null khi thành công, không phải tổng HTTP counts.
-
-Giữ đúng hai callback paper_started/paper_finished. Batch lưu summary S2 vào attempt;
-run definition lưu config S2 không có secrets. Batch cũ không có S2 vẫn đọc được;
-đổi enabled/config cần batch_id mới, không tự nâng một batch arXiv-only khi resume.
-
-Benchmark truyền cấu hình, phân loại stage/error S2 và kiểm tra evidence S2 cho
-batch bật S2. Wall time, paper time và resource sampling bao gồm S2 trong invocation;
-Discovery timing vẫn chỉ đo arXiv. Chưa thêm timing riêng cho S2 hoặc HTTP counts.
-Aggregation giữ lịch sử lỗi, dùng Storage/checksum để tính coverage cuối một lần;
-references chưa complete vẫn là unknown, không phải zero.
-
-## Kiểm thử ngoại tuyến
-
-```powershell
-.\venv\Scripts\python.exe -B -W always::ResourceWarning -m unittest discover -s tests -p test_s2_integration.py -v
-.\venv\Scripts\python.exe -B -W always::ResourceWarning -m unittest discover -s tests -v
-```
-
-Kiểm tra trực tiếp cần được giới hạn rõ về ID, phiên bản, số trang, số lần thử,
-giãn cách yêu cầu và thư mục đầu ra. Kiểm thử ngoại tuyến không chạy bộ mẫu hoặc
-toàn bộ 20.000 ID.
+Kiểm toán bị chặn nếu bằng chứng phân trang, định danh hoặc xuất xứ chưa đầy đủ. Xem [mô tả client cấp thấp](semantic_scholar.md), [hợp đồng dữ liệu](../contracts/source_data_contracts.md) và [hướng dẫn Colab](../M1_COLAB_MEMBER_GUIDE.md).

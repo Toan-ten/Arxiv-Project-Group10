@@ -128,7 +128,7 @@ fake HTTP/clock; mô phỏng exception, interruption và lỗi replace. Trạng 
 running sau kill được mô phỏng bằng fixture; chưa kiểm chứng mất điện hoặc mọi
 filesystem, không tự chạy integration có mạng.
 
-## HTTP metrics và cấu hình S2 retry
+## Số liệu HTTP và cấu hình thử lại S2
 
 Mỗi run_batch() tạo một HttpMetrics collector riêng cho attempt mới. Client ghi
 số lần thực sự gọi HTTP opener, không suy từ source_downloaded/cached/skipped.
