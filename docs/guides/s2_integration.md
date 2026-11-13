@@ -2,7 +2,9 @@
 
 ## Luồng vận hành
 
-Notebook gọi `run_m1_s2_member()` từ `src.m1_workflow`; phần triển khai nằm trong `src.m1_phases`. Pha S2 nhận danh sách ID xác định theo MSSV, độc lập với tiến độ tải mã nguồn arXiv. Mỗi lô có điểm khôi phục S2 riêng. Kiểm toán chỉ hợp nhất bằng chứng S2 vào corpus sau khi xác minh dấu vân tay phạm vi, định danh và tính toàn vẹn.
+Notebook gọi `run_m1_s2_member()` từ `src.m1_workflow`. Module này xuất lại API của `src.m1_phases`, là lớp giữ tương thích với bên gọi. Trong mã hiện hành, `src.m1_phase_modules.s2_phase` điều phối pha S2; `src.m1_phase_modules.s2_evidence` quản lý manifest và evidence. `src.s2_integration` tiếp tục xác minh và chuyển đổi dữ liệu S2 theo hợp đồng lưu trữ. Xem [kiến trúc M1](../architecture/repository-structure.md).
+
+Pha S2 nhận danh sách ID xác định theo MSSV, độc lập với tiến độ tải mã nguồn arXiv. Mỗi lô có điểm khôi phục S2 riêng. Kiểm toán chỉ hợp nhất bằng chứng S2 vào corpus sau khi xác minh dấu vân tay phạm vi, định danh và tính toàn vẹn. Runtime notebook được quyết định bởi SHA đã ghim, theo [hướng dẫn Colab](colab.md).
 
 Trạng thái S2 `not_found` chỉ mô tả kết quả tra cứu của Semantic Scholar. Trạng thái này không kết luận ID arXiv không tồn tại và không thay đổi kết quả arXiv.
 

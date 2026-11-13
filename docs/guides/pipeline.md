@@ -1,20 +1,17 @@
 # Xử lý ID trong thư viện
 
-Tài liệu này mô tả `src.pipeline`, API mức thấp dùng để xử lý các cặp `(mssv, arxiv_id)`. Notebook M1 không gọi trực tiếp API đó; notebook gọi ba pha vận hành trong `src.m1_phases`: `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`. Mỗi pha dùng chung phạm vi/fingerprint nhưng có checkpoint riêng. `run_m1_member()` là wrapper tương thích, gọi lần lượt arXiv → S2 → kiểm toán.
+Tài liệu này mô tả `src.pipeline`, API cấp thấp dùng để xử lý các cặp `(mssv, arxiv_id)`. Notebook M1 gọi ba pha qua `src.m1_workflow`: `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`. Các API này được xuất lại từ lớp tương thích `src.m1_phases`; phần triển khai hiện hành nằm trong `src.m1_phase_modules`. Mỗi pha dùng chung phạm vi/fingerprint nhưng có checkpoint riêng. `run_m1_member()` gọi tuần tự arXiv → S2 → kiểm toán và dừng chuỗi khi pha trước báo dừng. Xem [kiến trúc và trách nhiệm các module](../architecture/repository-structure.md).
 
 ## Kiểm thử ngoại tuyến trên Windows PowerShell
 
-Từ thư mục gốc repository, chạy:
+Từ thư mục gốc repo, sau khi tạo môi trường `.venv` theo [hướng dẫn đóng góp](../../CONTRIBUTING.md), chạy:
 
 ```powershell
-.\venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_pipeline.py" -v
-.\venv\Scripts\python.exe -B -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pytest tests/test_pipeline.py
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-Kiểm thử thay HTTP opener, clock/sleep và jitter bằng dữ liệu giả lập. Parser, downloader,
-extraction, Storage, JSON và checksum vẫn chạy thật trên fixtures trong TEMP.
-Các tests gián đoạn dùng exception giả lập; không chứng minh khả năng chịu mất điện
-hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus thật để chạy tests.
+Kiểm thử pipeline thay HTTP opener, đồng hồ, hàm chờ và độ lệch ngẫu nhiên bằng dữ liệu giả lập. Parser, bộ tải/giải nén, storage, JSON và checksum vẫn chạy trên dữ liệu mẫu trong thư mục tạm. Toàn bộ suite còn có kiểm thử ngắt tiến trình và máy chủ loopback do kiểm thử tự khởi tạo; các tình huống đó không chứng minh khả năng chịu mất điện hoặc tính đúng trên mọi hệ thống tệp. Không cần khóa API, truy cập dịch vụ bên ngoài hoặc dùng corpus production để chạy kiểm thử. Dùng `pytest` để thu thập cả kiểm thử `unittest` lẫn các trường hợp tham số hóa.
 
 ## Điểm vào vận hành
 
@@ -81,7 +78,7 @@ lưu kết quả qua Storage; không tải version hoặc paper tiếp theo.
 Mỗi version được gọi downloader tối đa một lần trong một lần chạy pipeline;
 retry bên trong HTTP client vẫn theo `max_attempts`, gồm lần thử đầu.
 Dùng chung pacing/lock, backoff và Retry-After của client hiện tại; không reset limiter.
-Chỉ chạy một process/writer; chưa có khóa giữa nhiều process.
+API cấp thấp này không cung cấp khóa ghi liên tiến trình; bên gọi phải bảo đảm chỉ có một tiến trình ghi. Khóa theo MSSV thuộc lớp pha M1, không phải bảo đảm chung của mọi lời gọi `run_selected()`.
 
 ## Tóm tắt và lỗi
 
