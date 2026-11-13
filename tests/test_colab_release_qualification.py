@@ -17,6 +17,8 @@ import time
 import tarfile
 import unittest
 
+from m1_source_contract import phase_implementation_source
+
 from src.fast_production import FastProductionRunner, member_cohort_range
 from src.id_ranges import load_config
 from src.storage import CorpusStorage, arxiv_id_to_folder_key
@@ -94,7 +96,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                          "verify_cohort_handoff", "compute_m1_statistics", "export_official_datasets",
                          "SessionBudget", "selection_fingerprint"):
             with self.subTest(fragment=fragment):
-                self.assertIn(fragment, workflow + (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8"))
+                self.assertIn(fragment, workflow + phase_implementation_source(self.root))
         self.assertEqual(sum("run_m1_arxiv_member(" in cell for cell in self.code), 1)
         self.assertEqual(sum("run_m1_s2_member(" in cell for cell in self.code), 1)
         self.assertEqual(sum("run_m1_audit_member(" in cell for cell in self.code), 1)
@@ -102,7 +104,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("runner.enrich_cohort_s2", self.text)
         self.assertNotIn("prepare_snapshot", self.text)
         self.assertNotIn("export_official_datasets", self.text)
-        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        phases = phase_implementation_source(self.root)
         self.assertIn("s2_config=None", phases)
         self.assertIn("def run_m1_member", phases)
         self.assertIn("run_m1_arxiv_member(", phases)
@@ -146,7 +148,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
 
     def test_s2_and_audit_are_mandatory_and_fail_closed(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
-        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        phases = phase_implementation_source(self.root)
         self.assertIn("_preflight_merge", phases)
         self.assertIn("if data_complete:", phases)
         self.assertIn('"handoff_status": "verified" if audit_result.get("is_reconciled") else "blocked"', phases)
@@ -154,7 +156,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
 
     def test_colab_s2_429_retry_is_bounded_and_benchmark_visible(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
-        phases = (self.root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        phases = phase_implementation_source(self.root)
         self.assertIn('"max_attempts": 8', phases)
         self.assertIn('"max_retry_wait": 600.0', phases)
         self.assertIn('"backoff_base": 3.0', phases)
