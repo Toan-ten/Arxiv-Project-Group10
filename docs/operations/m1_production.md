@@ -10,11 +10,45 @@ Notebook gọi ba API pha từ `src.m1_workflow`:
 
 `run_m1_member` là wrapper tương thích, chạy lần lượt cả ba pha. Notebook gọi riêng từng pha để có thể chạy lại và tiếp tục từng pha độc lập.
 
+`src.m1_workflow` xuất lại các API từ `src.m1_phases`. Module `m1_phases` giữ các điểm vào tương thích; các phần triển khai được phân chia trong `src.m1_phase_modules` theo [kiến trúc M1](../architecture/repository-structure.md). Bên gọi vận hành tiếp tục dùng các đường import công khai, không gọi trực tiếp hàm trong package nội bộ.
+
+Mô tả này áp dụng cho mã hiện hành trong repo. Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`; mã trên nhánh khác hoặc notebook đối chiếu snapshot không tự thay đổi runtime đó. Xem [cấu hình runtime và phạm vi notebook đối chiếu](../guides/colab.md).
+
+## Diễn giải kết quả các pha
+
+| Lời gọi | Kết quả cần kiểm tra | Phạm vi kết luận |
+|---|---|---|
+| `run_m1_arxiv_member` | `source_complete_papers`, `cohorts`, `stopped`, `stop_reason` | Tiến độ source arXiv; `m1_complete` vẫn là `False` |
+| `run_m1_s2_member` | `metadata_complete`, `references_complete`, `cohorts`, `stopped`, `stop_reason` | Tiến độ evidence S2; `m1_complete` vẫn là `False` |
+| `run_m1_audit_member` | `is_reconciled`, `export_status`, `export_error` và báo cáo kiểm toán | Điều kiện đối soát và kết quả xuất của phạm vi ID đã chọn |
+| `run_m1_member` | Kết quả ba pha và `handoff_status` khi chuỗi chạy tới kiểm toán | Trạng thái tương thích; `verified` phụ thuộc `is_reconciled` của pha kiểm toán |
+
+`stopped = False` chỉ cho biết pha không báo dừng, không thay thế việc kiểm tra độ bao phủ và toàn vẹn. Điều kiện hoàn tất dữ liệu và điều kiện đủ bằng chứng benchmark được đánh giá riêng. Một lô thử hoặc một bản chụp đã đối chiếu không chứng minh toàn bộ 5.000 hay 20.000 vị trí ID đã hoàn tất.
+
 ## Phạm vi, điểm khôi phục và ghi dữ liệu
 
 `build_member_selection` tạo phạm vi xác định theo MSSV và `config/group10_id_ranges.json`. Mỗi thành viên có tối đa 50 lô; mỗi lô gồm 100 vị trí ID. Dấu vân tay được lưu trong điểm khôi phục để phát hiện phạm vi khác nhau giữa các pha.
 
 Điểm khôi phục arXiv và S2 nằm trong thư mục riêng theo lô. Điểm khôi phục S2 lưu metadata, references thô, trạng thái phân trang, vị trí tiếp tục, lỗi và checksum. Khóa ghi theo thành viên ngăn hai môi trường cùng sửa một phạm vi. Điểm khôi phục không tương thích hoặc sai checksum được giữ để điều tra; chương trình không tự xóa để khởi tạo lại.
+
+Các đường dẫn chính được tính từ `drive_root` của thành viên:
+
+```text
+reports/
+├── phase_checkpoints/<fingerprint>/
+│   ├── selection.json
+│   ├── starting_state.json
+│   ├── session_index.json
+│   ├── arxiv/cohort_NNNN.json
+│   └── s2/cohort_NNNN/
+│       ├── checkpoint.json
+│       └── papers/<folder_key>/
+│           ├── metadata.json
+│           └── references.json
+└── phase_locks/<mssv>.lock
+```
+
+`NNNN` là số lô có bốn chữ số; `folder_key` do hàm chuyển đổi ID của storage xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái bắt đầu và dấu vân tay phục vụ phép đo; `session_index.json` liệt kê các phiên của cùng phạm vi. Hai file evidence của mỗi bài chỉ xuất hiện sau khi có kết quả tương ứng; trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
 
 Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Kiểm toán chỉ hợp nhất S2 khi dấu vân tay, định danh, xuất xứ, checksum và phân trang hợp lệ. Dữ liệu thiếu hoặc xung đột sẽ chặn xuất, không bị thay thế âm thầm.
 

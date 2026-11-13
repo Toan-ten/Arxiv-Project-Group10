@@ -10,13 +10,15 @@ Kho mã này chứa quy trình thu thập và kiểm toán dữ liệu arXiv c�
 
 Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
 
+Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Mã trên nhánh đang đọc có thể khác mã tại SHA đã ghim; mở notebook từ một nhánh khác không tự chuyển phiên Colab sang mã của nhánh đó. Xem [quy tắc ghim và phát hành runtime](docs/guides/colab.md).
+
 1. Mở sổ tay bằng Colab và chọn CPU.
 2. Thêm `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi cấp quyền truy cập cho notebook.
 3. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
 4. Chạy ô arXiv để xác minh ID, phiên bản và tải mã nguồn; sau đó chạy ô S2.
 5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
 
-Chỉ trạng thái `handoff_status = verified` mới xác nhận lô đạt điều kiện bàn giao. Một phiên dừng, mã nguồn đã tải xong hoặc báo cáo đã đối chiếu không tự chứng minh M1 hoàn tất.
+Khi gọi riêng pha kiểm toán như trong notebook, kiểm tra `is_reconciled = True` và `export_status = "exported"` cho phạm vi ID đã chọn. Hàm tương thích `run_m1_member()` trả thêm `handoff_status = "verified"` khi kết quả kiểm toán đạt điều kiện đối soát. Việc tải xong mã nguồn hoặc kết thúc một phiên không tự chứng minh M1 hoàn tất; phạm vi và kết quả kiểm toán phải được xác minh cùng nhau.
 
 ## Phạm vi ID
 
@@ -41,7 +43,7 @@ Kho dữ liệu dùng hợp đồng lưu trữ v2. Cấu trúc, xuất xứ và 
 
 ## Môi trường và kiểm tra
 
-CI chạy trên Python 3.11 và 3.12. Để thiết lập môi trường phát triển:
+CI chạy trên Python 3.11 và 3.12. Các lệnh dưới đây giả định `python3` trỏ tới một trong hai phiên bản này:
 
 ```bash
 python3 -m venv .venv
@@ -56,7 +58,7 @@ pytest
 python -m compileall src scripts tests
 ```
 
-Các kiểm thử thay kết nối mạng bằng dữ liệu giả lập. Không cần khóa API để chạy chúng.
+Các kiểm thử không gọi dịch vụ bên ngoài và không cần khóa API. Phản hồi HTTP được giả lập; một số kiểm thử gián đoạn dùng máy chủ loopback do chính kiểm thử khởi tạo. Có thể dùng cấu hình chặn kết nối ngoài và cô lập thư mục tạm trong [hướng dẫn đóng góp](CONTRIBUTING.md).
 
 ## Cấu trúc kho mã
 
@@ -65,11 +67,13 @@ config/      Dải ID và tập mẫu
 docs/        Hướng dẫn, hợp đồng dữ liệu và kiến trúc
 notebooks/   Sổ tay Colab M1
 scripts/     Công cụ báo cáo và tổng hợp dữ liệu nhóm
-src/         Quy trình, mô-đun gọi API, lưu trữ, kiểm toán và đo lường
+src/         API công khai, các pha M1 và mô-đun xử lý nền
 tests/       Kiểm thử ngoại tuyến
 ```
 
-Xem [hướng dẫn vận hành Colab](docs/guides/colab.md), [quy trình M1](docs/operations/m1_production.md) và [cấu trúc kho mã](docs/architecture/repository-structure.md).
+Notebook nhập các API từ `src.m1_workflow`. Module này xuất lại các điểm vào của `src.m1_phases`; phần triển khai hiện hành được tổ chức theo trách nhiệm trong `src/m1_phase_modules/`. Các đường import công khai và chữ ký hàm được giữ tương thích.
+
+Xem [hướng dẫn vận hành Colab](docs/guides/colab.md), [quy trình M1](docs/operations/m1_production.md) và [kiến trúc các pha M1](docs/architecture/repository-structure.md).
 
 ## Đóng góp và giấy phép
 
