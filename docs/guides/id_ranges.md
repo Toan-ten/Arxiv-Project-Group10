@@ -38,7 +38,7 @@ Hàm sinh từng cặp, không tạo toàn bộ danh sách trước. Các khoả
 
 Một mục cấu hình gồm `mssv`, `start_month`, `start_id`, `end_month` và `end_id`. Tháng dùng dạng `YYYY-MM`; hai đầu dải phải thuộc cùng tháng. ID được định dạng thành `YYMM.NNNNN`, còn khóa thư mục có dạng `YYMM-NNNNN`.
 
-`arxiv_id_to_folder_key()` chỉ nhận ID mới thuộc dải cấu hình, không nhận ID lịch sử hoặc hậu tố phiên bản. Không dùng hàm này để xác thực mọi ID trong references; references có thể chứa định dạng ID khác. ID đúng định dạng cũng không chứng minh paper tồn tại trên arXiv.
+`arxiv_id_to_folder_key()` nhận ID arXiv năm chữ số từ tháng 01/2015 đến tháng 12/2099, kể cả ID không nằm trong bốn dải phân công. Hàm không nhận ID có dấu gạch chéo hoặc hậu tố `vN`. Hàm chỉ chuyển định dạng khóa thư mục; quyền sở hữu ID phải được kiểm tra riêng theo cấu hình. ID đúng định dạng cũng không chứng minh bài báo tồn tại trên arXiv.
 
 | MSSV | Bắt đầu | Kết thúc | Số vị trí |
 |---|---|---|---:|

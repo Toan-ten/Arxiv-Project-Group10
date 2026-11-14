@@ -1,20 +1,17 @@
 # Xử lý ID trong thư viện
 
-Tài liệu này mô tả `src.pipeline`, API mức thấp dùng để xử lý các cặp `(mssv, arxiv_id)`. Notebook M1 không gọi trực tiếp API đó; notebook gọi ba pha vận hành trong `src.m1_phases`: `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`. Mỗi pha dùng chung phạm vi/fingerprint nhưng có checkpoint riêng. `run_m1_member()` là wrapper tương thích, gọi lần lượt arXiv → S2 → kiểm toán.
+Tài liệu này mô tả `src.pipeline`, API thư viện dùng để xử lý các cặp `(mssv, arxiv_id)`. Quy trình M1 của thành viên có một điểm vào vận hành là notebook. Notebook gọi ba pha qua `src.m1_workflow`; phần triển khai nằm trong `src.m1_phase_modules`. Mỗi pha dùng cùng phạm vi ID và có checkpoint riêng. `run_m1_member()` gọi tuần tự arXiv → S2 `batch_m1` → kiểm toán trên cùng phạm vi. Xem [kiến trúc và trách nhiệm các module](../architecture/repository-structure.md).
 
 ## Kiểm thử ngoại tuyến trên Windows PowerShell
 
-Từ thư mục gốc repository, chạy:
+Từ thư mục gốc repo, sau khi tạo môi trường `.venv` theo [hướng dẫn đóng góp](../../CONTRIBUTING.md), chạy:
 
 ```powershell
-.\venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_pipeline.py" -v
-.\venv\Scripts\python.exe -B -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -m pytest tests/test_pipeline.py
+.\.venv\Scripts\python.exe -m pytest
 ```
 
-Kiểm thử thay HTTP opener, clock/sleep và jitter bằng dữ liệu giả lập. Parser, downloader,
-extraction, Storage, JSON và checksum vẫn chạy thật trên fixtures trong TEMP.
-Các tests gián đoạn dùng exception giả lập; không chứng minh khả năng chịu mất điện
-hoặc chạy trên mọi filesystem. Không cần gọi API hoặc tạo corpus thật để chạy tests.
+Kiểm thử pipeline thay HTTP opener, đồng hồ, hàm chờ và độ lệch ngẫu nhiên bằng dữ liệu giả lập. Parser, bộ tải/giải nén, storage, JSON và checksum vẫn chạy trên dữ liệu mẫu trong thư mục tạm. Toàn bộ suite còn có kiểm thử ngắt tiến trình và máy chủ loopback do kiểm thử tự khởi tạo; các tình huống đó không chứng minh khả năng chịu mất điện hoặc tính đúng trên mọi hệ thống tệp. Không cần khóa API, truy cập dịch vụ bên ngoài hoặc dùng corpus production để chạy kiểm thử. Dùng `pytest` để thu thập cả kiểm thử `unittest` lẫn các trường hợp tham số hóa.
 
 ## Điểm vào vận hành
 
@@ -29,28 +26,28 @@ Toàn bộ input, ownership, ID trùng và HTTP options được kiểm tra trư
 hoặc ghi checkpoint. ID trùng bị từ chối; list rỗng không tạo output.
 Storage dùng config mặc định của repository; chưa hỗ trợ config riêng cho pipeline.
 
-## Chọn phiên bản trong lời gọi thư viện cấp thấp
+## Chọn lần nộp trong lời gọi thư viện
 
-`versions=None` (mặc định) giữ hành vi xử lý mọi version. Có thể truyền list/tuple
+`versions=None` (mặc định) giữ hành vi xử lý mọi lần nộp. Có thể truyền list/tuple
 không rỗng, gồm các tên duy nhất theo dạng `v1`, `v2`...; không nhận string đơn,
 tên có số 0 ở đầu, đường dẫn hoặc tên trùng. Input sai gây `ValueError` trước
 HTTP hoặc ghi checkpoint.
 
-Pipeline lọc theo tên version chính xác trước `begin_version()`, không lấy phần
-tử đầu của retry. Metadata/manifest vẫn giữ toàn bộ versions discovery xác nhận.
-Các version chưa được chọn vẫn pending nếu chưa xử lý; trạng thái có sẵn được
+Pipeline lọc theo tên lần nộp chính xác trước `begin_version()`, không lấy phần
+tử đầu của retry. Metadata và manifest vẫn giữ toàn bộ các lần nộp đã được xác nhận.
+Các lần nộp chưa được chọn vẫn pending nếu chưa xử lý; trạng thái có sẵn được
 giữ theo cơ chế recovery/validation của Storage. Resume vẫn kiểm tra toàn bộ
-checkpoint và source, kể cả version ngoài lựa chọn.
+checkpoint và source, kể cả lần nộp ngoài lựa chọn.
 
 Discovery unresolved không được suy thành v1. Nếu một tên được chọn chưa có trong
 danh sách resolved, summary báo `blocked[version]="not_discovered"` và không tải
-source nào của paper đó trong lượt này. Không thêm version hoặc trạng thái mới
+source nào của paper đó trong lượt này. Không thêm lần nộp hoặc trạng thái mới
 vào manifest để đáp ứng lựa chọn không được xác nhận.
 
 Với đúng một paper, `versions=("v1",)`, `max_attempts=1`, lần chạy mới có tối đa
 **1 discovery + 1 source = 2 HTTP requests**, tính cả attempts/retry. HTTP client
 không tự theo redirect và pipeline không có vòng retry ngoài. Đây là giới hạn
-của cấu hình cụ thể này; thêm paper/version hoặc tăng attempts sẽ thay đổi giới hạn.
+của cấu hình cụ thể này; thêm bài, lần nộp hoặc tăng số lượt thử sẽ thay đổi giới hạn.
 Không cộng attempts của record cached/skipped thành request mới.
 
 Chạy lại cùng corpus root, run ID và lựa chọn v1 hợp lệ dùng discovery cached,
@@ -64,24 +61,24 @@ ID tồn tại, có TeX hoặc pilot đã thành công.
 1. Khởi tạo/đọc đủ ba JSON và gọi `resume()` để phục hồi checkpoint.
 2. Dùng lại discovery `found`/`not_found`; không query lại chỉ vì paper còn partial.
    Discovery lỗi có thể được query lại một lần gọi hàm ở phiên sau.
-3. `found` nhưng version chưa resolved được báo blocked/needs_verification.
+3. `found` nhưng chưa xác định được các lần nộp thì báo `blocked/needs_verification`.
    V1 chưa có bước xác minh bổ sung hoặc refresh tự động; không suy thành v1.
-4. Với versions resolved, dùng kế hoạch skip/retry/blocked của Storage.
+4. Với các lần nộp đã xác nhận, dùng kế hoạch bỏ qua, thử lại hoặc chặn của Storage.
    Gọi `begin_version()` trước download, dùng đúng destination trả về;
-   không mkdir version. `None` nghĩa version đã hoàn tất hợp lệ.
+   không tự tạo thư mục đích. `None` nghĩa lần nộp đã hoàn tất hợp lệ.
 5. Chuyển nguyên result downloader cho `record_source_result()`.
    Storage kiểm tra file list, bytes và SHA-256 trước khi commit success.
    no-TeX được giữ riêng, gồm trường hợp chỉ có BibTeX hoặc không có thư mục.
 6. Source hợp lệ được skip. File thiếu/checksum sai, orphan hoặc checkpoint hỏng
    được giữ để audit. Không xóa, tải đè hoặc tự công nhận `output_exists`.
 
-Một version lỗi thông thường không ngăn các version/paper khác tiến triển nếu còn
+Một lần nộp lỗi thông thường không ngăn các lần nộp hoặc bài khác tiến triển nếu còn
 an toàn. Kết quả HTTP 403/429 do client trả về sẽ dừng toàn bộ batch sau khi thử
-lưu kết quả qua Storage; không tải version hoặc paper tiếp theo.
-Mỗi version được gọi downloader tối đa một lần trong một lần chạy pipeline;
+lưu kết quả qua Storage; không tải lần nộp hoặc paper tiếp theo.
+Mỗi lần nộp được gọi downloader tối đa một lần trong một lần chạy pipeline;
 retry bên trong HTTP client vẫn theo `max_attempts`, gồm lần thử đầu.
 Dùng chung pacing/lock, backoff và Retry-After của client hiện tại; không reset limiter.
-Chỉ chạy một process/writer; chưa có khóa giữa nhiều process.
+API cấp thấp này không cung cấp khóa ghi liên tiến trình; bên gọi phải bảo đảm chỉ có một tiến trình ghi. Khóa theo MSSV thuộc lớp pha M1, không phải bảo đảm chung của mọi lời gọi `run_selected()`.
 
 ## Tóm tắt và lỗi
 
@@ -99,8 +96,8 @@ Mỗi paper có:
 - `skipped`, `pending`, `blocked`, `errors`.
 
 `action` mô tả thao tác trong lần chạy: downloaded/skipped/failed/blocked/pending/in_progress.
-`status` giữ trạng thái contract của discovery/version. Không ghi skipped hoặc
-blocked thành trạng thái mới trong manifest. `pending` chỉ liệt kê version có
+`status` giữ trạng thái hợp đồng của discovery và lần nộp. Không ghi skipped hoặc
+blocked thành trạng thái mới trong manifest. `pending` chỉ liệt kê lần nộp có
 checkpoint pending; timeout không bị đổi thành chưa chạy.
 HTTP fields/attempts của record cached/skipped thuộc lần thu thập đã lưu,
 không phải request mới trong phiên hiện tại.
@@ -108,15 +105,15 @@ không phải request mới trong phiên hiện tại.
 Dừng theo chính sách HTTP trả summary bình thường với `stopped=True`, không ném
 `PipelineStopped`. Bình thường `checkpoint_saved=True`: kết quả và lỗi
 discovery/source được lưu trước khi dừng:
-403 giữ `http_error`, 429 giữ `rate_limited`; các version chưa tải vẫn pending.
+403 giữ `http_error`, 429 giữ `rate_limited`; các lần nộp chưa tải vẫn pending.
 `not_found` hoặc HTTP 404 không tự dừng toàn batch, vẫn theo hành vi lỗi paper
 hiện tại. Với source 404, pipeline truy vấn trang abstract chính thức của đúng
-version bằng bộ giới hạn tốc độ và retry dùng chung của arXiv. Chỉ banner rút
+lần nộp bằng bộ giới hạn tốc độ và retry dùng chung của arXiv. Chỉ banner rút
 bài rõ ràng trên trang đúng ID mới chuyển trạng thái sang `withdrawn_version`;
-comment chung, 404 ở trang hoặc trang không khớp version vẫn giữ trạng thái cần
+comment chung, 404 ở trang hoặc trang không khớp lần nộp vẫn giữ trạng thái cần
 xử lý. Source 404 không được đổi thành `not_found` hoặc `no_tex_source`.
 
-StorageError/IntegrityError được ghi vào summary và chặn paper/version liên quan.
+StorageError/IntegrityError được ghi vào báo cáo và chặn bài hoặc lần nộp liên quan.
 Lỗi I/O khi ghi JSON, downloader trả storage_error hoặc exception bất thường
 dừng run bằng `PipelineStopped`; đọc `exception.summary` để xem phần đã xử lý.
 KeyboardInterrupt được truyền ra, giữ checkpoint đã commit để lần sau resume.
@@ -165,14 +162,14 @@ cuối từ exception. [Batch Runner](batch.md) dùng callback để lưu tiến
 `revision_history=True` là mặc định khi gọi Pipeline trực tiếp. Sau khi xử lý
 source, Pipeline gọi `enrich_version_history()` một lần cho paper đã resolve,
 trước Semantic Scholar. Chọn `versions=("v1",)` chỉ giới hạn source; history
-vẫn xác minh ngày của toàn bộ versions được Discovery phát hiện. Để giữ ngân
+vẫn xác minh ngày của toàn bộ các lần nộp được Discovery phát hiện. Để giữ ngân
 sách pilot v1 cũ, truyền `revision_history=False`; Live Smoke cố định đã tắt
 bước này, không thêm CLI flag hoặc thay đổi marker của smoke cũ.
 
 V1 có ngày submission và bằng chứng Discovery hợp lệ không cần request thêm.
 History đầy đủ được kiểm chứng lại từ cache; không gọi lại API. Paper nhiều
-versions chưa có history cần tối đa N request phiên bản nếu `max_attempts=1`,
-ngoài Discovery và source. Mỗi response phải khớp đúng ID version và ngày có
+các lần nộp chưa có lịch sử cần tối đa N request nếu `max_attempts=1`,
+ngoài Discovery và source. Mỗi response phải khớp đúng ID lần nộp và ngày có
 múi giờ. Không suy ngày các revision từ `updated` của latest. HTTP client,
 lock, pacing >= 3 giây, retry hữu hạn và HTTP metrics hiện có được dùng chung.
 
@@ -192,4 +189,4 @@ là false cho lỗi history; diagnostic vẫn được callback ghi vào attempt
 
 History thành công không tự hoàn thành publication. Metadata còn partial nếu
 thiếu title/authors/ngày hoặc chưa có S2 verified; publication còn partial nếu
-thiếu source versions hoặc references theo contract.
+thiếu mã nguồn của một lần nộp hoặc references theo hợp đồng.
