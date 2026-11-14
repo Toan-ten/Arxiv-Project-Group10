@@ -45,10 +45,10 @@ trước khi đọc/tổng hợp phải dừng writer. Không có khóa chống 
 | `execution_status` | `returned` hoặc `raised`: invocation có trả về bình thường không |
 | `batch_status` | `finished/stopped/interrupted/failed` từ attempt mới; null nếu chưa có trạng thái cuối đáng tin |
 | `data_coverage` | Độ phủ hiện tại của cohort, chỉ tính source terminal sau kiểm tra Storage/checksum |
-| `publication_complete` | Số paper đáp ứng đủ contract v2, gồm metadata, references và mọi version |
+| `publication_complete` | Số paper đáp ứng đủ contract v2, gồm metadata, references và mọi lần nộp |
 
 `durable_batch_status` giữ nguyên snapshot log, kể cả `running` khi mất log cuối.
-`stop_reason` lưu stage, HTTP status và paper/version khi dừng 403/429.
+`stop_reason` lưu giai đoạn, mã HTTP, bài và lần nộp khi dừng 403/429.
 
 `resource_metrics.status="success"` của foundation **chỉ nói callback kết thúc
 không exception**, không phải corpus success. Batch finished vẫn có thể chứa
@@ -66,7 +66,7 @@ Khi log không đủ tin cậy, coverage/history để null thay vì tạo kết
 
 Mỗi paper được đọc bằng các API Storage. Adapter đối chiếu metadata, references
 và manifest qua `_sync()` trên bản sao trong RAM, không gọi `resume()` hoặc commit.
-Version terminal được kiểm bằng `should_skip_version()`, gồm file list, SHA-256,
+Lần nộp có trạng thái kết thúc được kiểm bằng `should_skip_version()`, gồm danh sách tệp, SHA-256,
 bytes, trạng thái TeX và chỉ mục/bằng chứng `.bbl` ngoài corpus. Truyền
 `bbl_artifact_root` trỏ tới `reports/derived_bibliography/bbl-exception-v1` khi
 đọc corpus có chính sách `.bbl`. Nếu thiếu root cho checkpoint cần artifact,
@@ -79,21 +79,21 @@ Paper chưa tới lượt và chưa có thư mục được ghi là not_created,
 bị thiếu sau khi đã có bằng chứng ghi dữ liệu. Checkpoint lỗi được giữ nguyên. Đây là tích hợp với helper nội bộ hiện tại;
 khi đổi schema/helper phải chạy lại regression tests.
 
-Đếm final coverage theo (MSSV, base ID, version), không cộng snapshots:
+Đếm độ bao phủ cuối theo (MSSV, ID gốc, lần nộp), không cộng các bản chụp:
 attempt cũ timeout vẫn còn trong `error_history`; attempt sau success làm final
-version thành success đúng một lần. `operations` đếm action trong snapshot paper
+lần nộp thành success đúng một lần. `operations` đếm action trong snapshot paper
 đã xử lý xong: downloaded, skipped và cached tách riêng. Đây không phải số HTTP
 requests và không khôi phục được action chưa ghi log khi process bị kill.
 
 Chỉ cohort trong batch definition được tính. `verified_source_bytes/files`
-là tổng source hợp lệ hiện tại của cohort, gồm các version đã lưu từ trước nếu có,
-mỗi version một lần. `final_archive_payload_bytes` chỉ cộng kích thước payload
-cuối của version terminal đã kiểm; có số version thiếu phép đo kèm theo.
+là tổng source hợp lệ hiện tại của cohort, gồm các lần nộp đã lưu từ trước nếu có,
+mỗi lần nộp một lần. `final_archive_payload_bytes` chỉ cộng kích thước payload
+cuối của lần nộp terminal đã kiểm; có số lần nộp thiếu phép đo kèm theo.
 Không dùng các trường này làm tổng lưu lượng mạng hoặc disk peak.
 
-`selected_sources_terminal` kiểm tra đúng versions đã chọn; no_tex hợp lệ là
+`selected_sources_terminal` kiểm tra đúng các lần nộp đã chọn; no_tex hợp lệ là
 terminal nhưng không tăng `valid_tex_versions`. Not_found/unresolved không phải
-source success. `all_version_sources_terminal` kiểm tra mọi version đã biết.
+source success. `all_version_sources_terminal` kiểm tra mọi lần nộp đã biết.
 `publication_complete.all_complete` chỉ true khi mọi paper đủ điều kiện contract
 và không có lỗi bằng chứng. References chưa complete có `reference_items=null`;
 chỉ tập đã được xác nhận đầy đủ mới có thể là 0.
@@ -124,9 +124,9 @@ Experiment directory được tạo độc quyền; nếu đã tồn tại thì 
 gọi Batch. Không ghi đè experiment cũ. Intent còn lại khi process bị kill là bằng
 chứng chưa có report cuối; không coi là phép đo hoàn tất.
 
-Report schema version 1 gồm:
+Báo cáo dùng lược đồ 1, gồm:
 - Experiment ID, batch ID, attempt IDs và run IDs của invocation hiện tại.
-- `previous_attempt_ids`, selection, SHA-256 fingerprint, versions, timeout,
+- `previous_attempt_ids`, selection, SHA-256 fingerprint, các lần nộp, timeout,
   max_attempts, thời điểm bắt đầu/kết thúc, corpus/log/report/resources paths.
 - `environment`: Git commit và dirty state nếu đọc được, Python, OS, CPU count.
   Loại môi trường Colab/hardware chưa tự xác minh: `measurement_environment=not_collected`.
@@ -189,7 +189,7 @@ nếu có chỉ mô tả những mẫu hợp lệ còn lại. Không dùng 0 tha
 Khi có psutil, RAM gồm process Python hiện tại và các descendant quan sát được,
 cộng RSS; có thể tính trùng shared pages giữa process. Child đã thoát trước khi
 đọc không còn được cộng; access denied làm probe lỗi, không âm thầm bỏ process.
-Backend/version/scope được ghi rõ. Khi thiếu psutil trên Linux, fallback
+Backend, số phát hành và phạm vi đo được ghi rõ. Khi thiếu psutil trên Linux, phương án dự phòng
 `/proc/self/statm` chỉ đo process hiện tại; không được gọi đó là RAM toàn hệ thống
 nếu có subprocess. Windows thiếu psutil ghi backend_missing/not_collected.
 RAM toàn host chỉ có khi psutil đọc được `virtual_memory().used`; nếu backend này
@@ -215,9 +215,12 @@ disk_roots. Không thay TEMP toàn máy, không trỏ vào TEMP dùng chung, kh�
 toàn bộ /tmp. Sampler không tự tạo/xóa dữ liệu hoặc đổi môi trường.
 
 Code dùng Python/threading/pathlib và psutil tùy chọn, chạy được trên Windows;
-Linux có fallback nêu trên. Chưa chạy Colab và chưa xác minh CPU-only runtime.
-Benchmark cuối vẫn cần chạy trên Colab, chọn phạm vi disk đầy đủ và ghi môi trường
-thật. Không có notebook Colab hoặc crawler thật được chạy trong lượt triển khai.
+Linux có fallback nêu trên. Phép đo M1 chính thức cần chạy trên CPU Colab,
+chọn phạm vi disk đầy đủ và ghi lại môi trường thực tế. Nếu một thư mục không
+đọc được hoặc phép quét chưa kết thúc, báo cáo giữ giá trị dung lượng là `null`
+và nêu trạng thái của từng thư mục trong `disk.root_samples`; không dùng mẫu gần
+nhất làm kích thước cuối. Khi tổng hợp nhiều lượt, công cụ chỉ chuyển tiếp các
+trường chẩn đoán đã kiểm tra và giữ chúng theo từng lượt đo.
 
 ### Lưu và tổng hợp nhiều lượt chạy
 
@@ -246,7 +249,7 @@ Công thức tổng hợp:
 - Final size: chỉ snapshot của attempt cuối đã đo, không cộng snapshots và không
   thế snapshot cũ nếu attempt cuối thiếu. Đây là size tại thời điểm đo, không phải
   một phép đo mới tại thời điểm aggregate.
-- Paper/version coverage vẫn do Storage/checksum xác nhận; không lấy số attempts
+- Paper/lần nộp coverage vẫn do Storage/checksum xác nhận; không lấy số attempts
   làm số paper hoặc cached/skipped làm download mới.
 
 Legacy logs/reports vẫn đọc được. Attempt cũ không có measurement giữ missing,

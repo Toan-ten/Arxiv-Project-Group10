@@ -92,6 +92,7 @@ def export_references_table(
     verified_only: bool = True,
     strict: bool = False,
     conflicts: Optional[List[Dict[str, Any]]] = None,
+    reference_date_cache: str | Path | None = None,
 ) -> List[Dict]:
     """Export the official M1 `references` table matching crawling.md schema.
 
@@ -109,6 +110,14 @@ def export_references_table(
       - ref_submission_date (str, nullable)
       - ref_s2_id (str, nullable)
     """
+    pairs = list(pairs)
+    date_entries = {}
+    if reference_date_cache is not None:
+        from src.reference_dates import load_reference_dates
+        members = {member for member, _ in pairs}
+        if len(members) != 1:
+            raise ValueError("Reference-date cache requires one member")
+        date_entries = load_reference_dates(Path(reference_date_cache), next(iter(members)))
     rows = []
     seen = {}
     for mssv, arxiv_id in pairs:
@@ -135,6 +144,11 @@ def export_references_table(
                     continue  # Chỉ đưa vào các trích dẫn đã xác định được arXiv ID.
                 key = (str(arxiv_id), str(ref_arxiv))
                 ref_sub_date = item.get("submission_date") or item.get("publication_date")
+                if not ref_sub_date and date_entries:
+                    from src.reference_dates import _base_id
+                    enriched = date_entries.get(_base_id(ref_arxiv)) or {}
+                    if enriched.get("status") == "found":
+                        ref_sub_date = enriched["date"]
                 raw_authors = item.get("authors")
                 row = {
                     "arxiv_id": str(arxiv_id),
@@ -287,6 +301,7 @@ def export_official_datasets(
     export_parquet: bool = True,
     export_csv: bool = True,
     require_m1_complete: bool = True,
+    reference_date_cache: str | Path | None = None,
 ) -> Dict[str, Any]:
     """Export official production M1 papers and references tables.
 
@@ -297,7 +312,8 @@ def export_official_datasets(
     pairs = list(pairs)
     papers = export_papers_table(store, pairs, verified_only=True, require_m1_complete=require_m1_complete, strict=True)
     conflicts: List[Dict[str, Any]] = []
-    refs = export_references_table(store, pairs, verified_only=True, strict=True, conflicts=conflicts)
+    refs = export_references_table(store, pairs, verified_only=True, strict=True, conflicts=conflicts,
+                                   reference_date_cache=reference_date_cache)
 
     expected_paper_ids = set()
     if require_m1_complete:
@@ -363,6 +379,30 @@ def export_official_datasets(
         )
 
     out.mkdir(parents=True, exist_ok=True)
+    from src.s2_quality import assess_references, summarize_quality
+    from src.storage import _atomic_json
+    quality = {}
+    for member, identifier in pairs:
+        metadata = store.read_metadata(member, identifier)
+        result = ((metadata.get("provenance") or {}).get("semantic_scholar") or {}).get("snapshot")
+        quality[identifier] = assess_references(result, store.read_references(member, identifier))
+    quality_report = summarize_quality(quality)
+    quality_report["exported_missing_date_rows"] = sum(row["ref_submission_date"] is None for row in refs)
+    if reference_date_cache is not None:
+        from src.reference_dates import load_reference_dates
+        entries = load_reference_dates(Path(reference_date_cache), pairs[0][0])
+        date_provenance = {
+            identifier: {key: value for key, value in entry.items()
+                         if key not in {"metadata"}}
+            for identifier, entry in entries.items() if entry["status"] == "found"
+        }
+        if entries:
+            quality_report["date_provenance"] = date_provenance
+            quality_report["date_evidence_cache"] = str(reference_date_cache)
+            quality_report["date_lookup_failures"] = {
+                identifier: entry for identifier, entry in entries.items() if entry["status"] != "found"
+            }
+    _atomic_json(out / "reference_quality.json", quality_report)
     (out / "reference_conflicts.json").write_text(
         json.dumps(conflicts, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -387,6 +427,7 @@ def export_official_datasets(
         "papers_count": len(papers),
         "references_count": len(refs),
         "reference_conflict_count": len(conflicts),
+        "reference_quality_path": str(out / "reference_quality.json"),
         "output_dir": str(out),
         "validation": validation,
     }

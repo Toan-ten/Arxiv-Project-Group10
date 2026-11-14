@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -83,6 +84,38 @@ class SamplingTests(unittest.TestCase):
         self.assertIsNone(disk["sampled_peak_bytes"])
         self.assertEqual(disk["final_corpus_bytes"], 25)
         self.assertEqual(disk["final_corpus_status"], "collected")
+        self.assertEqual(disk["root_samples"][str(scratch.resolve())]["final_status"], "failed")
+        self.assertEqual(disk["root_samples"][str(scratch.resolve())]["final_error_type"], "PermissionError")
+
+    def test_bounded_shutdown_measures_corpus_when_other_root_is_stuck(self):
+        scratch = Path(self.temp.name) / "scratch"
+        entered, release = threading.Event(), threading.Event()
+
+        def read(path):
+            if path == self.root.resolve():
+                return 7
+            entered.set()
+            release.wait(1)
+            return 11
+
+        sampler = metrics.ResourceSampler(
+            self.root, disk_roots=[self.root, scratch], disk_reader=read,
+        )
+        sampler.start()
+        self.assertTrue(entered.wait(1))
+        try:
+            sampler.stop(timeout=0.05)
+            disk = sampler.report()["disk"]
+            self.assertEqual(disk["final_corpus_bytes"], 7)
+            self.assertEqual(disk["final_corpus_status"], "collected")
+            self.assertEqual(disk["root_samples"][str(scratch.resolve())]["latest_status"], "not_collected")
+            self.assertEqual(
+                disk["root_samples"][str(scratch.resolve())]["latest_error_type"],
+                "scan_in_progress_at_shutdown",
+            )
+            self.assertEqual(disk["root_samples"][str(self.root.resolve())]["final_status"], "collected")
+        finally:
+            release.set()
 
     def test_no_samples_are_unknown(self):
         value = metrics.ResourceSampler(self.root).report()
@@ -186,7 +219,9 @@ class SamplingTests(unittest.TestCase):
         sampler.start()
         sampler.stop()
         value = sampler.report()
-        self.assertGreaterEqual(value["disk"]["sample_count"], 2)
+        # An immediate stop may cancel the asynchronous initial scan. The final
+        # sample must still be measured; do not require a fabricated initial one.
+        self.assertGreaterEqual(value["disk"]["sample_count"], 1)
         self.assertEqual(value["disk"]["final_corpus_bytes"], 7)
         if metrics.psutil is not None:
             self.assertGreater(value["ram"]["average_bytes"], 0)
@@ -444,6 +479,31 @@ class IntegratedMetricsTests(unittest.TestCase):
         value["environment"]["API_KEY"] = "secret-fixture"
         path.write_text(json.dumps(value))
         self.assertNotIn("secret-fixture", json.dumps(self.aggregate()["benchmark_metrics"]))
+
+    def test_disk_root_diagnostics_survive_validated_aggregation(self):
+        self.outcomes = [xml_response(), Response(TEX)]
+        self.run_adapter()
+        path = next((self.settings()["log_root"] / "metrics-batch" / "measurements").glob("*.json"))
+        value = json.loads(path.read_text())
+        disk = value["resources"]["disk"]
+        disk["corpus_root"] = "fixture-root"
+        disk["root_samples"] = {
+            "fixture-root": {
+                "latest_status": "collected", "latest_bytes": 40,
+                "latest_error_type": None, "final_status": "collected",
+                "final_bytes": 15, "final_error_type": None,
+                "api_key": "secret-fixture",
+            }
+        }
+        path.write_text(json.dumps(value))
+        summary = self.aggregate()["benchmark_metrics"]
+        observed = summary["attempts"][0]["resources"]["disk"]["root_samples"]
+        self.assertEqual(observed["fixture-root"]["final_bytes"], 15)
+        self.assertNotIn("secret-fixture", json.dumps(summary))
+
+        disk["root_samples"]["fixture-root"]["final_bytes"] = 14
+        path.write_text(json.dumps(value))
+        self.assertEqual(len(self.aggregate()["benchmark_metrics"]["invalid_attempt_ids"]), 1)
 
     def test_source_429_stops_and_preserves_completed_paper(self):
         self.outcomes = [xml_response(), Response(TEX), xml_response(OTHER[1]), http_error(429)]

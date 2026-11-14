@@ -1,6 +1,6 @@
 # Hợp đồng chỉ số thống kê
 
-Phiên bản định nghĩa: `2.2.0`. Phạm vi dữ liệu và quy tắc lưu trữ được quy định trong [hợp đồng lưu trữ corpus](corpus_storage_contract.md).
+Phiên bản định nghĩa thống kê corpus: `2.2.0`. Báo cáo chất lượng S2 bổ sung dùng schema `1`, độc lập với các công thức corpus hiện hành. Phạm vi dữ liệu và quy tắc lưu trữ được quy định trong [hợp đồng lưu trữ corpus](corpus_storage_contract.md).
 
 ## Nguyên tắc
 
@@ -30,8 +30,8 @@ Phiên bản định nghĩa: `2.2.0`. Phạm vi dữ liệu và quy tắc lưu t
 
 | Chỉ số | Điều kiện |
 |---|---|
-| `source_complete_papers` | Paper đã được tìm thấy, danh sách version đã xác định và không rỗng; mọi version có trạng thái kết thúc hợp lệ (`success`, `no_tex_source` hoặc `withdrawn_version`) và vượt qua kiểm tra toàn vẹn áp dụng cho trạng thái đó. |
-| `metadata_complete_papers` | `metadata.json` hợp lệ, đúng định danh, có trạng thái `complete` khớp manifest; title, authors, ngày nộp và lịch sử ngày version đáp ứng hợp đồng. |
+| `source_complete_papers` | Paper đã được tìm thấy, danh sách lần nộp đã xác định và không rỗng; mọi lần nộp có trạng thái kết thúc hợp lệ (`success`, `no_tex_source` hoặc `withdrawn_version`) và vượt qua kiểm tra toàn vẹn áp dụng cho trạng thái đó. |
+| `metadata_complete_papers` | `metadata.json` hợp lệ, đúng định danh, có trạng thái `complete` khớp manifest; title, authors, ngày nộp và lịch sử ngày lần nộp đáp ứng hợp đồng. |
 | `references_complete_papers` | `references.json` hợp lệ, trạng thái `complete` khớp manifest; `coverage.complete == true` và `continuation == null`. Một tập references rỗng vẫn hợp lệ nếu thỏa điều kiện này. |
 | `m1_complete_papers` | Paper đồng thời hoàn tất source, metadata và references, có trạng thái hoàn tất hợp lệ và không có vi phạm toàn vẹn. |
 
@@ -82,6 +82,12 @@ Kiểm tra source áp dụng cho tệp đã khai báo và bằng chứng tương
 | `reference_metadata_complete_records` | Số items trong danh sách references hoàn tất có title, authors, submission/publication date và Semantic Scholar paper ID đều không rỗng. `arxiv_id` không bắt buộc cho chỉ số metadata này. |
 
 ## Tỷ lệ
+
+Báo cáo chất lượng S2 bổ sung các chỉ số độc lập với tỷ lệ hoàn tất thu thập: `count_mismatch_papers`, `count_unknown_papers`, `missing_date_rows` và `missing_date_unique_ids`. `count_match` chỉ được xác định khi metadata có count nguyên không âm và thu thập hoàn tất. Các chỉ số ngày trước bổ sung tính trên items thô có arXiv ID; `exported_missing_date_rows` tính trên các cạnh sau phép chiếu và gộp trùng. Không dùng hai mẫu số này thay thế nhau.
+
+Observation lưu `cleanup_status` và `cleanup_seconds` riêng ngoài thời gian thao tác. Sampler chờ tối đa hai giây khi chốt, có thể thiếu mẫu cuối trên Drive chậm; `final_corpus_status=not_collected` và `final_corpus_bytes=null` mô tả phần chưa đo. Không biến mẫu gần nhất thành mẫu cuối hoặc gọi sampled peak là dung lượng cực đại tuyệt đối. Observation ghi nguyên nhân lỗi/ngắt cleanup và kết quả công việc đã có. Session `finished` chỉ là kết thúc phiên, không chứng nhận hoàn tất mọi ID hoặc toàn bộ M1.
+
+Thời gian và HTTP metrics của bổ sung ngày arXiv nằm riêng trong `reference_dates`; tổng thời gian pha audit có bao gồm bước này. Khi đối chứng tốc độ S2, không gộp chi phí bổ sung ngày vào riêng thời gian S2 hoặc bỏ chi phí đó khỏi tổng quy trình.
 
 Tỷ lệ phần trăm bằng tử số chia mẫu số rồi nhân 100. Trung bình references không nhân 100.
 

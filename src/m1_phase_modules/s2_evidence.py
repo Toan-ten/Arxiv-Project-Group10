@@ -113,7 +113,34 @@ def _read_s2_paper(manifest: dict, cohort_root: Path, arxiv_id: str) -> tuple[di
         s2_integration.references_evidence(references_result, arxiv_id, for_resume=True)
         if record.get("references_status") != references_result.get("status"):
             raise M1PhaseError(f"Trạng thái references S2 không khớp evidence cho {arxiv_id}.")
+    quality_path, quality_relative = _evidence_file(cohort_root, arxiv_id, "quality")
+    if quality_relative in manifest["files"]:
+        if _read_json(quality_path) != _quality_payload(manifest, cohort_root, arxiv_id):
+            raise M1PhaseError(f"S2 quality không khớp bằng chứng cho {arxiv_id}.")
     return metadata_result, references_result
+
+
+def _quality_payload(manifest: dict, cohort_root: Path, arxiv_id: str) -> dict:
+    from src.s2_quality import assess_references
+
+    inputs, values = {}, {}
+    for kind, key in (("metadata", "result"), ("references", "snapshot")):
+        path, relative = _evidence_file(cohort_root, arxiv_id, kind)
+        if relative in manifest["files"]:
+            inputs[kind] = manifest["files"][relative]
+            values[kind] = _read_json(path)[key]
+    return {"schema_version": 1, "arxiv_id": arxiv_id, "input_sha256": inputs,
+            "assessment": assess_references(values.get("metadata"), values.get("references"))}
+
+
+def _save_s2_quality(manifest: dict, cohort_root: Path, arxiv_id: str) -> dict:
+    """Persist a derived assessment without rewriting historical API evidence."""
+    payload = _quality_payload(manifest, cohort_root, arxiv_id)
+    path, relative = _evidence_file(cohort_root, arxiv_id, "quality")
+    _ensure_directory(path.parent, cohort_root)
+    if relative not in manifest["files"] or _read_json(path) != payload:
+        manifest["files"][relative] = _write_json(path, payload)
+    return payload["assessment"]
 
 
 def _save_s2_metadata(manifest: dict, cohort_root: Path, arxiv_id: str, result: dict) -> None:
@@ -130,6 +157,9 @@ def _save_s2_metadata(manifest: dict, cohort_root: Path, arxiv_id: str, result: 
     payload = {"schema_version": PHASE_SCHEMA_VERSION, "result": result, "history": history}
     manifest["files"][relative] = _write_json(path, payload)
     manifest["papers"][arxiv_id]["metadata_status"] = result["status"]
+    _refs_path, refs_relative = _evidence_file(cohort_root, arxiv_id, "references")
+    if refs_relative in manifest["files"]:
+        _save_s2_quality(manifest, cohort_root, arxiv_id)
     if result.get("error"):
         manifest["papers"][arxiv_id]["attempt_errors"].append({
             "stage": "metadata", "status": result["status"],
@@ -152,6 +182,7 @@ def _save_s2_references(manifest: dict, cohort_root: Path, arxiv_id: str, snapsh
     payload = {"schema_version": PHASE_SCHEMA_VERSION, "snapshot": snapshot, "history": history}
     manifest["files"][relative] = _write_json(path, payload)
     manifest["papers"][arxiv_id]["references_status"] = snapshot["status"]
+    _save_s2_quality(manifest, cohort_root, arxiv_id)
     if snapshot.get("error"):
         manifest["papers"][arxiv_id]["attempt_errors"].append({
             "stage": "references", "status": snapshot["status"],
@@ -210,6 +241,11 @@ def _validate_s2_cohort(phase_root: Path, selection: dict, cohort: int) -> tuple
             expected_files.add(f"{folder}/metadata.json")
         if record.get("references_status") != "not_attempted":
             expected_files.add(f"{folder}/references.json")
+        quality_path, quality_relative = _evidence_file(cohort_root, arxiv_id, "quality")
+        if quality_relative in manifest["files"]:
+            expected_files.add(quality_relative)
+            if _read_json(quality_path) != _quality_payload(manifest, cohort_root, arxiv_id):
+                raise M1PhaseError(f"S2 quality không khớp bằng chứng cho {arxiv_id}.")
     if set(manifest["files"]) != expected_files:
         raise M1PhaseError(f"S2 checkpoint {cohort} có mục checksum thừa hoặc thiếu.")
     return manifest, evidence

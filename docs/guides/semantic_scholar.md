@@ -6,6 +6,8 @@ Import module không gửi request hoặc ghi corpus. Pipeline và storage xử 
 quả qua [lớp tích hợp Semantic Scholar](s2_integration.md). Notebook M1 luôn
 chạy giai đoạn này. Xem thêm [tài liệu API chính thức](https://api.semanticscholar.org/api-docs).
 
+Notebook M1 dùng batch metadata cùng references làm đường chính; endpoint references riêng chỉ xử lý các bài chưa xác minh được từ batch. Hết trang API không đồng nghĩa số mục khớp `referenceCount` hoặc đủ bibliography gốc. Chênh lệch được lưu riêng trong bằng chứng chất lượng, không sửa dữ liệu nguồn. Bước bổ sung ngày arXiv thuộc pha kiểm toán trước xuất, theo [hướng dẫn tích hợp](s2_integration.md).
+
 ## API và đầu vào
 
 ```python
@@ -36,6 +38,8 @@ results = fetch_metadata(
 ```
 
 Không truyền `limiter` thì mọi lời gọi dùng chung `DEFAULT_LIMITER`.
+
+Mặc định RateLimiter giữ cửa sổ 100 request/300 giây. Với API key có hạn mức 1 request/giây đã xác định, có thể dùng `RateLimiter(min_interval=1.0, max_requests_per_window=None)` để bỏ riêng cửa sổ không xác thực; pacing, khóa kết nối và cooldown vẫn có hiệu lực. Pha M1 yêu cầu key và dùng cùng instance xuyên cohort trong mỗi phiên. Các tiến trình độc lập không chia sẻ limiter trong bộ nhớ.
 `RateLimiter.request_slot()` cung cấp khóa/cooldown chung cho cả metadata và references. Context giữ khóa đến khi đóng response, rồi chờ ít
 nhất `min_interval` trước request kế tiếp. Mặc định 1 giây là lựa chọn cấu hình,
 không bảo đảm quota cho mọi API key. Cần điều chỉnh theo quyền truy cập thực tế;
@@ -300,7 +304,7 @@ Mỗi item có đúng các fields contract: `arxiv_id, title, authors, submissio
 publication_date, year, venue, s2_paper_id, missing_fields, raw`.
 
 - arXiv ID lấy từ externalIds.ArXiv; giữ nguyên ID hợp lệ, gồm legacy slash và
-  hậu tố version nếu nguồn trả về. ID thiếu/không hợp lệ → null, raw vẫn giữ
+  hậu tố lần nộp nếu nguồn trả về. ID thiếu/không hợp lệ → null, raw vẫn giữ
   nguyên dữ liệu nguồn; không loại item.
 - `s2_paper_id` lấy từ citedPaper.paperId; corpusId chỉ nằm trong raw.
 - Authors là danh sách tên có bằng chứng. Authors thiếu → null; danh sách rỗng
@@ -370,7 +374,7 @@ làm raw prefix khác và bị từ chối.
 
 Trước HTTP, snapshot phải hợp lệ:
 
-- Contract version 2, cùng arXiv ID và query_identifier, provider semantic_scholar.
+- Hợp đồng lưu trữ 2, cùng arXiv ID và `query_identifier`, nhà cung cấp Semantic Scholar.
 - Status partial/failed/interrupted, coverage.complete=false, retrieved_count
   đúng số items, reported_total null hoặc integer không nhỏ hơn số items.
 - Continuation có đúng dạng `{"offset": N}`, N là integer không phải bool,
@@ -384,18 +388,18 @@ Trước HTTP, snapshot phải hợp lệ:
 
 Sau lượt đọc mới:
 
-1. Nếu prefix mới khớp nguyên vẹn mọi item cũ và đã đọc ít nhất tới số items cũ,
-   trả **snapshot mới**, không nối thêm prefix cũ. Giữ cả duplicate và đúng thứ tự.
-2. Nếu request lỗi trước khi đọc lại đủ prefix, trả bản sao snapshot cũ với status
-   partial/failed và lỗi mới; không rút ngắn items để khớp lượt lỗi.
-3. Nếu prefix thay đổi, publication 404 trong khi đã có dữ liệu, hoặc kết quả
-   complete mới ngắn hơn dữ liệu cũ, giữ items cũ, báo mâu thuẫn và xóa continuation.
-   Không tự chọn bản mới để thay thế hoặc tự dedupe.
-4. HTTP 429 ở lượt mới luôn còn trong `error.type/http_status`. Nếu đồng thời có
+1. Nếu phần đầu của phản hồi khớp nguyên vẹn mọi mục đã lưu và đã đọc ít nhất tới số mục đã lưu,
+   trả snapshot vừa nhận, không nối thêm phần đầu đã lưu. Giữ cả mục trùng và đúng thứ tự.
+2. Nếu request lỗi trước khi đọc lại đủ phần đầu, trả bản sao snapshot đã lưu với trạng thái
+   partial/failed và lỗi vừa nhận; không rút ngắn danh sách để khớp lượt lỗi.
+3. Nếu phần đầu thay đổi, publication 404 trong khi đã có dữ liệu, hoặc kết quả
+   complete ngắn hơn dữ liệu đã lưu, giữ các mục đã lưu, báo mâu thuẫn và xóa continuation.
+   Không tự thay thế dữ liệu hoặc tự loại mục trùng.
+4. HTTP 429 ở lượt tiếp tục luôn còn trong `error.type/http_status`. Nếu đồng thời có
    mâu thuẫn prefix, thêm `error.resume_reason`; không thay 429 bằng lỗi resume.
 
-Khi giữ dữ liệu cũ, provenance cũ được giữ nguyên. Thời điểm lần thử mới nằm ở
-`error.observed_at`, tránh gắn references cũ với phản hồi lỗi mới. Lỗi so sánh
+Khi giữ dữ liệu đã lưu, xuất xứ tương ứng được giữ nguyên. Thời điểm lần thử tiếp theo nằm ở
+`error.observed_at`, tránh gắn references đã lưu với phản hồi lỗi vừa nhận. Lỗi so sánh
 snapshot không gắn với một HTTP attempt cụ thể có http_status/attempts/offset
 null, không suy số attempts từ số trang.
 

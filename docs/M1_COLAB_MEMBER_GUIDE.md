@@ -1,6 +1,8 @@
 # Hướng dẫn thành viên chạy M1 trên Colab
 
-Hướng dẫn này áp dụng cho notebook vận hành trong repo. Notebook dùng mã tại SHA `M1_RUNTIME_COMMIT`, không tự dùng mã mới nhất trên nhánh đang mở. Xem [cấu hình và quy trình phát hành runtime](guides/colab.md) để xác định mã thực tế của phiên chạy. Notebook đối chiếu snapshot hoặc mẫu dữ liệu có phạm vi riêng và không thay thế quy trình dưới đây.
+Hướng dẫn này áp dụng cho notebook vận hành trong repo. Notebook dùng mã tại SHA `M1_RUNTIME_COMMIT`. Xem [cấu hình và quy trình phát hành runtime](guides/colab.md) để xác định mã thực tế của phiên chạy.
+
+Khi tiếp tục một phiên, giữ nguyên MSSV, phạm vi ID và Drive root; không xóa dữ liệu đã lưu. `reference_quality` báo số bài lệch count và số reference thiếu ngày, độc lập với số bài đã thu thập. Bước kiểm toán sau khi đủ hai pha sẽ bổ sung ngày còn thiếu từ arXiv bằng cache có checksum, rồi ghi `reference_quality.json` cạnh hai bảng xuất. Bấm dừng có thể để thống kê thiếu mẫu cuối; kiểm tra checkpoint và trạng thái observation trước khi tiếp tục.
 
 ## 1. Cấu hình phạm vi
 
@@ -14,8 +16,8 @@ Trước khi chạy, thêm cả `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY
 
 ## 2. Chạy ba pha
 
-1. Chạy ô arXiv. Pha này yêu cầu snapshot và index Kaggle hợp lệ, xác nhận danh sách ID bằng Atom theo lô tối đa 20 ID, đối chiếu lịch sử rồi tải mã nguồn riêng cho từng phiên bản. Khi snapshot hoặc index không sẵn sàng, pha dừng trước discovery; pipeline không chuyển sang đường arXiv-only.
-2. Chạy ô S2. Siêu dữ liệu được lấy theo lô tối đa 50 ID; tài liệu tham khảo được phân trang riêng cho từng bài. M1 dừng nếu thiếu khóa S2 và không gửi request ẩn danh.
+1. Chạy ô arXiv. Pha này yêu cầu snapshot và index Kaggle hợp lệ, xác nhận danh sách ID bằng Atom theo lô tối đa 20 ID, đối chiếu lịch sử rồi tải mã nguồn riêng cho từng lần nộp. Khi snapshot hoặc index không sẵn sàng, pha dừng trước discovery; pipeline không chuyển sang đường arXiv-only.
+2. Chạy ô S2. Notebook dùng `batch_m1` để gom metadata cùng references theo lô tối đa 100 ID, kiểm tra định danh và số lượng trước khi công nhận đầy đủ. Bài chưa đủ bằng chứng chuyển sang phân trang. M1 dừng nếu thiếu khóa S2 và không gửi request ẩn danh. Xem [phạm vi trường dữ liệu và cơ chế phân trang](guides/s2_integration.md).
 3. Chạy ô kiểm toán/đối soát sau khi arXiv và S2 đã ghi đủ bằng chứng. Kiểm toán xác minh phạm vi, định danh, xuất xứ, mã kiểm tra và trạng thái phân trang trước khi hợp nhất dữ liệu và xuất bảng.
 
 Mặc định, sổ tay chạy arXiv, S2 rồi kiểm toán. Có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha. S2 `not_found` chỉ mô tả kết quả tìm kiếm ở Semantic Scholar; trạng thái này không xác nhận ID arXiv không tồn tại.

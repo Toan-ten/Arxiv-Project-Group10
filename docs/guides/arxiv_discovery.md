@@ -1,7 +1,7 @@
 # Phân tích dữ liệu Atom của arXiv
 
 `parse_arxiv_response(xml, mssv, arxiv_id)` nhận chuỗi hoặc bytes XML từ một
-truy vấn **một ID gốc**, không có hậu tố version. Hàm chỉ phân tích dữ liệu,
+truy vấn **một ID gốc**, không có hậu tố `vN`. Hàm chỉ phân tích dữ liệu,
 không thực hiện HTTP. MSSV và ID yêu cầu luôn được giữ trong kết quả.
 
 ```python
@@ -40,11 +40,11 @@ không tự bổ sung hoặc suy ra ngày từ năm.
 Với phản hồi truy vấn ID gốc, hậu tố `vN` trong entry ID hoặc liên kết
 `alternate` xác định `latest_version_id` và danh sách `v1` đến `vN`.
 Nếu không có hậu tố rõ ràng, `version_status="needs_verification"`,
-`latest_version_id=None`, `version_ids=[]`. Không suy version từ ngày tháng.
+`latest_version_id=None`, `version_ids=[]`. Không suy lần nộp từ ngày tháng.
 Các hậu tố mâu thuẫn được báo `invalid_response`.
 
-Metadata thuộc entry trả về, chưa phải metadata riêng của từng version.
-Danh sách version chưa xác nhận source có thể tải được. Parser không xử lý
+Metadata thuộc entry trả về, chưa phải metadata riêng của từng lần nộp.
+Danh sách lần nộp chưa xác nhận source có thể tải được. Parser không xử lý
 batch/pagination; feed rỗng thiếu `totalResults=0` được báo bất thường.
 Nếu feed có self link chứa `id_list`, giá trị phải khớp đúng ID gốc yêu cầu.
 Đối số MSSV/ID sai gây `ValueError`; XML không phải chuỗi/bytes gây `TypeError`.
