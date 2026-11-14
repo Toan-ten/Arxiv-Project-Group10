@@ -156,9 +156,10 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
                   resources=None, result=None, error_type=None,
                   completeness="partial; other stages, sessions and setup require separate evidence")
     _atomic_json(target, record)
-    sampler.start()
     started = time.perf_counter()
     try:
+        sampler.start()
+        started = time.perf_counter()
         result = operation()
         record["execution_status"] = "returned"
         if isinstance(result, dict):
@@ -178,6 +179,9 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
                                 "retry_wait_seconds", "arxiv_id", "trigger_stage",
                                 "trigger_http_status", "resume_attempt_number",
                                 "affected_ids", "provider_cooldown_seconds") if k in result}
+            for key in ("reference_quality", "reference_dates"):
+                if key in result:
+                    record["result"][key] = result[key]
             if isinstance(result.get("fast_runner"), dict):
                 record["result"]["fast_runner"] = result["fast_runner"]
             if stage == "source" and isinstance(result.get("timing_metrics"), dict):
@@ -189,10 +193,26 @@ def observe_stage(runner: Any, stage: str, cohort: int, operation: Callable[[], 
         raise
     finally:
         record["wall_seconds"] = time.perf_counter() - started
-        sampler.stop()
-        record["resources"] = sampler.report()
-        record["finished_at"] = _now()
+        cleanup_started = time.perf_counter()
+        # Persist the operation outcome before cleanup can itself be interrupted.
+        record["cleanup_status"] = "running"
         _atomic_json(target, record)
+        cleanup_interrupt = None
+        try:
+            sampler.stop()
+            record["cleanup_status"] = "finished"
+        except (Exception, KeyboardInterrupt) as exc:
+            record["cleanup_status"] = "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed"
+            record["cleanup_error_type"] = type(exc).__name__
+            if isinstance(exc, KeyboardInterrupt):
+                cleanup_interrupt = exc
+        finally:
+            record["resources"] = sampler.report()
+            record["finished_at"] = _now()
+            record["cleanup_seconds"] = time.perf_counter() - cleanup_started
+            _atomic_json(target, record)
+        if cleanup_interrupt is not None and record["execution_status"] != "raised":
+            raise cleanup_interrupt
 
 
 def revision_history_counts(runner: Any, cohort: int) -> dict:

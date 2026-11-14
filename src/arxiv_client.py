@@ -640,7 +640,8 @@ def query_arxiv_batch(
             parsed = parse_arxiv_batch_response(body, mssv, arxiv_ids)
         except (ET.ParseError, ValueError, TypeError) as exc:
             return {"status": "invalid_response", "results": {}, "error": str(exc)}
-        return {"status": "found", "results": parsed, "error": None}
+        return {"status": "found", "results": parsed, "error": None,
+                "raw_xml": body.decode("utf-8")}
 
     url = API_URL + "?" + urlencode({
         "id_list": ",".join(arxiv_ids), "start": 0, "max_results": len(arxiv_ids),

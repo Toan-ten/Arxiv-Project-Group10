@@ -326,6 +326,38 @@ def _valid_resources(value):
     _require(disk["final_corpus_bytes"] is None or _number(disk["final_corpus_bytes"]))
     _require(isinstance(disk["roots"], list) and bool(disk["roots"])
              and all(isinstance(p, str) for p in disk["roots"]))
+    root_samples = None
+    if "root_samples" in disk:
+        raw_samples = disk["root_samples"]
+        _require(isinstance(raw_samples, dict)
+                 and set(raw_samples) == set(disk["roots"]))
+        root_samples = {}
+        keys = {
+            "latest_status", "latest_bytes", "latest_error_type",
+            "final_status", "final_bytes", "final_error_type",
+        }
+        for root in disk["roots"]:
+            item = raw_samples[root]
+            _require(isinstance(item, dict) and keys <= item.keys())
+            _require(item["latest_status"] in {"not_collected", "failed", "collected"})
+            _require(item["final_status"] in {
+                "not_attempted", "not_collected", "failed", "collected",
+            })
+            for prefix in ("latest", "final"):
+                status, size, error = (
+                    item[f"{prefix}_status"], item[f"{prefix}_bytes"],
+                    item[f"{prefix}_error_type"],
+                )
+                _require((type(size) is int and size >= 0)
+                         if status == "collected" else size is None)
+                _require(error is None or (
+                    isinstance(error, str) and error.isidentifier() and len(error) <= 80
+                ))
+            root_samples[root] = {key: item[key] for key in keys}
+        corpus_sample = root_samples[disk["corpus_root"]]
+        if disk["final_corpus_bytes"] is not None:
+            _require(corpus_sample["final_status"] == "collected"
+                     and corpus_sample["final_bytes"] == disk["final_corpus_bytes"])
     for key in ("ram", "system_ram"):
         if key in value:
             _require(isinstance(value[key]["source"], str)
@@ -344,6 +376,8 @@ def _valid_resources(value):
     }
     for kind in ("ram", "disk"):
         result[kind] = {k: v for k, v in value[kind].items() if k in fields}
+    if root_samples is not None:
+        result["disk"]["root_samples"] = root_samples
     if "system_ram" in value:
         result["system_ram"] = {
             k: v for k, v in value["system_ram"].items() if k in fields

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from m1_source_contract import phase_implementation_source
+
 from src.fast_production import (
     FastProductionRunner,
     cohort_pairs,
@@ -1317,7 +1319,7 @@ shutil.rmtree(target2)
         notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
         text = "\n".join("".join(cell.get("source", [])) for cell in notebook["cells"])
         workflow = (repo_root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
-        phases = (repo_root / "src" / "m1_phases.py").read_text(encoding="utf-8")
+        phases = phase_implementation_source(repo_root)
         self.assertEqual(len(list((repo_root / "notebooks").glob("*.ipynb"))), 1)
         for member in load_config():
             self.assertEqual(len(member_cohort_range(member)), 50)
