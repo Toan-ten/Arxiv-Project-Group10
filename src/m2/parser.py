@@ -96,7 +96,7 @@ def bibliography(gatherer, body):
         gatherer.fallback_bbl()
     for path in gatherer.bbl_files:
         try:
-            rendered = parse_bbl(gatherer.read(path, comments=False))
+            rendered = parse_bbl(gatherer.read(path, comments=False), enriched=True)
         except ParseError as exc:
             raise ParseError(f"{path.relative_to(gatherer.root).as_posix()}: {exc}") from exc
         relative = path.relative_to(gatherer.root).as_posix()

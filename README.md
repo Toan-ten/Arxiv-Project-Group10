@@ -75,6 +75,12 @@ Notebook nhập các API từ `src.m1_workflow`. Module này xuất lại các �
 
 Xem [hướng dẫn vận hành Colab](docs/guides/colab.md), [quy trình M1](docs/operations/m1_production.md) và [kiến trúc các pha M1](docs/architecture/repository-structure.md).
 
+## Xử lý M2
+
+M2 đọc mã nguồn từ kho M1, xác định đường biên dịch, dựng cấu trúc nội dung và hợp nhất tài liệu tham khảo theo bài. Cài `requirements-m2.txt` rồi chạy `python -m scripts.run_m2 --corpus <thu-muc-M1> --output <thu-muc-ket-qua>`; xem [hướng dẫn M2](docs/m2.md) để biết điều kiện đầu vào và trạng thái xử lý.
+
+Để kiểm tra và chuyển các archive `.bbl` riêng, chạy `python -m scripts.run_m2_bbl` với `--input` và `--output`. Công cụ này dùng cùng bộ đọc tài liệu tham khảo với M2, ghi BibTeX theo tệp và chỉ hợp nhất khi nguồn của từng phiên bản xác định. Cú pháp đầy đủ và cách đọc bằng chứng nằm trong [hướng dẫn chuyển BBL](docs/m2_bbl_pipeline.md).
+
 ## Đóng góp và giấy phép
 
 Quy trình phát triển nằm trong [`CONTRIBUTING.md`](CONTRIBUTING.md). Kho mã được phân phối theo [Giấy phép MIT](LICENSE).
