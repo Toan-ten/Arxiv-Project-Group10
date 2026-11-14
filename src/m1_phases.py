@@ -156,6 +156,7 @@ def run_m1_s2_member(
     auto_resume_429_max_per_session: int = 2,
     auto_resume_429_cooldown_min_seconds: float = 300.0,
     auto_resume_429_cooldown_max_seconds: float = 600.0,
+    reference_strategy: str = "paginated",
 ) -> dict:
     """Lấy metadata/references S2; có thể tự tiếp tục hữu hạn sau HTTP 429."""
     return _run_m1_s2_member_impl(
@@ -170,6 +171,7 @@ def run_m1_s2_member(
         auto_resume_429_max_per_session=auto_resume_429_max_per_session,
         auto_resume_429_cooldown_min_seconds=auto_resume_429_cooldown_min_seconds,
         auto_resume_429_cooldown_max_seconds=auto_resume_429_cooldown_max_seconds,
+        reference_strategy=reference_strategy,
         runner_factory=FastProductionRunner,
     )
 
@@ -205,7 +207,7 @@ def run_m1_member(
     cohort_limit: int | None = None,
     budget_seconds: float = 10 * 60 * 60,
 ) -> dict:
-    """Điểm vào tương thích, chạy tuần tự source → S2 → kiểm toán M1."""
+    """Chạy cùng quy trình M1 mà notebook dùng trên một phạm vi ID."""
     kaggle_token = _required_m1_secret(kaggle_token, "KAGGLE_API_TOKEN")
     semantic_scholar_api_key = _required_m1_secret(
         semantic_scholar_api_key, "SEMANTIC_SCHOLAR_API_KEY",
@@ -222,6 +224,7 @@ def run_m1_member(
         kaggle_token=kaggle_token,
         cohort_limit=cohort_limit,
         budget_seconds=remaining_budget(),
+        auto_resume_429=True,
     )
     if arxiv_result["stopped"]:
         return {"stage": "arxiv", "arxiv": arxiv_result, "s2": None, "audit": None}
@@ -232,6 +235,8 @@ def run_m1_member(
         semantic_scholar_api_key=semantic_scholar_api_key,
         cohort_limit=cohort_limit,
         budget_seconds=remaining_budget(),
+        auto_resume_429=True,
+        reference_strategy="batch_m1",
     )
     if s2_result["stopped"]:
         return {"stage": "s2", "arxiv": arxiv_result, "s2": s2_result, "audit": None}

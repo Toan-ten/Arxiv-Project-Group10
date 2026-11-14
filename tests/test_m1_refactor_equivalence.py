@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import base64
 import json
 import subprocess
 import sys
@@ -39,7 +40,15 @@ def test_existing_api_names_and_signatures_are_preserved():
     for name, value in vars(baseline).items():
         if inspect.isfunction(value) and value.__module__ == baseline.__name__:
             current = getattr(m1_phases, name)
-            assert inspect.signature(current) == inspect.signature(value), name
+            signature = inspect.signature(current)
+            if name == "run_m1_s2_member":
+                strategy = signature.parameters["reference_strategy"]
+                assert strategy.default == "paginated"
+                assert strategy.kind == inspect.Parameter.KEYWORD_ONLY
+                signature = signature.replace(parameters=[
+                    p for key, p in signature.parameters.items() if key != "reference_strategy"
+                ])
+            assert signature == inspect.signature(value), name
     for name in (
         "_required_m1_secret", "build_member_selection", "run_m1_member",
         "run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member",
@@ -51,7 +60,7 @@ def test_existing_api_names_and_signatures_are_preserved():
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda name: name.split(".")[-1])
-def test_exact_artifacts_match_baseline_in_fresh_processes(tmp_path, case):
+def test_source_and_api_artifacts_match_baseline_in_fresh_processes(tmp_path, case):
     helper = Path(__file__).with_name("m1_refactor_fixture.py")
     outputs = []
     implementations = ["baseline", "current"]
@@ -76,5 +85,39 @@ def test_exact_artifacts_match_baseline_in_fresh_processes(tmp_path, case):
         )
         outputs.append(json.loads(output.read_text(encoding="utf-8")))
     assert outputs[0]["artifacts"], "The characterization must compare real files"
+    # The post-audit release deliberately adds quality sidecars and cleanup/date
+    # reporting. Keep byte-exact comparison for API/source evidence and exports;
+    # permit only those explicit additions in operational JSON and API results.
+    def legacy_fields(value):
+        if isinstance(value, list):
+            return [legacy_fields(v) for v in value]
+        if not isinstance(value, dict):
+            return value
+        result = {k: legacy_fields(v) for k, v in value.items()
+                  if k not in {"reference_quality", "reference_dates", "cleanup_status", "cleanup_seconds"}}
+        if isinstance(result.get("files"), dict):
+            result["files"] = {k: v for k, v in result["files"].items()
+                               if not k.endswith("/quality.json")}
+        return result
+
+    def immutable(path):
+        return ("/reports/" not in path
+                or "/papers/" in path and not path.endswith("/quality.json"))
+
+    baseline = outputs[0]
     for output in outputs[1:]:
-        assert outputs[0] == output
+        assert output["stdout"] == baseline["stdout"]
+        assert legacy_fields(output["results"]) == legacy_fields(baseline["results"])
+        assert [p for p in output["write_order"] if immutable(p)] == [
+            p for p in baseline["write_order"] if immutable(p)]
+        old, new = baseline["artifacts"], output["artifacts"]
+        assert not old.keys() - new.keys(), "Historical artifacts must not disappear"
+        for path in new.keys() - old.keys():
+            assert ("/s2/cohort_" in path and path.endswith("/quality.json")
+                    or path.endswith("/reference_dates/index.json")), path
+        for path, encoded in old.items():
+            if immutable(path) or encoded == new[path]:
+                assert encoded == new[path], path
+            else:
+                left, right = (json.loads(base64.b64decode(v)) for v in (encoded, new[path]))
+                assert legacy_fields(left) == legacy_fields(right), path

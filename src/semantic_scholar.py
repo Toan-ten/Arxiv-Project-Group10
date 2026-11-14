@@ -77,10 +77,13 @@ class RateLimiter:
     ):
         _positive(min_interval, "min_interval")
         _positive(window_seconds, "window_seconds")
-        _positive(max_requests_per_window, "max_requests_per_window")
+        if max_requests_per_window is not None:
+            _positive(max_requests_per_window, "max_requests_per_window")
         self._min_interval = float(min_interval)
         self.window_seconds = float(window_seconds)
-        self.max_requests_per_window = int(max_requests_per_window)
+        self.max_requests_per_window = (
+            None if max_requests_per_window is None else int(max_requests_per_window)
+        )
         self._monotonic = monotonic_fn or time.monotonic
         self._sleep = sleep_fn or time.sleep
         self._lock = Lock()
@@ -111,7 +114,8 @@ class RateLimiter:
                 if now < self._next_request_at:
                     sleep_needed = max(sleep_needed, self._next_request_at - now)
 
-                if len(self._request_timestamps) >= self.max_requests_per_window:
+                if (self.max_requests_per_window is not None
+                        and len(self._request_timestamps) >= self.max_requests_per_window):
                     earliest = self._request_timestamps[0]
                     sleep_needed = max(sleep_needed, (earliest + self.window_seconds) - now)
 
@@ -122,7 +126,8 @@ class RateLimiter:
                 total_slept += sleep_needed
 
             scheduled = self._monotonic()
-            self._request_timestamps.append(scheduled)
+            if self.max_requests_per_window is not None:
+                self._request_timestamps.append(scheduled)
             self._next_request_at = scheduled + self._min_interval
             return total_slept
 
@@ -137,7 +142,8 @@ class RateLimiter:
                 delay = 0.0
                 if (int_delay := self._next_request_at - now) > 0:
                     delay = max(delay, int_delay)
-                if len(self._request_timestamps) >= self.max_requests_per_window:
+                if (self.max_requests_per_window is not None
+                        and len(self._request_timestamps) >= self.max_requests_per_window):
                     earliest = self._request_timestamps[0]
                     win_delay = (earliest + self.window_seconds) - now
                     delay = max(delay, win_delay)
@@ -159,7 +165,8 @@ class RateLimiter:
             if budget is not None and budget.remaining < 0:
                 raise _WaitBudgetExceeded()
 
-            self._request_timestamps.append(time.monotonic())
+            if self.max_requests_per_window is not None:
+                self._request_timestamps.append(time.monotonic())
 
             def postpone(seconds, *, http_status=None):
                 if (type(seconds) not in (int, float)
@@ -371,6 +378,16 @@ def _request_json(url, *, method, body, validate, timeout, max_attempts, limiter
                     delay = _retry_after(exc.headers.get("Retry-After")) if exc.headers else 0.0
                     status = "rate_limited" if http_status == 429 else "http_error"
                     error = "http_413_request_too_large" if http_status == 413 else "http_" + str(http_status)
+                    if http_status == 400:
+                        # Classify only the documented size failure. Never expose
+                        # provider text, credentials or arbitrary payload details.
+                        try:
+                            message = json.loads(exc.read(4096)).get("message", "")
+                            if (isinstance(message, str)
+                                    and "response would exceed maximum size" in message.lower()):
+                                error = "http_400_response_too_large"
+                        except (OSError, ValueError, TypeError, AttributeError):
+                            pass
                     retry = http_status == 429 or 500 <= http_status <= 599
                 finally:
                     try:

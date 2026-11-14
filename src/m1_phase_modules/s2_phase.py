@@ -6,12 +6,14 @@ import os
 import random
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
 from src.fast_production import FastProductionRunner, cohort_pairs
 from src.session_evidence import SessionBudget, finish_session_envelope, observe_stage
+from src.s2_quality import summarize_quality
 from src.storage import IntegrityError, StorageError
 
 from .checkpoint import (
@@ -30,6 +32,7 @@ from .common import (
     build_member_selection,
 )
 from .s2_evidence import (
+    _save_s2_quality,
     _cohort_s2_paths,
     _load_s2_manifest,
     _read_s2_paper,
@@ -52,6 +55,65 @@ S2_DEFAULTS = {
 
 
 S2_METADATA_BATCH_SIZE = 50
+S2_ENRICHMENT_BATCH_SIZE = 100
+_REQUEST_SCOPE = ContextVar("m1_s2_request_scope", default=None)
+
+
+@contextmanager
+def _s2_request_scope(strategy: str):
+    """Keep authenticated pacing/cooldown across cohorts and automatic resumes."""
+    from src import semantic_scholar
+
+    limiter = semantic_scholar.RateLimiter(
+        S2_DEFAULTS["min_interval"], max_requests_per_window=None,
+    )
+    token = _REQUEST_SCOPE.set((limiter, strategy))
+    try:
+        yield
+    finally:
+        _REQUEST_SCOPE.reset(token)
+
+
+def _fetch_s2_enrichment_batch(
+    manifest: dict, cohort_root: Path, identifiers: list[str], config: dict,
+    limiter: Any, checkpoint_write: Callable[[], None],
+) -> tuple[bool, int | None, int, list[str]]:
+    """Persist only fully validated rows; stop without splitting 403/429."""
+    from src import s2_batch, s2_integration
+
+    rows = s2_batch.fetch_enrichment(
+        identifiers, batch_size=S2_ENRICHMENT_BATCH_SIZE, limiter=limiter,
+        **{name: config[name] for name in (
+            "timeout", "max_attempts", "max_response_bytes", "max_retry_wait",
+            "backoff_base", "backoff_cap",
+        )},
+    )
+    if (len(rows) != len(identifiers)
+            or any(row["metadata"].get("arxiv_id") != identifier
+                   for row, identifier in zip(rows, identifiers))):
+        raise M1PhaseError("S2 enrichment batch không khớp danh sách ID.")
+    # Validate the entire response before the first evidence write.
+    for identifier, row in zip(identifiers, rows):
+        if (row["metadata"].get("error") or "").startswith("not_attempted_"):
+            continue
+        s2_integration.metadata_result(row["metadata"], identifier)
+        if row["references"] is not None:
+            s2_integration.references_evidence(row["references"], identifier)
+    stop, affected = None, []
+    for identifier, row in zip(identifiers, rows):
+        metadata = row["metadata"]
+        if (metadata.get("error") or "").startswith("not_attempted_"):
+            continue
+        _save_s2_metadata(manifest, cohort_root, identifier, metadata)
+        if (row["references"] is not None
+                and manifest["papers"][identifier]["references_status"] == "not_attempted"):
+            _save_s2_references(manifest, cohort_root, identifier, row["references"])
+        checkpoint_write()
+        if metadata.get("http_status") in {403, 429}:
+            stop = metadata["http_status"]
+            if stop == 429:
+                affected.append(identifier)
+    return stop is not None, stop, 1, affected
 
 
 @contextmanager
@@ -303,7 +365,10 @@ def _process_s2_cohort(
     manifest = _load_s2_manifest(checkpoint_path, selection, cohort)
     _write_json(checkpoint_path, manifest)
     config = s2_integration.configuration(S2_DEFAULTS)
-    limiter = semantic_scholar.RateLimiter(config["min_interval"])
+    scope = _REQUEST_SCOPE.get()
+    limiter = scope[0] if scope is not None else semantic_scholar.RateLimiter(config["min_interval"])
+    strategy = scope[1] if scope is not None else "paginated"
+    batch_size = S2_ENRICHMENT_BATCH_SIZE if strategy == "batch_m1" else S2_METADATA_BATCH_SIZE
     timing_by_id: dict[str, float] = {}
     prefetched: set[str] = set()
     phase_metrics = {
@@ -314,6 +379,8 @@ def _process_s2_cohort(
         "references_wall_seconds": 0.0,
         "checkpoint_wall_seconds": 0.0,
     }
+    if strategy == "batch_m1":
+        phase_metrics.update(enrichment_batch_calls=0, references_paginated_fallbacks=0)
 
     def checkpoint_write() -> None:
         started_write = time.perf_counter()
@@ -341,7 +408,8 @@ def _process_s2_cohort(
         f"[M1/S2] Lô {cohort}: bắt đầu/tiếp tục {len(pairs)} ID; "
         f"đã có metadata {initially_metadata_complete}, references "
         f"{initially_references_complete}; metadata batch tối đa "
-        f"{S2_METADATA_BATCH_SIZE} ID.",
+        f"{batch_size} ID."
+        + (" Chiến lược batch_m1." if strategy == "batch_m1" else ""),
         flush=True,
     )
 
@@ -390,6 +458,7 @@ def _process_s2_cohort(
                 and references_result is not None
                 and references_result["status"] in {"complete", "not_found"}
             ):
+                _save_s2_quality(manifest, cohort_root, arxiv_id)
                 continue
             if budget.should_stop():
                 stopped = True
@@ -406,7 +475,7 @@ def _process_s2_cohort(
                     batch_started = time.perf_counter()
                     try:
                         candidates = []
-                        for future_member, future_id in pairs[index - 1:index - 1 + S2_METADATA_BATCH_SIZE]:
+                        for future_member, future_id in pairs[index - 1:index - 1 + batch_size]:
                             if future_id in prefetched or manifest["papers"][future_id]["metadata_status"] in {"found", "not_found"}:
                                 continue
                             future_record = manifest["papers"][future_id]
@@ -425,7 +494,11 @@ def _process_s2_cohort(
                         if candidates:
                             phase_metrics["metadata_batch_calls"] += 1
                             phase_metrics["metadata_ids_requested"] += len(candidates)
-                            policy_stop, policy_status, fetch_calls, policy_ids = _fetch_s2_metadata_batch(
+                            fetch = (_fetch_s2_enrichment_batch if strategy == "batch_m1"
+                                     else _fetch_s2_metadata_batch)
+                            if strategy == "batch_m1":
+                                phase_metrics["enrichment_batch_calls"] += 1
+                            policy_stop, policy_status, fetch_calls, policy_ids = fetch(
                                 manifest, cohort_root, candidates,
                                 config, limiter, checkpoint_write,
                             )
@@ -459,6 +532,8 @@ def _process_s2_cohort(
                     break
 
                 if references_result is None or references_result.get("status") not in {"complete", "not_found"}:
+                    if strategy == "batch_m1":
+                        phase_metrics["references_paginated_fallbacks"] += 1
                     previous_snapshot = references_result
                     reference_started = time.perf_counter()
                     try:
@@ -511,6 +586,11 @@ def _process_s2_cohort(
     metadata_complete = sum(item.get("metadata_status") in {"found", "not_found"} for item in statuses)
     references_complete = sum(item.get("references_status") in {"complete", "not_found"} for item in statuses)
     complete = metadata_complete == len(pairs) and references_complete == len(pairs)
+    quality = summarize_quality({
+        aid: _save_s2_quality(manifest, cohort_root, aid)
+        for aid, record in manifest["papers"].items()
+        if record.get("references_status") != "not_attempted"
+    })
     manifest.update(
         status="complete" if complete else "partial",
         updated_at=datetime.now(timezone.utc).isoformat(),
@@ -519,6 +599,7 @@ def _process_s2_cohort(
         session_id=session_id,
         metadata_complete=metadata_complete,
         references_complete=references_complete,
+        reference_quality=quality,
     )
     _write_json(checkpoint_path, manifest)
     print(
@@ -534,6 +615,7 @@ def _process_s2_cohort(
         "attempted_papers": attempted,
         "metadata_complete": metadata_complete,
         "references_complete": references_complete,
+        "reference_quality": quality,
         "fully_enriched": sum(
             item.get("metadata_status") == "found"
             and item.get("references_status") == "complete"
@@ -564,9 +646,12 @@ def run_m1_s2_member(
     auto_resume_429_max_per_session: int = 2,
     auto_resume_429_cooldown_min_seconds: float = 300.0,
     auto_resume_429_cooldown_max_seconds: float = 600.0,
+    reference_strategy: str = "paginated",
     runner_factory: Callable[..., FastProductionRunner],
 ) -> dict:
     """Lấy metadata/references S2; có thể tự tiếp tục hữu hạn sau HTTP 429."""
+    if reference_strategy not in {"paginated", "batch_m1"}:
+        raise ValueError("reference_strategy must be paginated or batch_m1")
     semantic_scholar_api_key = _required_m1_secret(
         semantic_scholar_api_key, "SEMANTIC_SCHOLAR_API_KEY",
     )
@@ -607,7 +692,7 @@ def run_m1_s2_member(
             _write_json(auto_events_path, payload)
 
     try:
-        with _member_writer_lock(drive, selection):
+        with _member_writer_lock(drive, selection), _s2_request_scope(reference_strategy):
             _record_session(phase_root, selection, session_id, "s2")
             _ensure_starting_state(runner, phase_root, selection)
             if retry_policy["enabled"]:
@@ -643,6 +728,12 @@ def run_m1_s2_member(
                             "backoff_cap": S2_DEFAULTS["backoff_cap"],
                             "auto_resume_429_policy": retry_policy,
                             "session_budget_seconds": budget_seconds,
+                            **({"reference_strategy": reference_strategy,
+                                "enrichment_batch_size": S2_ENRICHMENT_BATCH_SIZE,
+                                "relation_fields_collected": False,
+                                "limiter_scope": "session",
+                                "authenticated_window_cap": None}
+                               if reference_strategy == "batch_m1" else {}),
                         },
                     )
                     reason = result.get("stop_reason") or {}
@@ -819,6 +910,10 @@ def run_m1_s2_member(
             "expected_id_count": selection["expected_count"],
             "metadata_complete": sum(r.get("metadata_complete", 0) for r in cohort_results.values()),
             "references_complete": sum(r.get("references_complete", 0) for r in cohort_results.values()),
+            "reference_quality": summarize_quality({
+                aid: assessment for r in cohort_results.values()
+                for aid, assessment in r.get("reference_quality", {}).get("papers", {}).items()
+            }),
             "cohorts": cohort_results,
             "stopped": stopped,
             "stop_reason": stop_reason,

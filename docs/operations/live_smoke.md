@@ -7,8 +7,8 @@ nó không thay thế quy trình M1 trong notebook.
 ## Kế hoạch cố định
 
 - Mặc định MSSV `24120010`, arXiv `2508.07872`. Nếu chỉ định ID khác,
-  chỉ nhận một cặp có ownership đúng; không nhận list, range hoặc version suffix.
-- Source chỉ `v1`, sau khi Discovery xác nhận. Mọi version khác vẫn pending.
+  chỉ nhận một cặp có quyền sở hữu đúng; không nhận danh sách, dải hoặc hậu tố `vN`.
+- Source chỉ `v1`, sau khi Discovery xác nhận. Mọi lần nộp khác vẫn pending.
 - arXiv và S2 đều `max_attempts=1`, không retry hoặc follow redirect.
 - Timeout mặc định 15 giây/request, cho phép 1..60 giây; không phải timeout toàn invocation.
 - arXiv dùng pacing hiện có ít nhất 3 giây và một connection; S2 dùng một limiter
@@ -112,7 +112,7 @@ Không gán metadata referenceCount vào coverage.reported_total của endpoint 
 300 items mà còn next là partial, giữ continuation. Không biến timeout/404 thành
 zero references; không nới strict identity khi externalIds.ArXiv thiếu.
 Source xong, API HTTP 200 hoặc batch finished không đồng nghĩa publication complete.
-Nhiều versions có thể còn pending và ngày revision chưa biết dù smoke_status=verified.
+Các lần nộp khác có thể còn chờ xử lý và ngày sửa đổi chưa biết dù `smoke_status=verified`.
 No-TeX được báo riêng, không được gọi là tải TeX thành công.
 
 Mã thoát: 0 khi chạy thử không gọi mạng hoặc đạt mục tiêu kiểm tra; 2 khi kết quả chưa đủ; 3 khi dừng theo chính sách; 1 khi lỗi hoặc dữ liệu không hợp lệ;

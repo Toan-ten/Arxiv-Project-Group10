@@ -1,6 +1,6 @@
 # Điều phối lô trong thư viện
 
-`src.batch` xử lý tuần tự một danh sách ID và lưu nhật ký bền vững. Notebook M1 gọi các API pha riêng `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`; `run_m1_member()` giữ vai trò wrapper tương thích cho lệnh cũ. Các API batch bên dưới vẫn phục vụ kiểm thử và phát triển thư viện.
+`src.batch` là API thư viện xử lý tuần tự một danh sách ID và lưu nhật ký bền vững. Quy trình M1 của thành viên dùng notebook với ba pha `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_audit_member()`. `run_m1_member()` gọi cùng các pha và dùng `batch_m1` cho S2. Những tham số của API thư viện dưới đây không tạo thêm chế độ vận hành M1.
 
 ## Giao diện gọi và dữ liệu đầu vào
 
@@ -21,13 +21,13 @@ thay thế cho not_found. Giới hạn này là số ID, không phải request b
 `pilot_pairs(entries)` chuyển danh sách `PilotEntry` thành các cặp đầu vào,
 giữ nguyên thứ tự. Hàm này hỗ trợ kiểm thử tập con, không thay đổi dải ID được giao.
 
-`versions`, timeout và attempts được chuyển vào Pipeline. Giữ nguyên limiter
-dùng chung, retry hữu hạn, version selection và chính sách 403/429. Mặc định của
-Batch Runner là `max_attempts=1`; Pipeline gọi trực tiếp vẫn giữ mặc định cũ.
+`versions`, timeout và attempts được chuyển vào Pipeline. Bộ giới hạn tốc độ
+dùng chung, số lượt thử hữu hạn, lựa chọn lần nộp và chính sách 403/429 được áp dụng.
+Batch Runner dùng mặc định `max_attempts=1`; lời gọi Pipeline trực tiếp có cấu hình riêng.
 
 Lớp điều phối mức thấp cho phép `s2_config=None` để kiểm thử arXiv-only; dictionary bật S2 và được lưu trong run definition. Notebook M1 hiện chạy arXiv và S2 trong hai pha độc lập; thiếu metadata hoặc references thì chưa đạt M1.
-Đổi cấu hình hoặc bật S2 trên batch cũ cần batch_id mới. Logs arXiv-only vẫn đọc
-được. Xem [S2 integration](s2_integration.md); giữ hai progress callbacks hiện có.
+Khi đổi cấu hình hoặc bật S2 trong API thư viện, cần tạo `batch_id` riêng. Nhật ký
+arXiv-only vẫn đọc được. Xem [hướng dẫn S2](s2_integration.md).
 
 ## Nhật ký bền vững
 
@@ -49,7 +49,7 @@ data/<corpus>/
 ```
 
 `batch.json` giữ cố định toàn bộ input, selection theo thứ tự, corpus root đã
-chuẩn hóa, max_ids, versions, timeout, attempts và User-Agent.
+chuẩn hóa, max_ids, lựa chọn lần nộp, timeout, attempts và User-Agent.
 
 Mỗi invocation có UUID attempt riêng, số thứ tự và run ID riêng. JSON attempt gồm:
 
@@ -58,7 +58,7 @@ Mỗi invocation có UUID attempt riêng, số thứ tự và run ID riêng. JSO
 - Danh sách papers theo đúng selection; mỗi paper có state, thời điểm, wall_seconds
   và result nguyên cấu trúc summary của Pipeline.
 - Result giữ rõ queried/cached, downloaded/skipped/failed/blocked, not_found,
-  trạng thái source thực tế, pending versions, references và errors.
+  trạng thái source thực tế, các lần nộp đang chờ, references và errors.
 - stopped, stop_reason và HTTP status khi Pipeline dừng theo chính sách.
 - previous_incomplete_attempts: những attempt cũ còn running, có thể đã bị ngắt.
   Không sửa lại lịch sử cũ hoặc gọi chúng là finished.
@@ -68,7 +68,7 @@ Mỗi invocation có UUID attempt riêng, số thứ tự và run ID riêng. JSO
 
 Log intent được ghi trước HTTP. Callback `on_progress(event, summary_copy)`
 của Pipeline ghi snapshot trước/sau mỗi paper, trước khi paper tiếp theo bắt đầu.
-Trong một paper, Storage tiếp tục checkpoint từng version theo contract v2.
+Trong một paper, Storage tiếp tục checkpoint từng lần nộp theo contract v2.
 
 JSON dùng writer atomic hiện có của Storage: file tạm cùng thư mục, flush/fsync,
 rồi replace. Không ghi logs vào source. Lỗi ghi bắt buộc phát sinh
@@ -92,7 +92,7 @@ snapshot còn running; lần resume ghi nhận nó trong previous_incomplete_att
 Không có kết luận rằng thao tác chưa được checkpoint đã thành công.
 
 403/429 trả về từ Pipeline được ghi stopped, giữ nguyên stop_reason, không chuyển
-paper/version kế tiếp và không tự gọi lại. Chỉ invocation mới với `resume=True`
+bài hoặc lần nộp kế tiếp và không tự gọi lại. Chỉ lượt gọi với `resume=True`
 thể hiện quyết định chạy lại của người vận hành. Với max_attempts > 1, 429 trung gian
 có thể bị Client retry rồi thành công; Pipeline không quan sát được attempt đó.
 
@@ -153,35 +153,28 @@ Metrics được flush cùng các log progress/final hiện có; không thêm st
 vào on_progress. Hard kill có thể làm mất phần chưa flush, vì vậy log running
 không được coi là metrics đầy đủ. Không khôi phục số request từ checkpoint.
 
-Legacy definitions giữ nguyên: ba policy keys max_retry_wait, backoff_base,
-backoff_cap chỉ được thêm vào fingerprint nếu caller chỉ định. Batch cũ vẫn có
-thể Resume với đúng cấu hình max_attempts=1; attempt mới có metrics, log cũ
-không bị sửa hoặc điền ngược số liệu.
+Các khóa chính sách `max_retry_wait`, `backoff_base` và `backoff_cap` chỉ được
+thêm vào dấu vân tay khi bên gọi chỉ định. Tiếp tục một lô đòi hỏi đúng cấu hình
+đã lưu; số liệu HTTP chỉ ghi cho lượt thực thi đã được quan sát.
 
-Để đổi S2 max_attempts từ 1 sang 3, không sửa batch.json và không bỏ fingerprint:
-dùng batch_id mới, cùng corpus_root, cùng danh sách input và log_root. Đặt
-resume=False cho lần đầu của batch mới, sau đó resume=True với đúng cấu hình mới.
+Khi đổi `max_attempts` của API thư viện, không sửa `batch.json` hoặc bỏ qua dấu
+vân tay: dùng `batch_id` riêng với cùng `corpus_root`, danh sách ID và `log_root`.
+Đặt `resume=False` cho lần đầu, sau đó dùng `resume=True` với cấu hình đã lưu.
 Các source/metadata/references hợp lệ được đọc lại và skip qua Storage; không copy,
 xóa hoặc tải đè source. Manifest run_id có thể cập nhật theo lần chạy mới.
 
-Cấu hình S2 mới đề xuất:
-dict(min_interval=2, max_attempts=3, max_retry_wait=60, backoff_base=5,
-     backoff_cap=30, timeout=30, reference_limit=100, max_pages=3).
-Giữ arXiv max_attempts=1 để chính sách dừng tại 403/429 không đổi.
-
 Chỉ một process/writer được dùng corpus. Kiểm tra process cũ đã dừng và review
 cooldown trước khi tiếp tục sau 403/429. Batch API không tự lặp lại attempt.
-Không chạy lệnh live trong lượt triển khai/kiểm thử offline này.
 
 
-## Lịch sử phiên bản và tương thích lô cũ
+## Lịch sử lần nộp và tiếp tục lô
 
-`revision_history=None` bật history cho batch mới. Khi resume, None kế thừa
-cấu hình đã lưu; batch cũ thiếu field này được hiểu là tắt history. False giữ
-định dạng legacy không có field, True lưu `definition.revision_history=true`.
+`revision_history=None` bật truy vấn lịch sử khi tạo lô. Khi tiếp tục, `None` kế thừa
+cấu hình đã lưu; định nghĩa thiếu trường này được hiểu là tắt truy vấn lịch sử.
+`False` không ghi trường, `True` lưu `definition.revision_history=true`.
 Đổi chế độ trên cùng batch ID bị từ chối trước HTTP/ghi log. Muốn bổ sung history
-cho corpus cũ, dùng batch ID mới trên cùng corpus với `revision_history=True`;
-source/discovery tốt tiếp tục được skip và log cũ giữ nguyên.
+cho corpus đã có, dùng batch ID riêng trên cùng corpus với `revision_history=True`;
+source/discovery hợp lệ được bỏ qua và nhật ký đã lưu được giữ nguyên.
 
 Bước history nằm trong hai callback paper hiện có nên attempt wall time,
 paper wall time và bộ đếm HTTP chung bao gồm cả request/pacing/retry history.

@@ -73,11 +73,11 @@ Bài báo chỉ được coi là hoàn tất M1 khi discovery, danh sách phiên
 
 ## Chính sách BBL
 
-Chính sách bbl-exception-v1 được xét riêng cho từng version:
+Chính sách bbl-exception-v1 được xét riêng cho từng lần nộp:
 
-- Nếu cùng version có `.bib`, hoặc `.tex` có lệnh `\bibitem` đang hoạt động ngoài comment TeX, loại `.bbl` khỏi corpus. Giữ bytes `.bbl` cùng checksum trong artifact bên ngoài corpus và ghi lý do.
+- Nếu cùng lần nộp có `.bib`, hoặc `.tex` có lệnh `\bibitem` đang hoạt động ngoài comment TeX, loại `.bbl` khỏi corpus. Giữ bytes `.bbl` cùng checksum trong artifact bên ngoài corpus và ghi lý do.
 - Nếu thiếu cả `.bib` lẫn lệnh `\bibitem`, thử bộ chuyển đổi cục bộ. Chuyển đổi thành công thì loại `.bbl` khỏi corpus, giữ `.bbl` gốc và `.bib` dẫn xuất bên ngoài corpus. Nếu thất bại, giữ nguyên `.bbl` trong corpus kèm mã lý do.
-- Nếu TeX không đọc được để phân loại, không sửa/xóa `.bbl` và không đánh dấu version tuân thủ chính sách.
+- Nếu TeX không đọc được để phân loại, không sửa/xóa `.bbl` và không đánh dấu lần nộp tuân thủ chính sách.
 
 Trường `versions.<version>.bbl_policy` lưu phiên bản chính sách, quyết định cho từng file, đường dẫn tương đối đến index bên ngoài corpus và SHA-256 của index. Index lưu đường dẫn tương đối, checksum `.bbl` gốc, checksum `.bib` dẫn xuất và số entry. Artifact được ghi bền vững, không thay file đã tồn tại có nội dung khác; archive cohort có gói artifact và checksum sidecar riêng.
 

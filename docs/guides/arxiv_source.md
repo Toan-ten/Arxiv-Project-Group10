@@ -1,6 +1,6 @@
 # Tải và trích xuất mã nguồn arXiv
 
-`download_source(mssv, versioned_id, destination)` tải đúng một version từ
+`download_source(mssv, versioned_id, destination)` tải đúng một lần nộp từ
 `https://export.arxiv.org/src/{versioned_id}`. ID bắt buộc có hậu tố, ví dụ
 `2502.09992v1`; legacy ID như `hep-th/9901001v2` được giữ nguyên.
 
@@ -36,7 +36,7 @@ print(result)
 
 - Nhận diện bằng nội dung: tar, tar.gz, ZIP, TeX đơn hoặc TeX đơn nén gzip.
 - Giải nén an toàn file thường `.tex`/`.bib`/`.bbl` vào thư mục tạm; trước khi
-  publish version, áp dụng Chính sách BBL bên dưới. File `.tex`/`.bib` gốc
+  lưu kết quả, áp dụng chính sách BBL bên dưới. File `.tex`/`.bib` gốc
   giữ nguyên bytes và đường dẫn tương đối; không sửa lệnh LaTeX hoặc lấy ảnh/PDF
   vào corpus.
 - TeX đơn được lưu thành `main.tex`. Nhận diện các lệnh TeX phổ biến trong
@@ -67,21 +67,21 @@ print(result)
 `download_source()` nhận `bbl_artifact_dir`; pipeline M1 cấu hình
 `reports/derived_bibliography/bbl-exception-v1`, nằm ngoài corpus. Khi archive
 không chứa `.bbl`, không cần thư mục artifact. Khi có `.bbl`, thiếu cấu hình hoặc
-không ghi được artifact sẽ chặn việc publish version và trả `storage_error`.
+không ghi được artifact sẽ chặn việc lưu lần nộp và trả `storage_error`.
 
-Mỗi `.bbl` được xét theo đúng version:
+Mỗi `.bbl` được xét theo đúng lần nộp:
 
-- Nếu version đã có `.bib`, hoặc file `.tex` có lệnh bibitem ngoài comment TeX,
+- Nếu lần nộp đã có `.bib`, hoặc file `.tex` có lệnh bibitem ngoài comment TeX,
   loại `.bbl` khỏi corpus và lưu bytes nguồn cùng checksum ngoài corpus.
 - Nếu thiếu cả `.bib` lẫn lệnh bibitem, thử chuyển đổi cục bộ. Chuyển đổi thành
   công thì loại `.bbl` khỏi corpus và lưu `.bib` dẫn xuất cùng `.bbl` gốc ngoài
   corpus. Chuyển đổi thất bại thì giữ nguyên `.bbl` trong corpus, ghi mã lý do
   và không thay đổi bytes.
-- Lỗi đọc `.tex` làm quyết định ở trạng thái chưa xác định; version không được
-  publish cho đến khi xử lý lại được.
+- Lỗi đọc `.tex` làm quyết định ở trạng thái chưa xác định; lần nộp không được
+  lưu ở trạng thái hoàn tất cho đến khi xử lý lại được.
 
-Manifest của version có `bbl_policy` và đường dẫn/checksum tới index ngoài corpus.
-Index theo paper/version ghi từng đường dẫn BBL, checksum nguồn, trạng thái,
+Manifest của lần nộp có `bbl_policy` và đường dẫn/checksum tới index ngoài corpus.
+Index theo từng bài và lần nộp ghi đường dẫn BBL, checksum nguồn, trạng thái,
 đường dẫn `.bib` dẫn xuất, checksum dẫn xuất và số entry. Artifact archive cohort
 được tạo riêng, có checksum sidecar và được kiểm tra trong handoff/restore.
 
@@ -96,8 +96,8 @@ hoặc đối chiếu.
 Bất kỳ `.bib`/`.bbl` còn lại sau khi áp dụng chính sách vẫn được lưu; nếu toàn bộ
 BBL được loại sau khi chuyển đổi thành công và không còn file nào thì không tạo
 thư mục đích.
-Kết quả vẫn giữ record version qua MSSV/ID; bước checkpoint sau này cần lưu
-record này, kể cả khi không có TeX.
+Kết quả giữ bản ghi của lần nộp theo MSSV và ID; checkpoint cần lưu bản ghi này,
+kể cả khi không có TeX.
 
 Chưa hỗ trợ gzip lồng nhau, archive lồng nhau, ZIP mã hóa hoặc các định dạng nén
 khác như `.Z`, bz2, xz. Tệp tải tạm không được dùng làm checkpoint giữa các phiên. Không bảo vệ trước process khác cố tình thay đổi

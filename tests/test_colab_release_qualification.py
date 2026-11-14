@@ -110,7 +110,18 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertIn("run_m1_arxiv_member(", phases)
         self.assertIn("run_m1_s2_member(", phases)
         self.assertIn("audit_bbl_sources", phases)
-        self.assertIn("arXiv là nguồn xác nhận bài và danh sách phiên bản", self.text)
+        self.assertIn(
+            "thu thập arXiv → thu thập Semantic Scholar → kiểm toán và xuất bảng",
+            self.text,
+        )
+        for heading in (
+            "Ô 1 — Cấu hình Colab và phạm vi",
+            "Ô 2 — Thu thập arXiv",
+            "Ô 3 — Thu thập Semantic Scholar",
+            "Ô 4 — Kiểm toán, đối soát và xuất bảng",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, self.text)
         self.assertIn("COHORT_LIMIT = None", self.text)
 
     def test_notebook_enables_bounded_s2_429_auto_resume(self):
@@ -138,13 +149,39 @@ class TestUnifiedNotebookContract(unittest.TestCase):
     def test_runtime_pins_match_implementation_commit(self):
         setup = self.code[0]
         expected = re.search(r'M1_RUNTIME_COMMIT = "([0-9a-f]{40})"', setup).group(1)
-        self.assertEqual(expected, "f905c40a1ccdeca16d3243a3e43f1ee5345b723e")
         subprocess.run(["git", "cat-file", "-e", f"{expected}^{{commit}}"],
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
                        cwd=self.root, check=True, capture_output=True)
+        subprocess.run(["git", "diff", "--quiet", expected, "HEAD", "--", "src"],
+                       cwd=self.root, check=True, capture_output=True)
+        colab_guide = (self.root / "docs" / "guides" / "colab.md").read_text(encoding="utf-8")
+        self.assertIn(expected, colab_guide)
         for module in ("session_evidence.py", "kaggle_candidates.py", "m1_workflow.py", "bbl_handling.py"):
             self.assertTrue((self.root / "src" / module).is_file())
+        pinned_api = subprocess.check_output(
+            ["git", "show", f"{expected}:src/m1_phases.py"], cwd=self.root, text=True,
+        )
+        self.assertIn('reference_strategy="batch_m1"', pinned_api)
+        self.assertIn('auto_resume_429=True', pinned_api)
+        subprocess.run(["git", "cat-file", "-e", f"{expected}:src/s2_batch.py"],
+                       cwd=self.root, check=True, capture_output=True)
+
+    def test_notebook_selects_batch_m1_and_isolates_experiment_data(self):
+        setup = self.code[0]
+        s2_cell = next(cell for cell in self.code if "run_m1_s2_member(" in cell)
+        self.assertIn('reference_strategy="batch_m1"', s2_cell)
+        self.assertIn('print("Chiến lược S2: batch_m1")', setup)
+        self.assertIn("/content/drive/MyDrive/M1-pipeline-optimization-pilot", setup)
+        self.assertIn("/content/drive/MyDrive/M1-pipeline-optimization-full", setup)
+        self.assertNotIn("M1-s2-request-optimization", setup)
+        colab_url = (
+            "https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/"
+            "blob/feat%2Fs2-request-optimization/notebooks/"
+            "m1_pipeline_thu_thap_va_kiem_toan.ipynb"
+        )
+        self.assertIn(colab_url, self.text)
+        self.assertIn(colab_url, (self.root / "README.md").read_text(encoding="utf-8"))
 
     def test_s2_and_audit_are_mandatory_and_fail_closed(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")

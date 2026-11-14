@@ -18,6 +18,7 @@ Arxiv-Project-Group10/
 ├── src/
 │   ├── m1_workflow.py                # Đường import dùng trong notebook
 │   ├── m1_phases.py                  # API tương thích và điều phối tuần tự
+│   ├── s2_batch.py                   # Batch metadata/references theo phạm vi M1
 │   ├── m1_phase_modules/             # Triển khai nội bộ theo trách nhiệm
 │   │   ├── common.py
 │   │   ├── checkpoint.py
@@ -40,13 +41,13 @@ Arxiv-Project-Group10/
 
 ## Các lớp API M1
 
-Notebook nhập `build_member_selection`, `run_m1_arxiv_member`, `run_m1_s2_member` và `run_m1_audit_member` từ `src.m1_workflow`. Module này xuất lại các điểm vào của `src.m1_phases`, là lớp API giữ tương thích với các bên gọi hiện có. Hàm `run_m1_member` nằm tại lớp này và gọi tuần tự arXiv → S2 → kiểm toán, dừng chuỗi khi pha trước báo dừng.
+Notebook nhập `build_member_selection`, `run_m1_arxiv_member`, `run_m1_s2_member` và `run_m1_audit_member` từ `src.m1_workflow`. Module này xuất lại các điểm vào của `src.m1_phases`. Hàm `run_m1_member` gọi tuần tự ba pha trên cùng phạm vi ID, dùng `batch_m1` cho S2 và dừng chuỗi khi pha trước báo dừng.
 
 Gói `src.m1_phase_modules` chứa triển khai nội bộ. Bên gọi vận hành tiếp tục sử dụng các đường import công khai; chữ ký của hàm nội bộ không phải hợp đồng dành cho notebook.
 
 | Module nội bộ | Trách nhiệm |
 |---|---|
-| `common.py` | Ngoại lệ M1, phiên bản schema, kiểm tra secret và lựa chọn ID/cohort tất định |
+| `common.py` | Ngoại lệ M1, lược đồ lưu trữ, kiểm tra secret và lựa chọn ID/cohort tất định |
 | `checkpoint.py` | Đọc/ghi JSON, SHA-256, selection, trạng thái bắt đầu, khóa ghi và ghi nhận phiên |
 | `arxiv_phase.py` | Chuẩn bị và kiểm tra xuất xứ Kaggle, điều phối arXiv, điểm khôi phục mã nguồn và tự tiếp tục sau discovery 429 |
 | `s2_evidence.py` | Manifest S2, đọc/ghi bằng chứng, đối chiếu trạng thái, định danh và checksum |
@@ -56,7 +57,7 @@ Gói `src.m1_phase_modules` chứa triển khai nội bộ. Bên gọi vận hà
 
 Các pha dùng `common` và `checkpoint`; S2 và kiểm toán dùng chung `s2_evidence`. Pha kiểm toán còn dùng bộ kiểm tra xuất xứ arXiv và bộ tổng hợp benchmark. Các module nội bộ không import ngược về `m1_phases` hoặc `m1_workflow`, nhằm tránh vòng phụ thuộc.
 
-`FastProductionRunner`, lớp lưu trữ, các mô-đun giao tiếp với nhà cung cấp và bộ ghi nhận phép đo tiếp tục nằm trong các module nền. Lớp `m1_phases` truyền phụ thuộc cần thiết tại thời điểm gọi để giữ cơ chế thay thế phụ thuộc trong kiểm thử (monkeypatch); ví dụ, thay `FastProductionRunner` hoặc `_mark_archive_arxiv_only` trong kiểm thử vẫn tác động tới lời gọi qua lớp API. Phần triển khai gộp lịch sử trong `m1_workflow.py` được giữ ở phạm vi riêng; notebook hiện hành dùng các pha độc lập.
+`FastProductionRunner`, lớp lưu trữ, các mô-đun giao tiếp với nhà cung cấp và bộ ghi nhận phép đo nằm trong các module nền. Lớp `m1_phases` truyền phụ thuộc cần thiết tại thời điểm gọi để giữ cơ chế thay thế phụ thuộc trong kiểm thử. `m1_workflow.py` chỉ xuất điểm vào công khai; phần xử lý nằm trong `m1_phase_modules`.
 
 Cấu trúc này mô tả mã trong checkout đang đọc. Runtime Colab do SHA đã ghim trong notebook quyết định; xem [quy tắc ghim runtime](../guides/colab.md).
 
@@ -68,7 +69,7 @@ Cấu trúc này mô tả mã trong checkout đang đọc. Runtime Colab do SHA 
 | `config/pilots/` | Tập con ID dùng để kiểm tra quy trình | `tests/test_pilot_sets.py` |
 | `notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb` | Điểm vào Colab duy nhất cho M1 | `tests/test_colab_release_qualification.py` |
 | `src/` | Xác minh arXiv, tải source, lấy dữ liệu S2, lưu trữ, kiểm toán và đo lường | Kiểm thử ngoại tuyến theo mô-đun |
-| `src/m1_phases.py` | API tương thích và điều phối các pha | `tests/test_m1_workflow.py`, `tests/test_m1_refactor_equivalence.py` |
+| `src/m1_phases.py` | API công khai và điều phối các pha | `tests/test_m1_workflow.py`, `tests/test_m1_refactor_equivalence.py` |
 | `src/m1_phase_modules/` | Các trách nhiệm nội bộ của M1 | `tests/test_m1_phases.py`, `tests/test_m1_arxiv_phase_policy.py`, `tests/test_m1_phase_cleanup.py` |
 | `scripts/aggregate_m1_group.py` | Kiểm tra độ bao phủ ID và tính toàn vẹn archive | `tests/test_group_aggregator.py` |
 | `scripts/aggregate_m1_group_benchmark.py` | Tổng hợp phép đo theo thành viên và phiên | `tests/test_group_benchmark_aggregator.py` |

@@ -41,10 +41,12 @@ def sampling_config(corpus_root, sample_interval=0.1, disk_interval=30.0, disk_r
     )
 
 
-def directory_bytes(root):
+def directory_bytes(root, *, cancelled=None):
     """Strict logical file size; missing root is empty, unreadable is unknown."""
     total, pending = 0, [Path(root)]
     while pending:
+        if cancelled is not None and cancelled():
+            raise OSError("Disk scan cancelled")
         path = pending.pop()
         try:
             info = path.lstat()
@@ -162,69 +164,145 @@ class ResourceSampler:
         self.final_corpus_bytes = None
         self._stop = threading.Event()
         self._threads = []
+        self._lock = threading.RLock()
+        self._closed = False
+        self._closed_event = threading.Event()
+        self._disk_roots = {
+            root: {
+                "latest_status": "not_collected", "latest_bytes": None,
+                "latest_error_type": None, "final_status": "not_attempted",
+                "final_bytes": None, "final_error_type": None,
+            }
+            for root in self.config["disk_roots"]
+        }
 
     def sample_ram(self):
+        # Read outside the lock: a stuck backend must not block shutdown/report.
         try:
             value = self.read_ram()
-            self.ram.add(value, self.clock() - self.started)
+            with self._lock:
+                if not self._closed:
+                    self.ram.add(value, self.clock() - self.started)
         except Exception as exc:
-            self.ram.failed("backend_missing" if isinstance(exc, ImportError) else "ram_read_failed")
+            with self._lock:
+                if not self._closed:
+                    self.ram.failed("backend_missing" if isinstance(exc, ImportError) else "ram_read_failed")
         try:
             value = self.read_system_ram()
-            self.system_ram.add(value, self.clock() - self.started)
+            with self._lock:
+                if not self._closed:
+                    self.system_ram.add(value, self.clock() - self.started)
         except Exception as exc:
-            self.system_ram.failed(
-                "backend_missing" if isinstance(exc, ImportError) else "ram_read_failed"
-            )
+            with self._lock:
+                if not self._closed:
+                    self.system_ram.failed(
+                        "backend_missing" if isinstance(exc, ImportError) else "ram_read_failed"
+                    )
+
+    def _record_disk_root(self, root, *, final, status, size=None, error_type=None):
+        prefix = "final" if final else "latest"
+        with self._lock:
+            if self._closed:
+                return
+            entry = self._disk_roots[root]
+            entry[f"{prefix}_status"] = status
+            entry[f"{prefix}_bytes"] = size
+            entry[f"{prefix}_error_type"] = error_type
+            if final and root == self.config["corpus_root"] and status == "collected":
+                self.final_corpus_bytes = size
+
+    def _read_disk_root(self, root, *, final):
+        if self.read_disk is directory_bytes:
+            cancel = self._closed_event.is_set if final else self._stop.is_set
+            return directory_bytes(Path(root), cancelled=cancel)
+        return self.read_disk(Path(root))
 
     def sample_disk(self, *, final=False):
         sizes, failed = {}, False
         for root in self.config["disk_roots"]:
+            self._record_disk_root(root, final=final, status="scanning")
             try:
-                value = self.read_disk(Path(root))
+                value = self._read_disk_root(root, final=final)
                 if type(value) is not int or value < 0:
                     raise ValueError("Invalid size")
                 sizes[root] = value
-            except Exception:
+                self._record_disk_root(root, final=final, status="collected", size=value)
+            except Exception as exc:
                 failed = True
-        if final:
-            self.final_corpus_bytes = sizes.get(self.config["corpus_root"])
-        if failed:
-            self.disk.failed("disk_scan_failed")
-            return
+                self._record_disk_root(
+                    root, final=final, status="failed", error_type=type(exc).__name__,
+                )
+        with self._lock:
+            if self._closed:
+                return
+            if failed:
+                self.disk.failed("disk_scan_failed")
+                return
+            try:
+                self.disk.add(sum(sizes.values()), self.clock() - self.started)
+            except Exception:
+                self.disk.failed("disk_scan_failed")
+
+    def _sample_final_corpus(self):
+        root = self.config["corpus_root"]
+        self._record_disk_root(root, final=True, status="scanning")
         try:
-            self.disk.add(sum(sizes.values()), self.clock() - self.started)
-        except Exception:
-            self.disk.failed("disk_scan_failed")
+            value = self._read_disk_root(root, final=True)
+            if type(value) is not int or value < 0:
+                raise ValueError("Invalid size")
+            self._record_disk_root(root, final=True, status="collected", size=value)
+        except Exception as exc:
+            self._record_disk_root(
+                root, final=True, status="failed", error_type=type(exc).__name__,
+            )
 
     def _loop(self, interval, callback):
         while not self._stop.wait(interval):
             callback()
 
     def start(self):
-        self.sample_disk()
         self.sample_ram()
         for interval, callback in (
             (self.config["ram_interval_seconds"], self.sample_ram),
             (self.config["disk_interval_seconds"], self.sample_disk),
         ):
-            thread = threading.Thread(target=self._loop, args=(interval, callback), daemon=True)
+            def probe(interval=interval, callback=callback):
+                if callback == self.sample_disk:
+                    callback()
+                self._loop(interval, callback)
+            thread = threading.Thread(target=probe, daemon=True)
             try:
                 thread.start()
                 self._threads.append((thread, callback == self.sample_ram))
             except RuntimeError:
                 (self.ram if callback == self.sample_ram else self.disk).failed("sampler_thread_failed")
 
-    def stop(self):
+    def stop(self, *, timeout=2.0):
+        """Bound cleanup waits and freeze samples, including after interruption."""
+        if not finite(timeout):
+            raise ValueError("Invalid sampler shutdown timeout")
         self._stop.set()
-        for thread, is_ram in self._threads:
-            if is_ram:
-                thread.join()
-        self.sample_ram()  # Không chờ quét ổ đĩa có thể chậm trước bước này.
-        for thread, is_ram in self._threads:
-            if not is_ram:
-                thread.join()
-        self.sample_disk(final=True)
+        deadline = time.perf_counter() + timeout
+        try:
+            join_deadline = min(deadline, time.perf_counter() + min(0.25, timeout / 4))
+            for thread, _ in self._threads:
+                thread.join(timeout=max(0.0, join_deadline - time.perf_counter()))
+            if time.perf_counter() < deadline:
+                def final_sample():
+                    self.sample_ram()
+                    if any(thread.is_alive() for thread, _ in self._threads):
+                        self._sample_final_corpus()
+                    else:
+                        self.sample_disk(final=True)
+                final_thread = threading.Thread(target=final_sample, daemon=True)
+                final_thread.start()
+                final_thread.join(timeout=max(0.0, deadline - time.perf_counter()))
+        finally:
+            with self._lock:
+                if self.final_corpus_bytes is None:
+                    self.disk.failed("final_sample_unavailable")
+                self._closed = True
+                self._closed_event.set()
 
     def report(self):
         ram = self.ram.report()
@@ -246,6 +324,24 @@ class ResourceSampler:
             final_corpus_bytes=self.final_corpus_bytes,
             final_corpus_status="collected" if self.final_corpus_bytes is not None else "not_collected",
             peak_method="sampled maximum; may miss short-lived archives/files",
+            root_samples={
+                root: {
+                    key: ("not_collected" if value == "scanning" and self._closed else value)
+                    for key, value in entry.items()
+                } | {
+                    "latest_error_type": (
+                        "scan_in_progress_at_shutdown"
+                        if entry["latest_status"] == "scanning" and self._closed
+                        else entry["latest_error_type"]
+                    ),
+                    "final_error_type": (
+                        "scan_in_progress_at_shutdown"
+                        if entry["final_status"] == "scanning" and self._closed
+                        else entry["final_error_type"]
+                    ),
+                }
+                for root, entry in self._disk_roots.items()
+            },
         )
         disk.pop("average_method")
         disk.pop("average_bytes")

@@ -90,6 +90,19 @@ def metadata_result(result, identifier):
                  "metadata_failure")
         _require(status != "rate_limited" or http == 429, "rate_limit_status")
         _require(http != 429 or status == "rate_limited", "rate_limit_status")
+    fallback = result.get("batch_fallback")
+    if fallback is not None:
+        from src.s2_batch import _snapshot
+        _require(status == "found" and isinstance(fallback, dict)
+                 and type(fallback.get("references_present")) is bool,
+                 "batch_fallback_shape")
+        original = copy.deepcopy(result["paper"])
+        if fallback["references_present"]:
+            original["references"] = fallback.get("references")
+        else:
+            _require(fallback.get("references") is None, "batch_fallback_absent")
+        _snapshot_value, reason = _snapshot(identifier, original)
+        _require(reason is not None and reason == fallback.get("reason"), "batch_fallback_reason")
     return result
 
 

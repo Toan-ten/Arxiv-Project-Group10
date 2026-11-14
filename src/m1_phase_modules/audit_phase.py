@@ -1,4 +1,4 @@
-"""Offline M1 reconciliation, audit and export gating."""
+"""M1 reconciliation, verified reference-date enrichment and export gating."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -306,14 +306,40 @@ def run_m1_audit_member(
         )
         export_result = None
         export_error = None
+        reference_dates = None
+        from src.s2_quality import assess_references, summarize_quality
+        reference_quality = summarize_quality({
+            aid: assess_references(metadata, references)
+            for aid, (metadata, references) in s2_evidence.items()
+        })
         if data_complete:
-            destination = Path(output_dir).expanduser().resolve() if output_dir else drive / "exports" / selection["fingerprint"]
-            export_result = export_official_datasets(
-                runner.store,
-                [tuple(pair) for pair in selection["pairs"]],
-                destination,
-                require_m1_complete=True,
-            )
+            from src.reference_dates import enrich_reference_dates
+            from src import http_metrics
+            import time
+
+            date_metrics = http_metrics.HttpMetrics()
+            date_started = time.perf_counter()
+            with http_metrics.collect(date_metrics):
+                reference_dates = enrich_reference_dates(
+                    runner.store, [tuple(pair) for pair in selection["pairs"]],
+                    phase_root / "reference_dates", should_stop=budget.should_stop,
+                )
+            reference_dates["wall_seconds"] = time.perf_counter() - date_started
+            reference_dates["http_metrics"] = date_metrics.snapshot(complete=True)
+            # Full evidence stays in the checksum-verified cache, not every report.
+            reference_dates.pop("entries", None)
+            if reference_dates["stopped"]:
+                data_complete = False
+                export_error = "Export deferred: reference-date enrichment stopped; resume with the same selection."
+            else:
+                destination = Path(output_dir).expanduser().resolve() if output_dir else drive / "exports" / selection["fingerprint"]
+                export_result = export_official_datasets(
+                    runner.store,
+                    [tuple(pair) for pair in selection["pairs"]],
+                    destination,
+                    require_m1_complete=True,
+                    reference_date_cache=phase_root / "reference_dates",
+                )
         else:
             export_error = "Export blocked: both phase checkpoints and full M1 audit are required."
         report = {
@@ -328,6 +354,8 @@ def run_m1_audit_member(
             "kaggle_evidence": kaggle_evidence_summary,
             "kaggle_evidence_issues": kaggle_evidence_issues,
             "s2_issues": s2_issues,
+            "reference_quality": reference_quality,
+            "reference_dates": reference_dates,
             "merge_conflicts": merge_conflicts,
             "merged_s2_ids": len(merged_ids),
             "bbl_audit": bbl_audit,
@@ -340,7 +368,8 @@ def run_m1_audit_member(
             "export_status": "exported" if export_result else "blocked",
             "export": export_result,
             "export_error": export_error,
-            "stop_reason": None if data_complete else "incomplete_or_conflicting_phase_evidence",
+            "stop_reason": ("reference_date_enrichment_stopped" if reference_dates and reference_dates["stopped"]
+                            else None if data_complete else "incomplete_or_conflicting_phase_evidence"),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         report_path = runner.reports_dir / f"m1_audit_{selection['mssv']}_{selection['fingerprint'][:16]}.json"
