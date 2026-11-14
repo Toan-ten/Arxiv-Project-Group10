@@ -182,3 +182,14 @@ cài `requirements-colab.txt`, kiểm tra Drive, chạy 3 ID arXiv-first với t
 versions/history và thử Resume. Các ô gọi mạng mặc định tắt; chỉ một writer.
 Corpus/logs/reports ở Drive ngoài Git repository. Chưa thực thi notebook trên
 Colab; pilot arXiv-only không thay benchmark M1 cuối gồm cả arXiv và S2.
+
+## M2 — offline parsing
+
+Luồng M2 đọc corpus M1 đã tải và xuất ba bảng elements, hierarchy, bibtex;
+không gọi API và không sửa source/checkpoint M1. Xem [hướng dẫn M2](docs/m2.md)
+về dependencies, schema, trạng thái lỗi và giới hạn parser.
+
+    python -X utf8 -B -m scripts.run_m2 --corpus 'D:\path\to\corpus' --output 'D:\separate-output' --paper 2508.07980 --version v2
+
+Bỏ --paper/--version để chạy toàn bộ corpus. Output phải nằm ngoài repository.
+Đây là luồng thử để review, chưa phải xác nhận hoàn tất M2.
