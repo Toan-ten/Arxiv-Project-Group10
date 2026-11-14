@@ -201,7 +201,12 @@ def _bbl_setup(text):
         if text[pos] != "\\":
             raise ParseError("Unsupported .bbl text outside bibliography items")
         name, pos = command(text, pos)
-        if name in {"makeatletter", "makeatother", "relax", "bibcommenthead"} or name in noops:
+        if name in {"makeatletter", "makeatother", "relax", "bibcommenthead"}:
+            continue
+        if name in noops:
+            cursor = skip_space(text, pos)
+            if text[cursor:cursor + 2] == "{}":
+                pos = cursor + 2
             continue
         if name == "itemsep":
             match = re.match(r"\s*=\s*-?\d+(?:\.\d+)?(?:pt|em|ex|mm|cm)\b", text[pos:])
@@ -209,26 +214,81 @@ def _bbl_setup(text):
                 raise ParseError("Unsupported .bbl itemsep value")
             pos += match.end()
             continue
+        if name == "urlstyle":
+            style, pos = group(text, skip_space(text, pos))
+            if style not in {"rm", "sf", "tt", "same"}:
+                raise ParseError("Unsupported .bbl URL style")
+            continue
+        if name in {"mciteSetBstSublistMode", "mciteSetBstMaxWidthForm",
+                    "mciteSetBstSublistLabelBeginEnd", "mciteSetBstMidEndSepPunct"}:
+            arity = {"mciteSetBstSublistMode": 1,
+                     "mciteSetBstMaxWidthForm": 2,
+                     "mciteSetBstSublistLabelBeginEnd": 3,
+                     "mciteSetBstMidEndSepPunct": 3}[name]
+            arguments = []
+            for _ in range(arity):
+                argument, pos = group(text, skip_space(text, pos))
+                arguments.append(argument)
+            allowed = {
+                "mciteSetBstSublistMode": {("f",)},
+                "mciteSetBstMaxWidthForm": {("subitem", r"(\alph{mcitesubitemcount})")},
+                "mciteSetBstSublistLabelBeginEnd": {
+                    (r"\mcitemaxwidthsubitemform\space", r"\relax", r"\relax")
+                },
+                "mciteSetBstMidEndSepPunct": {
+                    (r"\mcitedefaultmidpunct", r"\mcitedefaultendpunct",
+                     r"\mcitedefaultseppunct")
+                },
+            }
+            if tuple(arguments) not in allowed[name]:
+                raise ParseError("Unsupported .bbl citation-list presentation setup: " + name)
+            continue
+        if name == "setlength":
+            length, pos = group(text, skip_space(text, pos))
+            value, pos = group(text, skip_space(text, pos))
+            if (length not in {r"\itemsep", r"\parsep", r"\parskip"}
+                    or not re.fullmatch(r"\s*-?\d+(?:\.\d+)?(?:pt|em|ex|mm|cm)\s*", value)):
+                raise ParseError("Unsupported .bbl setlength value")
+            continue
         if name == "csname":
             hook = re.match(r"\s*PreBibitemsHook\s*\\endcsname\b", text[pos:])
             if hook:
                 pos += hook.end()
                 continue
-            match = re.match(r"\s*url@samestyle\s*\\endcsname\b", text[pos:])
+            match = re.match(
+                r"\s*(?:url@samestyle|url@rmstyle)\s*\\endcsname\b", text[pos:])
             if not match:
                 raise ParseError("Unsupported .bbl setup csname")
             pos += match.end()
             continue
         if name == "def":
             target, pos = command(text, skip_space(text, pos))
-            if not target.startswith("mn@"):
+            if target.startswith("mn@"):
+                brace = text.find("{", pos)
+                if brace < 0 or len(text[pos:brace]) > 120:
+                    raise ParseError("Malformed .bbl presentation definition")
+                replacement, pos = group(text, brace)
+                if re.search(r"\\(?:bibitem|harvarditem|entry|input|include)\b|\\(?:begin|end)\s*\{thebibliography\}", replacement):
+                    raise ParseError("Structural command in .bbl presentation definition")
+                continue
+            if target == "gobbledotblock":
+                match = re.match(r"\s*,\s*\{\s*\}", text[pos:])
+                if not match:
+                    raise ParseError("Unsupported .bbl punctuation helper definition")
+                pos += match.end()
+                continue
+            parameters = re.match(r"\s*#1\s*", text[pos:])
+            if target not in {"au", "ed", "yr", "at", "jt", "bt", "bvol",
+                              "vol", "pg", "publ", "arxiv", "org", "st",
+                              "@biblabel"} or not parameters:
                 raise ParseError("Unsupported .bbl setup definition: " + target)
-            brace = text.find("{", pos)
-            if brace < 0 or len(text[pos:brace]) > 120:
-                raise ParseError("Malformed .bbl presentation definition")
+            brace = pos + parameters.end()
             replacement, pos = group(text, brace)
-            if re.search(r"\\(?:bibitem|harvarditem|entry|input|include)\b|\\(?:begin|end)\s*\{thebibliography\}", replacement):
-                raise ParseError("Structural command in .bbl presentation definition")
+            normalized = re.sub(r"\s+", "", replacement)
+            if normalized not in {
+                    "#1", r"\textit{#1}", r"\textbf{#1}",
+                    r"\textsc{#1}", r"\emph{#1}", "#1."}:
+                raise ParseError("Unsupported .bbl presentation definition: " + target)
             continue
         if name in {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}:
             pos += int(text[pos:pos + 1] == "*")
@@ -246,8 +306,31 @@ def _bbl_setup(text):
                     value, pos = group(text, pos, "[", "]")
                     arguments.append(value)
             replacement, pos = group(text, pos)
+            mcite_arities = {
+                "mciteSetBstSublistMode": "1",
+                "mciteSetBstMaxWidthForm": "2",
+                "mciteSetBstSublistLabelBeginEnd": "3",
+                "mciteSetBstMidEndSepPunct": "3",
+            }
+            target_name = target.lstrip("\\")
             if (not arguments or arguments == ["0"]) and replacement.strip() in ("", r"\relax"):
-                noops.add(target.lstrip("\\"))
+                noops.add(target_name)
+            elif target_name in mcite_arities:
+                if arguments != [mcite_arities[target_name]] or replacement.strip():
+                    raise ParseError("Unsupported .bbl mcite setup definition: " + target_name)
+            elif target_name in {"mciteBstWouldAddEndPuncttrue",
+                                 "mciteBstWouldAddEndPunctfalse"}:
+                expected = {
+                    "mciteBstWouldAddEndPuncttrue": r"\def\EndOfBibitem{\unskip.}",
+                    "mciteBstWouldAddEndPunctfalse": r"\let\EndOfBibitem\relax",
+                }
+                if arguments or re.sub(r"\s+", "", replacement) != expected[target_name]:
+                    raise ParseError("Unsupported .bbl mcite punctuation definition")
+                noops.add(target_name)
+            elif target_name == "natexlab":
+                if arguments != ["1"] or replacement.strip() != "#1":
+                    raise ParseError("Unsupported .bbl natbib label definition")
+                noops.add("natexlab")
         elif name == "let":
             target, pos = command(text, skip_space(text, pos))
             if target in {"bibitem", "begin", "end"}:
@@ -265,7 +348,8 @@ def _bbl_setup(text):
             comparator, cursor = command(text, skip_space(text, cursor))
             definition, cursor = command(text, skip_space(text, cursor))
             defined, cursor = command(text, skip_space(text, cursor))
-            if target == "xfnm" and comparator == "relax" and definition == "def" and defined == "xfnm":
+            if (target == "xfnm" and comparator in {"relax", "undefined"}
+                    and definition == "def" and defined == "xfnm"):
                 match = re.match(r"\s*\[#1\]\s*\{\\unskip,\\space#1\}\s*\\fi\b", text[cursor:])
                 if not match:
                     raise ParseError("Unsupported .bbl xfnm definition")
@@ -279,7 +363,7 @@ def _bbl_setup(text):
                 raise ParseError("Unsupported .bbl setup ifx parameters: " + target)
             replacement, cursor = group(text, brace)
             commands = set(re.findall(r"\\([A-Za-z@]+)", replacement))
-            if not commands <= {"relax", "unskip", "textbf", "textit", "textsf", "url"} or re.search(r"#(?!1)|[{}]", re.sub(r"\{[^{}]*\}", "", replacement)):
+            if not commands <= {"relax", "unskip", "textbf", "textit", "textsf", "url", "burl"} or re.search(r"#(?!1)|[{}]", re.sub(r"\{[^{}]*\}", "", replacement)):
                 raise ParseError("Unsupported .bbl setup ifx replacement: " + target)
             terminator, cursor = command(text, skip_space(text, cursor))
             if terminator != "fi":
@@ -292,6 +376,27 @@ def _bbl_setup(text):
             if identity:
                 pos += identity.end()
                 continue
+            style_guard = re.match(
+                r"\s*\\ifx\s*\\csname\s+urlstyle\\endcsname\s*\\relax"
+                r"(.*?)\\else(.*?)\\fi\b", text[pos:], re.S)
+            if style_guard and all(re.fullmatch(
+                    r"\s*(?:\\urlstyle\{(?:rm|sf|tt|same)\}\s*)?",
+                    branch) for branch in style_guard.groups()):
+                pos += style_guard.end()
+                continue
+            href_guard = re.match(
+                r"\s*\\ifx\s*\\csname\s+href\\endcsname\s*\\relax"
+                r"(.*?)\\else(.*?)\\fi\b", text[pos:], re.S)
+            if href_guard:
+                branches = tuple(re.sub(r"\s+", "", branch)
+                                 for branch in href_guard.groups())
+                expected = (
+                    r"\DeclareUrlCommand\doi{\urlstyle{rm}}\def\eprint#1#2{#2}",
+                    r"\def\doi#1{\href{https://doi.org/#1}{\nolinkurl{#1}}}\let\eprint\href",
+                )
+                if branches == expected:
+                    pos += href_guard.end()
+                    continue
             guard = re.match(r"\s*\\ifx\s*\\csname\s+urlstyle\\endcsname\s*\\relax(.*?)\\else(.*?)\\fi\b",
                              text[pos:], re.S)
             if not guard:
@@ -299,16 +404,19 @@ def _bbl_setup(text):
                 # patterns exclude structural changes or conditional items.
                 literal = re.match(
                     r"\s*\\ifx\s*\\csname\s+url\\endcsname\s*\\relax\s*"
-                    r"\\def\s*\\url\s*#1\s*\{(?:\{\\tt\s+#1\}|\\texttt\s*\{#1\})\}\s*\\fi\b", text[pos:])
+                        r"\\def\s*\\url\s*#1\s*\{(?:\{\\tt\s+#1\}|\\texttt\s*\{#1\}|\\burl\s*\{#1\})\}\s*\\fi\b", text[pos:])
                 prefix = re.match(
                     r"\s*\\ifx\s*\\csname\s+urlprefix\\endcsname\s*\\relax\s*"
-                    r"\\def\s*\\urlprefix\s*\{URL \}\s*\\fi\b", text[pos:])
+                        r"\\def\s*\\urlprefix\s*\{(?:URL: |URL |Available at )\}\s*\\fi\b", text[pos:])
+                doi_prefix = re.match(
+                    r"\s*\\ifx\s*\\csname\s+doiprefix\\endcsname\s*\\relax\s*"
+                    r"\\def\s*\\doiprefix\s*\{(?:DOI: | )\}\s*\\fi\b", text[pos:])
                 href = re.match(
                     r"\s*\\ifx\s*\\csname\s+href\\endcsname\s*\\relax\s*"
                     r"\\def\s*\\href\s*#1\s*#2\s*\{#2\}\s*"
                     r"\\def\s*\\path\s*#1\s*\{#1\}\s*\\fi\b", text[pos:])
-                if literal or prefix or href:
-                    pos += (literal or prefix or href).end()
+                if literal or prefix or doi_prefix or href:
+                    pos += (literal or prefix or doi_prefix or href).end()
                     continue
                 raise ParseError("Unsupported .bbl setup conditional")
             for branch in guard.group(1, 2):
@@ -377,6 +485,31 @@ def _bbl_comments(text):
     return result
 
 
+def _normalize_mcite_wrapper(text: str) -> str:
+    """Normalize the exact static mcite alias used for thebibliography."""
+    text = _bbl_comments(text)
+    start_alias = re.compile(
+        r"\\providecommand\s*\*?\s*\\mcitethebibliography\s*\{\s*\\thebibliography\s*\}"
+    )
+    end_alias = re.compile(
+        r"\\csname\s*@ifundefined\s*\\endcsname\s*"
+        r"\{\s*endmcitethebibliography\s*\}\s*"
+        r"\{\s*\\let\s*\\endmcitethebibliography\s*\\endthebibliography\s*\}\s*\{\s*\}"
+    )
+    starts, ends = list(start_alias.finditer(text)), list(end_alias.finditer(text))
+    begin_envs = list(re.finditer(r"\\begin\s*\{mcitethebibliography\}", text))
+    end_envs = list(re.finditer(r"\\end\s*\{mcitethebibliography\}", text))
+    if not (len(starts) == len(ends) == len(begin_envs) == len(end_envs) == 1):
+        raise ParseError("Unsupported .bbl mcite bibliography wrapper")
+    if not (starts[0].start() < ends[0].start() < begin_envs[0].start() < end_envs[0].start()):
+        raise ParseError("Unsupported .bbl mcite bibliography wrapper order")
+    text = start_alias.sub("", text, count=1)
+    text = end_alias.sub("", text, count=1)
+    text = re.sub(r"\\begin\s*\{mcitethebibliography\}", r"\\begin{thebibliography}", text, count=1)
+    text = re.sub(r"\\end\s*\{mcitethebibliography\}", r"\\end{thebibliography}", text, count=1)
+    return text
+
+
 def parse_bbl(text: str, *, enriched: bool = False) -> list[dict]:
     """Read one static thebibliography list; never execute .bbl control code."""
     from .bbl_formats import enrich_entry, parse_amsrefs, parse_harvard
@@ -387,7 +520,10 @@ def parse_bbl(text: str, *, enriched: bool = False) -> list[dict]:
     if re.search(r"\\harvarditem\b", text):
         entries = parse_harvard(text)
         return [enrich_entry(entry) for entry in entries] if enriched else entries
-    if re.search(r"\\refsection\b", text) and re.search(r"\\entry\b", text):
+    if "mcitethebibliography" in text or "endmcitethebibliography" in text:
+        text = _normalize_mcite_wrapper(text)
+    if (re.search(r"\\(?:refsection|datalist)\b", text)
+            and re.search(r"\\entry\b", text)):
         from .biblatex import parse_biblatex
         entries = parse_biblatex(text)
         return [enrich_entry(entry) for entry in entries] if enriched else entries
@@ -446,7 +582,9 @@ def parse_bbl(text: str, *, enriched: bool = False) -> list[dict]:
             raise ParseError("Unsafe/empty .bbl citation key")
         if r"\bibinfo" in entry["raw"]:
             _explicit_bibinfo(entry)
-    return [enrich_entry(entry) for entry in entries] if enriched else entries
+    pdi_macros = bool(re.search(r"\\def\s*\\au\s*#1", text)
+                      and re.search(r"\\def\s*\\at\s*#1", text))
+    return [enrich_entry(entry, pdi_macros=pdi_macros) for entry in entries] if enriched else entries
 
 
 def _norm(value):

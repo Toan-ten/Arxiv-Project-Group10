@@ -146,7 +146,7 @@ def parse_amsrefs(text: str) -> list[dict]:
     return entries
 
 
-def enrich_entry(entry: dict) -> dict:
+def enrich_entry(entry: dict, *, pdi_macros: bool = False) -> dict:
     """Extract explicitly labelled fields while retaining original raw evidence."""
     from .bibliography import plain
 
@@ -213,6 +213,17 @@ def enrich_entry(entry: dict) -> dict:
         values = _command_values(raw, source)
         if values:
             assign(target, values[0], "publisher_macro")
+    if pdi_macros:
+        for source, target in (("at", "title"), ("bt", "title"),
+                               ("jt", "journal"), ("yr", "year")):
+            values = _command_values(raw, source)
+            if values:
+                assign(target, values[0], "publisher_macro")
+        people = _command_values(raw, "au")
+        if people and all(plain(person) for person in people):
+            entry["authors"] = [plain(person) for person in people]
+            methods["authors"] = "publisher_macro"
+            source_values["authors"] = people
     people = _command_values(raw, "bauthor")
     if people:
         names = []

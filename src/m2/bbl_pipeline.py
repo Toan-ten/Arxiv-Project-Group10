@@ -20,6 +20,29 @@ ARTIFACT = re.compile(r"^(\d{4})-(\d{5})/v([1-9]\d*)/source_bbl/(.+\.bbl)$")
 MAX_BBL_BYTES = 64 * 1024 * 1024
 
 
+def _decode_bbl(data: bytes) -> tuple[str, dict | None]:
+    """Decode UTF-8 while recording isolated malformed auxiliary bytes."""
+    try:
+        return data.decode("utf-8-sig"), None
+    except UnicodeDecodeError as exc:
+        text = data.decode("utf-8-sig", errors="replace")
+        bom_bytes = 3 if data.startswith(b"\xef\xbb\xbf") else 0
+        return text, {
+            "encoding": "utf-8-with-replacement",
+            "replacement_characters": text.count("\ufffd"),
+            "first_invalid_byte": exc.start + bom_bytes,
+            "decoder_reason": exc.reason,
+        }
+
+
+def _replacement_in(value) -> bool:
+    if isinstance(value, str):
+        return "\ufffd" in value
+    if isinstance(value, (list, tuple)):
+        return any(_replacement_in(item) for item in value)
+    return False
+
+
 def _source_files(inputs: list[Path]) -> list[tuple[str, str, bytes]]:
     """Read BBL members from archives or extracted directories without links."""
     found: list[tuple[str, str, bytes]] = []
@@ -85,6 +108,9 @@ def _verify_inventory(records: list[tuple[str, str, bytes]], inventory: Path) ->
 
 def render_bibtex(entries: list[dict]) -> str:
     """Render supported fields as parseable BibTeX without inventing metadata."""
+    keys = [entry["key"] for entry in entries]
+    if len(keys) != len(set(keys)):
+        raise ParseError("Duplicate citation keys require separate BibTeX outputs")
     output = []
     for entry in entries:
         key = entry["key"]
@@ -116,7 +142,24 @@ def render_bibtex(entries: list[dict]) -> str:
     return result
 
 
-def _cached_file(path: Path, expected: dict) -> tuple[dict, list[dict]] | None:
+def _bibtex_output_groups(file_path: Path, entries: list[dict]) -> list[tuple[Path, list[dict]]]:
+    if not entries:
+        return [(file_path.with_suffix(".bib"), [])]
+    groups: dict[str | None, list[dict]] = defaultdict(list)
+    for entry in entries:
+        metadata = entry.get("biblatex_metadata", {})
+        groups[metadata.get("refsection_id")].append(entry)
+    if len(groups) == 1:
+        return [(file_path.with_suffix(".bib"), entries)]
+    if None in groups or any(scope is None or not str(scope).isdigit() for scope in groups):
+        raise ParseError("Cannot separate BibLaTeX entries with unscoped citation keys")
+    return [
+        (file_path.with_name(f"{file_path.stem}.refsection-{scope}.bib"), groups[scope])
+        for scope in sorted(groups, key=lambda value: int(value))
+    ]
+
+
+def _cached_file(path: Path, expected: dict, root: Path) -> tuple[dict, list[dict]] | None:
     if not path.exists():
         return None
     envelope = json.loads(path.read_text(encoding="utf-8"))
@@ -127,11 +170,23 @@ def _cached_file(path: Path, expected: dict) -> tuple[dict, list[dict]] | None:
     if any(record.get(key) != expected[key] for key in ("archive", "path", "arxiv_id", "version", "sha256")):
         raise ParseError("BBL checkpoint identity mismatch: " + str(path))
     entries = payload.get("entries", [])
-    bib_path = path.with_suffix(".bib")
     if record["status"] == "success":
-        if (not bib_path.is_file() or digest(bib_path.read_bytes()) != payload["bib_sha256"]
-                or len(parse_bibtex(bib_path.read_text(encoding="utf-8"))) != len(entries)):
-            raise ParseError("Corrupt BBL BibTeX output: " + str(bib_path))
+        outputs = payload.get("bib_outputs")
+        if outputs is None:
+            outputs = [{"path": path.with_suffix(".bib").relative_to(root).as_posix(),
+                        "sha256": payload.get("bib_sha256")}]
+        total_entries = 0
+        for output in outputs:
+            relative = PurePosixPath(output["path"])
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ParseError("Unsafe BBL BibTeX checkpoint path")
+            bib_path = root.joinpath(*relative.parts)
+            if (not bib_path.is_file()
+                    or digest(bib_path.read_bytes()) != output["sha256"]):
+                raise ParseError("Corrupt BBL BibTeX output: " + str(bib_path))
+            total_entries += len(parse_bibtex(bib_path.read_text(encoding="utf-8")))
+        if total_entries != len(entries):
+            raise ParseError("BBL BibTeX output entry count changed: " + str(path))
     return record, entries
 
 
@@ -168,7 +223,7 @@ def run_bbl_pipeline(inputs: list[Path], output: Path, *, inventory: Path | None
                   "sha256": digest(data), "status": "parse_error", "entry_count": 0,
                   "candidate_markers": len(re.findall(
                       rb"(?m)^[ \t]*\\(?:bibitem|harvarditem|bib|entry)\b", data))}
-        cached = _cached_file(file_path.with_suffix(".json"), record)
+        cached = _cached_file(file_path.with_suffix(".json"), record, root)
         if cached is not None:
             record, entries = cached
             cached_files += 1
@@ -179,20 +234,45 @@ def run_bbl_pipeline(inputs: list[Path], output: Path, *, inventory: Path | None
             files.append(record)
             continue
         try:
-            source = data.decode("utf-8-sig")
+            source, decode_warning = _decode_bbl(data)
+            if decode_warning:
+                record["decode_warning"] = decode_warning
             entries = parse_bbl(source, enriched=True)
-            if not entries:
+            if decode_warning and any(
+                    _replacement_in(entry.get(field))
+                    for entry in entries
+                    for field in ("title", "authors", "year", "doi", "journal", "url")):
+                raise ParseError("Invalid UTF-8 intersects an extracted bibliography field")
+            if not entries and record["candidate_markers"]:
                 raise ParseError("No bibliography entries")
-            if record["candidate_markers"] and len(entries) != record["candidate_markers"]:
+            source_entry_count = sum(
+                entry.get("biblatex_metadata", {}).get("source_occurrences", 1)
+                for entry in entries)
+            if record["candidate_markers"] and source_entry_count != record["candidate_markers"]:
                 raise ParseError("BBL entry count differs from source markers")
-            bibtex = render_bibtex(entries)
+            output_groups = _bibtex_output_groups(file_path, entries)
             record.update(status="success", entry_count=len(entries),
+                          source_entry_count=source_entry_count,
+                          deduplicated_entry_occurrences=source_entry_count - len(entries),
+                          biblatex_refsections=sorted({
+                              entry.get("biblatex_metadata", {}).get("refsection_id")
+                              for entry in entries
+                              if entry.get("biblatex_metadata", {}).get("refsection_id") is not None
+                          }, key=int),
                           provider_counts=dict(Counter(entry["provider"] for entry in entries)),
                           missing_fields={field: sum(entry.get(field) is None for entry in entries)
                                           for field in ("title", "authors", "year", "doi", "journal", "url")})
-            bib_bytes = bibtex.encode("utf-8")
-            write_new(file_path.with_suffix(".bib"), bib_bytes)
-            payload = {"record": record, "entries": entries, "bib_sha256": digest(bib_bytes)}
+            bib_outputs = []
+            for bib_path, scoped_entries in output_groups:
+                bib_bytes = render_bibtex(scoped_entries).encode("utf-8")
+                write_new(bib_path, bib_bytes)
+                bib_outputs.append({"path": bib_path.relative_to(root).as_posix(),
+                                    "sha256": digest(bib_bytes),
+                                    "entry_count": len(scoped_entries)})
+            record["bibtex_paths"] = [output["path"] for output in bib_outputs]
+            payload = {"record": record, "entries": entries, "bib_outputs": bib_outputs}
+            if len(bib_outputs) == 1:
+                payload["bib_sha256"] = bib_outputs[0]["sha256"]
             envelope = {"payload": payload, "sha256": digest(encoded(payload))}
             write_new(file_path.with_suffix(".json"), encoded(envelope))
             papers[aid][version].append((record, entries))
@@ -213,6 +293,21 @@ def run_bbl_pipeline(inputs: list[Path], output: Path, *, inventory: Path | None
             distinct = {source[0]["sha256"] for source in sources}
             if len(distinct) != 1:
                 problems.append(f"v{version}: multiple distinct BBL files; compilation path not verified")
+                continue
+            refsection_ids = {
+                section
+                for record, _ in sources
+                for section in record.get("biblatex_refsections", [])
+            }
+            if len(refsection_ids) > 1:
+                problems.append(
+                    f"v{version}: multiple BibLaTeX refsections; per-section BibTeX is retained "
+                    "without cross-section merging")
+                continue
+            if refsection_ids and refsection_ids != {"0"}:
+                problems.append(
+                    f"v{version}: non-global BibLaTeX refsection; BibTeX is retained "
+                    "without publication-level merging")
                 continue
             selected[version] = sources[0][1]
         if any(file["status"] != "success" for file in files if file["arxiv_id"] == aid):
