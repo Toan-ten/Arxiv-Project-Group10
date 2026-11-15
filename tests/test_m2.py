@@ -634,6 +634,18 @@ class M2Tests(unittest.TestCase):
         self.assertIn("Unsupported environment: wraptable", record["error"] or "")
         self.assertEqual(result["elements"], [])
 
+    def test_layout_declarations_baselineskip_and_pagenumbering(self):
+        source = tex(r"\pagenumbering{roman}\baselineskip=12pt"
+                    r"\setlength{\baselineskip}{14pt}Visible text.")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertIn("Visible text.", " ".join(n["content"] for n in result["elements"]))
+        commands = [m["command"] for m in record["layout_metadata"]]
+        self.assertIn("pagenumbering", commands)
+        self.assertIn("baselineskip", commands)
+        self.assertIn("setlength", commands)
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)

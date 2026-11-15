@@ -797,7 +797,7 @@ class Tree:
                         _, end = group(text, after)
                 if not reference_section:
                     self.add("figure", text[pos:end], current())
-            elif (name in {"hbadness", "vbadness", "hfuzz", "vfuzz", "vskip", "hskip", "itemsep", "leftskip"}
+            elif (name in {"hbadness", "vbadness", "hfuzz", "vfuzz", "vskip", "hskip", "itemsep", "leftskip", "baselineskip"}
                   and name not in self.gatherer.macros):
                 # Literal TeX diagnostic thresholds / layout glue only. Dynamic
                 # registers and expressions are not evaluated.
@@ -1101,12 +1101,17 @@ class Tree:
                 if counter not in {"equation", "figure", "table"} or within not in LEVELS:
                     raise ParseError("Unsupported counter dependency: " + counter + "/" + within)
                 self.layout_metadata.append(dict(command=name, counter=counter, within=within))
+            elif name == "pagenumbering" and name not in self.gatherer.macros:
+                style, end = group(text, end)
+                if style.strip() not in {"arabic", "roman", "Roman", "alph", "Alph"}:
+                    raise ParseError("Unsupported page numbering style: " + style)
+                self.layout_metadata.append(dict(command=name, style=style.strip()))
             elif name == "setlength" and name not in self.gatherer.macros:
                 target, start = group(text, end)
                 value, end = group(text, start)
                 known = {r"\parskip", r"\parindent", r"\tabcolsep", r"\columnsep",
                          r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep",
-                         r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep"}
+                         r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep", r"\baselineskip"}
                 scaled_baseline = (target.strip() == r"\baselineskip" and re.fullmatch(
                     r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*\\baselineskip", value.strip()))
                 if not scaled_baseline and (target.strip() not in known or not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip())):
