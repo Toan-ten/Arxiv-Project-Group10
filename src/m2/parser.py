@@ -703,6 +703,17 @@ class Tree:
                 elif env == "algorithmic":
                     container = self.add("component", env, current())
                     self.algorithmic(raw, container, depth + 1)
+                elif env == "credits" and self.gatherer.document_class == "llncs":
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined LLNCS credits requires environment semantics")
+                    # LLNCS renders run-in subheadings from these two labels.
+                    # Expand only unshadowed labels; all body text is parsed.
+                    if "ackname" not in self.gatherer.macros:
+                        raw = re.sub(r"\\ackname(?![A-Za-z])", "Acknowledgments", raw)
+                    if "discintname" not in self.gatherer.macros:
+                        raw = re.sub(r"\\discintname(?![A-Za-z])", "Disclosure of Interests", raw)
+                    self.layout_metadata.append(dict(environment=env))
+                    self.parse(raw, current(), depth + 1)
                 elif env in CONTAINERS or env in self.gatherer.theorems:
                     if env in {"appendices", "appendix"} and depth == 0:
                         # An explicit appendix division is not a child of the

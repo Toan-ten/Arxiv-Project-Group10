@@ -769,6 +769,29 @@ class M2Tests(unittest.TestCase):
         self.assertIn("Unsupported environment: teaserfigure",
                       rejected["versions"][0]["error"] or "")
 
+    def test_llncs_credits_environment_keeps_acknowledgments_and_disclosure(self):
+        source = (r"\documentclass{llncs}\begin{document}"
+                  r"\section{Conclusion}Body."
+                  r"\begin{credits}"
+                  r"\subsubsection{\ackname}Funded by a grant. "
+                  r"\subsubsection{\discintname}No competing interests."
+                  r"\end{credits}\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        contents = [n["content"] for n in result["elements"]]
+        self.assertIn("Acknowledgments", contents)
+        self.assertIn("Disclosure of Interests", contents)
+        content = " ".join(contents)
+        self.assertIn("Funded by a grant.", content)
+        self.assertIn("No competing interests.", content)
+        self.assertTrue(any(m.get("environment") == "credits"
+                            for m in result["versions"][0]["layout_metadata"]))
+        rejected = self.parse({"main.tex": tex(r"\begin{credits}Text.\end{credits}")},
+                              aid="2508.07878")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Unsupported environment: credits",
+                      rejected["versions"][0]["error"] or "")
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)
