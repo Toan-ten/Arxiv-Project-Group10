@@ -748,6 +748,27 @@ class M2Tests(unittest.TestCase):
                               aid="2508.07876")
         self.assertEqual(rejected["versions"][0]["status"], "parse_error")
 
+    def test_acmart_teaserfigure_is_a_figure_leaf(self):
+        body = (r"Before.\begin{teaserfigure}"
+                r"\includegraphics[width=\textwidth]{teaser.pdf}"
+                r"\caption{Teaser caption.}\Description{Teaser description.}"
+                r"\end{teaserfigure}After.")
+        source = tex(body).replace("{article}", "{acmart}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        figures = [n["content"] for n in result["elements"] if n["kind"] == "figure"]
+        self.assertEqual(len(figures), 1)
+        self.assertIn(r"\includegraphics[width=\textwidth]{teaser.pdf}", figures[0])
+        self.assertIn(r"\caption{Teaser caption.}", figures[0])
+        self.assertIn(r"\Description{Teaser description.}", figures[0])
+        self.assertIn("Before.", " ".join(n["content"] for n in result["elements"]))
+        self.assertIn("After.", " ".join(n["content"] for n in result["elements"]))
+        rejected = self.parse({"main.tex": tex(
+            r"\begin{teaserfigure}Text.\end{teaserfigure}")}, aid="2508.07877")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Unsupported environment: teaserfigure",
+                      rejected["versions"][0]["error"] or "")
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)

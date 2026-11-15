@@ -681,6 +681,12 @@ class Tree:
                     # Like tabular/longtable, one table leaf retains its full
                     # alignment, caption, cells, notes and citation commands.
                     self.add("figure", raw, current())
+                elif (env == "teaserfigure" and self.gatherer.document_class == "acmart"):
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined ACM teaserfigure requires environment semantics")
+                    # acmart collects the teaser body and renders it before the
+                    # title. Retain the full figure source as one leaf.
+                    self.add("figure", raw, current())
                 elif env in FIGURE_ENVS:
                     self.add("figure", raw, current())
                 elif env == "inparaenum" and "paralist" in self.gatherer.packages:
