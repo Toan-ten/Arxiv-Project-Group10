@@ -54,8 +54,6 @@ reports/
 └── phase_locks/<mssv>.lock
 ```
 
-Với notebook hiện hành, khi kiểm toán đủ điều kiện xuất, `run_m1_audit_member` ghi các bảng vào `DRIVE_ROOT/exports/<selection_fingerprint>/`. Kết quả `AUDIT_RESULT["export"]["output_dir"]` lưu đường dẫn thực tế. Thư mục chứa `papers.parquet`, `references.parquet`, `reference_quality.json` và `reference_conflicts.json`. Nếu `export_status` chưa là `exported`, các bảng chưa sẵn sàng để xem.
-
 `NNNN` là số lô có bốn chữ số; `folder_key` do hàm chuyển đổi ID của storage xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái bắt đầu và dấu vân tay phục vụ phép đo; `session_index.json` liệt kê các phiên của cùng phạm vi. `metadata.json` và `references.json` chỉ xuất hiện khi đã có kết quả tương ứng; `quality.json` liên kết checksum của hai tệp đó và có thể chưa tồn tại trong checkpoint chưa được đánh giá. Cache `reference_dates/` được tạo khi kiểm toán đủ điều kiện bổ sung ngày. Trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
 
 Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Kiểm toán chỉ hợp nhất S2 khi dấu vân tay, định danh, xuất xứ, checksum và phân trang hợp lệ. Dữ liệu thiếu hoặc xung đột sẽ chặn xuất, không bị thay thế âm thầm.
