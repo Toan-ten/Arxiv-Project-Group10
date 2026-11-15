@@ -41,7 +41,7 @@ Arxiv-Project-Group10/
 
 ## Các lớp API M1
 
-Notebook nhập `build_member_selection`, `run_m1_arxiv_member`, `run_m1_s2_member` và `run_m1_audit_member` từ `src.m1_workflow`. Module này xuất lại các điểm vào của `src.m1_phases`. Hàm `run_m1_member` gọi tuần tự ba pha trên cùng phạm vi ID, dùng `batch_m1` cho S2 và dừng chuỗi khi pha trước báo dừng.
+Notebook nhập `build_member_selection`, `run_m1_arxiv_member`, `run_m1_s2_member`, `run_m1_validation_member`, `run_m1_normalization_member` và `run_m1_official_export_member` từ `src.m1_workflow`. Module này xuất lại các điểm vào của `src.m1_phases`. Hàm `run_m1_member` gọi arXiv, S2, kiểm định và chuẩn hóa trên cùng phạm vi ID, dùng `batch_m1` cho S2 và dừng chuỗi khi pha trước báo dừng.
 
 Gói `src.m1_phase_modules` chứa triển khai nội bộ. Bên gọi vận hành tiếp tục sử dụng các đường import công khai; chữ ký của hàm nội bộ không phải hợp đồng dành cho notebook.
 
@@ -52,7 +52,7 @@ Gói `src.m1_phase_modules` chứa triển khai nội bộ. Bên gọi vận hà
 | `arxiv_phase.py` | Chuẩn bị và kiểm tra xuất xứ Kaggle, điều phối arXiv, điểm khôi phục mã nguồn và tự tiếp tục sau discovery 429 |
 | `s2_evidence.py` | Manifest S2, đọc/ghi bằng chứng, đối chiếu trạng thái, định danh và checksum |
 | `s2_phase.py` | Dùng lại cache, gom metadata, lấy references, xử lý ngân sách và tiếp tục S2 |
-| `audit_phase.py` | Xác minh mã nguồn, kiểm tra trước hợp nhất, hợp nhất S2, kiểm toán và điều kiện xuất |
+| `audit_phase.py` | Kiểm tra bằng chứng, ghi báo cáo kiểm định, tạo bảng làm việc và kiểm soát điều kiện xuất chính thức |
 | `benchmark_summary.py` | Đọc quan sát các phiên và tổng hợp phép đo theo thành viên |
 
 Các pha dùng `common` và `checkpoint`; S2 và kiểm toán dùng chung `s2_evidence`. Pha kiểm toán còn dùng bộ kiểm tra xuất xứ arXiv và bộ tổng hợp benchmark. Các module nội bộ không import ngược về `m1_phases` hoặc `m1_workflow`, nhằm tránh vòng phụ thuộc.

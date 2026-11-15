@@ -83,11 +83,11 @@ Kiểm tra source áp dụng cho tệp đã khai báo và bằng chứng tương
 
 ## Tỷ lệ
 
-Báo cáo chất lượng S2 bổ sung các chỉ số độc lập với tỷ lệ hoàn tất thu thập: `count_mismatch_papers`, `count_unknown_papers`, `missing_date_rows` và `missing_date_unique_ids`. `count_match` chỉ được xác định khi metadata có count nguyên không âm và thu thập hoàn tất. Các chỉ số ngày trước bổ sung tính trên items thô có arXiv ID; `exported_missing_date_rows` tính trên các cạnh sau phép chiếu và gộp trùng. Không dùng hai mẫu số này thay thế nhau.
+Báo cáo chất lượng S2 tính riêng `count_mismatch_papers`, `count_unknown_papers`, `missing_date_rows` và `missing_date_unique_ids` từ bằng chứng S2 đã lưu. `count_match` chỉ được xác định khi metadata có count nguyên không âm và thu thập hoàn tất. `missing_date_rows` tính trên items thô có arXiv ID; `missing_date_unique_ids` đếm ID duy nhất trong các items đó. `exported_missing_date_rows` là chỉ số của hàm xuất tổng quát `export_official_datasets()` sau phép chiếu và gộp cạnh trùng; luồng M1 Colab hiện tại không tạo báo cáo này. Không dùng hai mẫu số này thay thế nhau.
 
 Observation lưu `cleanup_status` và `cleanup_seconds` riêng ngoài thời gian thao tác. Sampler chờ tối đa hai giây khi chốt, có thể thiếu mẫu cuối trên Drive chậm; `final_corpus_status=not_collected` và `final_corpus_bytes=null` mô tả phần chưa đo. Không biến mẫu gần nhất thành mẫu cuối hoặc gọi sampled peak là dung lượng cực đại tuyệt đối. Observation ghi nguyên nhân lỗi/ngắt cleanup và kết quả công việc đã có. Session `finished` chỉ là kết thúc phiên, không chứng nhận hoàn tất mọi ID hoặc toàn bộ M1.
 
-Thời gian và HTTP metrics của bổ sung ngày arXiv nằm riêng trong `reference_dates`; tổng thời gian pha audit có bao gồm bước này. Khi đối chứng tốc độ S2, không gộp chi phí bổ sung ngày vào riêng thời gian S2 hoặc bỏ chi phí đó khỏi tổng quy trình.
+Pha kiểm định và chuẩn hóa M1 hiện tại không tra cứu arXiv để bổ sung ngày references. Thời gian các pha được tính từ những quan sát phiên đã ghi; không suy thêm chi phí HTTP cho một bước không chạy.
 
 Tỷ lệ phần trăm bằng tử số chia mẫu số rồi nhân 100. Trung bình references không nhân 100.
 

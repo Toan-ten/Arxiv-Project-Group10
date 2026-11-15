@@ -1,413 +1,358 @@
-"""M1 reconciliation, verified reference-date enrichment and export gating."""
+"""Read-only M1 validation and explicit working/official table generation."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from typing import Callable
 
-from src.fast_production import (
-    FastProductionRunner,
-    cohort_pairs,
-)
+from src.fast_production import FastProductionRunner, cohort_pairs
 from src.session_evidence import SessionBudget, finish_session_envelope, observe_stage
-from src.storage import IntegrityError, StorageError
-
-from .arxiv_phase import (
-    _kaggle_source_provenance_issue,
-    _source_state_manifest,
-)
-from .benchmark_summary import (
-    _member_benchmark_summary,
-)
-from .checkpoint import (
-    _member_writer_lock,
-    _persist_selection,
-    _read_json,
-    _record_session,
-    _session_start,
-    _write_json,
-)
-from .common import (
-    PHASE_SCHEMA_VERSION,
-    M1PhaseError,
-    build_member_selection,
-)
-from .s2_evidence import (
-    _validate_s2_cohort,
-)
+from src.storage import _atomic_json
+from .arxiv_phase import _kaggle_source_provenance_issue, _source_state_manifest
+from .benchmark_summary import _member_benchmark_summary
+from .checkpoint import (_member_writer_lock, _persist_selection, _read_json,
+                         _record_session, _session_start, _write_json)
+from .common import PHASE_SCHEMA_VERSION, M1PhaseError, build_member_selection
+from .s2_evidence import (_cohort_s2_paths, _load_s2_manifest, _read_s2_paper,
+                          _validate_s2_cohort)
 
 
-def _validate_source_paper(runner: FastProductionRunner, mssv: str, arxiv_id: str) -> tuple[str, dict | None]:
+def _validate_source_paper(runner: FastProductionRunner, mssv: str, arxiv_id: str):
     from src.storage_integrity import audit_paper_integrity
-
     try:
-        result = audit_paper_integrity(runner.store, mssv, arxiv_id)
-        if result.has_integrity_failure:
-            return "integrity_failure", None
+        integrity = audit_paper_integrity(runner.store, mssv, arxiv_id)
         manifest = runner.store.read_manifest(mssv, arxiv_id)
     except Exception:
         return "missing_or_invalid", None
+    if integrity.has_integrity_failure:
+        return "integrity_failure", manifest
     if manifest.get("discovery_status") == "not_found" and manifest.get("status") == "not_found":
-        if manifest.get("versions") != {} or result.status != "valid":
-            return "integrity_failure", manifest
-        return "not_found", manifest
-    if result.is_source_complete:
-        return "found_source_complete", manifest
-    return "source_incomplete", manifest
+        return ("not_found", manifest) if manifest.get("versions") == {} else ("integrity_failure", manifest)
+    return ("found_source_complete", manifest) if integrity.is_source_complete else ("source_incomplete", manifest)
 
 
-def _same_reference_snapshot(left: dict, right: dict) -> bool:
-    return all(left.get(key) == right.get(key) for key in ("status", "coverage", "items"))
+def _verify_source_archive(runner: FastProductionRunner, cohort: int) -> dict:
+    """Verify archive accounting for validation without requiring an M1 handoff state."""
+    from src.storage_integrity import _inspect_path, _read_bytes_safely
+
+    archive = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
+    manifest_path = archive.with_name(archive.name.replace(".tar.gz", ".manifest.json"))
+    sidecar_path = archive.with_name(archive.name + ".sha256")
+    for path in (archive, sidecar_path):
+        is_link, _, is_file = _inspect_path(path)
+        if is_link or not is_file:
+            raise ValueError(f"Archive evidence is not a regular file for cohort {cohort}: {path.name}.")
+    manifest = _read_json(manifest_path)
+    actual_sha = runner._compute_sha256(archive)
+    sidecar = _read_bytes_safely(sidecar_path).decode("utf-8").strip().split()
+    if (not sidecar or sidecar[0] != actual_sha
+            or manifest.get("archive_sha256") != actual_sha
+            or manifest.get("cohort_number") != cohort):
+        raise ValueError(f"Archive accounting/checksum mismatch for cohort {cohort}.")
+
+    expected_ids = {aid for _member, aid in cohort_pairs(cohort)}
+    included_ids = manifest.get("included_ids")
+    if (not isinstance(included_ids, list)
+            or any(not isinstance(aid, str) for aid in included_ids)
+            or len(included_ids) != len(set(included_ids))
+            or not set(included_ids).issubset(expected_ids)
+            or manifest.get("included_count") != len(included_ids)):
+        raise ValueError(f"Invalid included ID accounting for cohort {cohort}.")
+
+    archive_state = manifest.get("archive_state")
+    if archive_state not in {"source_verified", "checkpoint_partial", "m1_handoff_verified", "handoff_verified"}:
+        raise ValueError(f"Unsupported archive state for cohort {cohort}: {archive_state!r}.")
+    if archive_state in {"source_verified", "m1_handoff_verified", "handoff_verified"} and set(included_ids) != expected_ids:
+        raise ValueError(f"Archive state {archive_state!r} requires all assigned IDs for cohort {cohort}.")
+
+    artifact_check = runner._validate_bbl_artifact_archive(
+        cohort, manifest.get("bbl_artifact_archive"), restore=False,
+    )
+    current_bbl_state = runner._cohort_bbl_policy_state(cohort)
+    if manifest.get("bbl_policy_state") == "complete" and current_bbl_state != "complete":
+        raise ValueError(f"BBL policy mismatch for cohort {cohort}: {current_bbl_state}.")
+    return {
+        "status": "verified", "verification_scope": "source_archive",
+        "archive_state": archive_state, "archive_sha256": actual_sha,
+        "included_count": len(included_ids), "expected_count": len(expected_ids),
+        "bbl_artifact_archive": artifact_check,
+    }
 
 
-def _preflight_merge(runner: FastProductionRunner, selection: dict,
-                     evidence_by_id: dict[str, tuple[dict, dict]]) -> list[dict]:
-    """Validate source identity and S2 conflicts before any v2 corpus write."""
-    from src import s2_integration
-
-    issues = []
-    for mssv, arxiv_id in selection["pairs"]:
-        source_status, _manifest = _validate_source_paper(runner, mssv, arxiv_id)
-        if source_status in {"missing_or_invalid", "source_incomplete", "integrity_failure"}:
-            issues.append({"arxiv_id": arxiv_id, "issue": source_status})
-            continue
-        metadata_result, references_result = evidence_by_id[arxiv_id]
-        if source_status == "not_found":
-            if metadata_result["status"] == "found" or references_result.get("status") == "complete" and references_result.get("items"):
-                issues.append({"arxiv_id": arxiv_id, "issue": "s2_conflicts_with_arxiv_not_found"})
-            continue
-        try:
-            old_metadata = runner.store.read_metadata(mssv, arxiv_id)
-            old_references = runner.store.read_references(mssv, arxiv_id)
-            s2_integration.metadata_cached(old_metadata)
-            s2_integration.references_evidence(old_references, arxiv_id, for_resume=True)
-        except (StorageError, IntegrityError, ValueError, KeyError, TypeError):
-            issues.append({"arxiv_id": arxiv_id, "issue": "existing_v2_checkpoint_invalid"})
-            continue
-        old_s2 = (old_metadata.get("provenance") or {}).get("semantic_scholar")
-        if isinstance(old_s2, dict):
-            old_snapshot = old_s2.get("snapshot")
-            if old_snapshot != metadata_result:
-                issues.append({"arxiv_id": arxiv_id, "issue": "s2_metadata_conflict"})
-        if old_references.get("status") in {"complete", "not_found"}:
-            if not _same_reference_snapshot(old_references, references_result):
-                issues.append({"arxiv_id": arxiv_id, "issue": "s2_references_conflict"})
-        elif old_references.get("items"):
-            if references_result.get("items", [])[:len(old_references["items"])] != old_references["items"]:
-                issues.append({"arxiv_id": arxiv_id, "issue": "s2_references_prefix_conflict"})
-    return issues
-
-
-def _merge_s2(runner: FastProductionRunner, selection: dict,
-              evidence_by_id: dict[str, tuple[dict, dict]]) -> list[str]:
-    from src import s2_integration
-
-    merged = []
-    for mssv, arxiv_id in selection["pairs"]:
-        source_status, _manifest = _validate_source_paper(runner, mssv, arxiv_id)
-        if source_status == "not_found":
-            continue
-        if source_status != "found_source_complete":
-            raise M1PhaseError(f"Nguồn arXiv đổi trạng thái trong lúc hợp nhất: {arxiv_id}")
-        metadata_result, references_result = evidence_by_id[arxiv_id]
-        old_metadata = runner.store.read_metadata(mssv, arxiv_id)
-        existing_snapshot = (old_metadata.get("provenance") or {}).get("semantic_scholar")
-        if not isinstance(existing_snapshot, dict):
-            merged_metadata = s2_integration.metadata_snapshot(old_metadata, metadata_result)
-            runner.store.save_metadata(mssv, arxiv_id, merged_metadata)
-        old_references = runner.store.read_references(mssv, arxiv_id)
-        if old_references.get("status") not in {"complete", "not_found"}:
-            merged_references = s2_integration.reference_result(old_references, references_result)
-            runner.store.save_references(mssv, arxiv_id, merged_references)
-        merged.append(arxiv_id)
-    return merged
-
-
-def run_m1_audit_member(
-    mssv: str,
-    *,
-    drive_root: str | Path,
-    local_root: str | Path,
-    cohort_limit: int | None = None,
-    output_dir: str | Path | None = None,
-    budget_seconds: float = 10 * 60 * 60,
-    runner_factory: Callable[..., FastProductionRunner],
-) -> dict:
-    """Validate both phases, safely merge S2, then export only complete M1 data."""
-    from src.reporting import compute_m1_statistics
+def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
+                             local_root: str | Path, cohort_limit: int | None = None,
+                             budget_seconds: float = 10 * 60 * 60,
+                             runner_factory: Callable[..., FastProductionRunner] = FastProductionRunner) -> dict:
+    """Inspect arXiv and S2 checkpoints and write a report without merging or exporting."""
     from src.storage_integrity import audit_cohort_integrity
-    from src.fast_production import verify_cohort_handoff
-    from src.export import export_official_datasets
-    from src.bbl_handling import audit_bbl_sources
-
     selection = build_member_selection(mssv, cohort_limit)
-    drive = Path(drive_root).expanduser().resolve()
-    local = Path(local_root).expanduser().resolve()
+    drive, local = Path(drive_root).expanduser().resolve(), Path(local_root).expanduser().resolve()
     runner = runner_factory(local_root=local, drive_root=drive)
     budget = SessionBudget(budget_seconds)
-    session_id, envelope, started = _session_start(runner, selection, "audit")
+    session_id, envelope, started = _session_start(runner, selection, "validation")
     phase_root = _persist_selection(drive, selection)
-
-    def audit_and_reconcile() -> dict:
-        from src.kaggle_candidates import validate_discrepancy_checkpoints
-
-        source_issues = []
-        kaggle_source_issues = []
-        source_states = {}
-        discrepancy_checkpoint_root = phase_root / "arxiv" / "kaggle_discrepancy_checkpoints"
-        discrepancy_evidence_root = phase_root / "arxiv" / "kaggle_discrepancies"
-        kaggle_evidence_issues = []
-        kaggle_evidence_summary = {"status": "valid", "verified_ids": 0}
-        try:
-            verified_discrepancies = validate_discrepancy_checkpoints(
-                discrepancy_checkpoint_root, discrepancy_evidence_root,
-            )
-            selected_ids = {arxiv_id for _member, arxiv_id in selection["pairs"]}
-            unrelated = [item.get("arxiv_id") for item in verified_discrepancies
-                         if item.get("arxiv_id") not in selected_ids]
-            if unrelated:
-                raise ValueError("discrepancy checkpoint contains IDs outside this selection")
-            kaggle_evidence_summary["verified_ids"] = len(verified_discrepancies)
-            kaggle_evidence_summary["checkpoints"] = verified_discrepancies
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            kaggle_evidence_summary = {"status": "invalid", "error_type": type(exc).__name__}
-            kaggle_evidence_issues.append({
-                "issue": "kaggle_discrepancy_evidence_invalid",
-                "error_type": type(exc).__name__,
-            })
-        for cohort in selection["cohorts"]:
-            state_path = phase_root / "arxiv" / f"cohort_{cohort:04d}.json"
-            state = _source_state_manifest(state_path, selection, cohort)
-            source_states[str(cohort)] = {
-                key: state.get(key) for key in (
-                    "status", "source_complete_papers", "expected_count",
-                    "archive_sha256", "stop_reason", "updated_at",
-                    "kaggle_status", "kaggle_snapshot_sha256",
-                    "kaggle_index_sha256", "kaggle_policy_version", "kaggle_session_id",
-                )
-            }
-            kaggle_issue = _kaggle_source_provenance_issue(runner, state, cohort)
-            if kaggle_issue is not None:
-                kaggle_source_issues.append(kaggle_issue)
-            # Tiếp tục và xác minh mọi archive đã có trong phạm vi này.
-            runner.restore_cohort(cohort)
-            for member, arxiv_id in cohort_pairs(cohort):
-                if member != selection["mssv"]:
-                    continue
-                status, _ = _validate_source_paper(runner, member, arxiv_id)
-                if status not in {"found_source_complete", "not_found"}:
-                    source_issues.append({"arxiv_id": arxiv_id, "issue": status})
-
-        s2_evidence = {}
-        s2_manifests = {}
-        s2_issues = []
-        for cohort in selection["cohorts"]:
-            try:
-                manifest, evidence = _validate_s2_cohort(phase_root, selection, cohort)
-                s2_manifests[str(cohort)] = manifest
-                s2_evidence.update(evidence)
-            except M1PhaseError as exc:
-                s2_issues.append({"cohort": cohort, "issue": str(exc)})
-
-        preflight_issues = []
-        merge_conflicts = []
-        if not source_issues and not s2_issues and len(s2_evidence) == selection["expected_count"]:
-            preflight_issues = _preflight_merge(runner, selection, s2_evidence)
-            merge_conflicts.extend(preflight_issues)
-        issues = (
-            source_issues + kaggle_source_issues + s2_issues
-            + preflight_issues + kaggle_evidence_issues
-        )
-        merged_ids = []
-        if not issues:
-            if budget.should_stop():
-                merge_conflicts.append({"issue": "audit_session_budget"})
-            else:
-                try:
-                    merged_ids = _merge_s2(runner, selection, s2_evidence)
-                    # Làm mới archive bền vững sau khi đối soát S2; giữ lại
-                    # archive của pha mã nguồn trước khi công bố bản thay thế.
-                    for cohort in selection["cohorts"]:
-                        archive = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
-                        if archive.exists():
-                            runner.backup_cohort_archive(cohort, require_sidecars=True)
-                        runner._archive_cohort(cohort, archive)
-                except Exception as exc:
-                    merge_conflicts.append({
-                        "issue": "merge_or_archive_failed",
-                        "error_type": type(exc).__name__,
-                        "detail": str(exc),
-                    })
-
-        bbl_audit = None
-        bbl_audit_error = None
-        try:
-            bbl_audit = audit_bbl_sources(
-                runner.store,
-                selection["pairs"],
-                output_dir=runner.reports_dir / "derived_bibliography" / session_id,
-                report_path=runner.reports_dir / f"bbl_handling_{session_id}.json",
-                session_id=session_id,
-            )
-        except Exception as exc:
-            bbl_audit_error = {"error": type(exc).__name__, "detail": str(exc)}
-
-        cohort_audits = {}
-        all_handoffs = True
-        all_cohort_audits = True
-        for cohort in selection["cohorts"]:
-            pairs = [(member, aid) for member, aid in cohort_pairs(cohort) if member == selection["mssv"]]
-            try:
-                integrity = audit_cohort_integrity(runner.store, pairs, cohort_number=cohort)
-                counts = runner.count_m1_completed_papers(cohort)
-                handoff = verify_cohort_handoff(runner, cohort, inspect_members=True)
-                handoff_ok = handoff.get("archive_state") in {"m1_handoff_verified", "handoff_verified"}
-                integrity_payload = integrity.to_dict()
-                integrity_ok = (
-                    integrity_payload.get("total_candidates") == len(pairs)
-                    and integrity_payload.get("valid_count") == len(pairs)
-                    and not any(integrity_payload.get(key, 0) for key in (
-                        "invalid_count", "missing_count", "incomplete_count", "corrupted_count"
-                    ))
-                )
-            except Exception as exc:
-                integrity = {"is_reconciled": False, "integrity_failed_papers": len(pairs), "error": type(exc).__name__, "detail": str(exc)}
-                counts = {"is_cohort_complete": False, "unprocessed": len(pairs), "integrity_failures": len(pairs)}
-                handoff = {"archive_state": "invalid", "error": type(exc).__name__, "detail": str(exc)}
-                handoff_ok = False
-                integrity_payload = integrity
-                integrity_ok = False
-            integrity_payload["is_reconciled"] = integrity_ok
-            cohort_audits[str(cohort)] = {
-                "integrity": integrity_payload,
-                "m1_counts": counts,
-                "handoff": handoff,
-                "s2_status": (s2_manifests.get(str(cohort)) or {}).get("status", "missing"),
-            }
-            all_handoffs = all_handoffs and handoff_ok
-            all_cohort_audits = all_cohort_audits and integrity_ok and counts.get("is_cohort_complete") is True
-
-        stats = compute_m1_statistics(
-            runner.store,
-            selection["pairs"],
-            report_scope=selection["scope"],
-        )
-        data_complete = (
-            not issues
-            and not merge_conflicts
-            and bbl_audit_error is None
-            and stats.get("is_reconciled") is True
-            and stats.get("integrity_failed_papers", 0) == 0
-            and stats.get("unprocessed_papers", selection["expected_count"]) == 0
-            and stats.get("m1_complete_papers", 0) + stats.get("confirmed_not_found", 0)
-            == selection["expected_count"]
-            and all_cohort_audits
-            and all_handoffs
-        )
-        export_result = None
-        export_error = None
-        reference_dates = None
-        from src.s2_quality import assess_references, summarize_quality
-        reference_quality = summarize_quality({
-            aid: assess_references(metadata, references)
-            for aid, (metadata, references) in s2_evidence.items()
-        })
-        if data_complete:
-            from src.reference_dates import enrich_reference_dates
-            from src import http_metrics
-            import time
-
-            date_metrics = http_metrics.HttpMetrics()
-            date_started = time.perf_counter()
-            with http_metrics.collect(date_metrics):
-                reference_dates = enrich_reference_dates(
-                    runner.store, [tuple(pair) for pair in selection["pairs"]],
-                    phase_root / "reference_dates", should_stop=budget.should_stop,
-                )
-            reference_dates["wall_seconds"] = time.perf_counter() - date_started
-            reference_dates["http_metrics"] = date_metrics.snapshot(complete=True)
-            # Full evidence stays in the checksum-verified cache, not every report.
-            reference_dates.pop("entries", None)
-            if reference_dates["stopped"]:
-                data_complete = False
-                export_error = "Export deferred: reference-date enrichment stopped; resume with the same selection."
-            else:
-                destination = Path(output_dir).expanduser().resolve() if output_dir else drive / "exports" / selection["fingerprint"]
-                export_result = export_official_datasets(
-                    runner.store,
-                    [tuple(pair) for pair in selection["pairs"]],
-                    destination,
-                    require_m1_complete=True,
-                    reference_date_cache=phase_root / "reference_dates",
-                )
-        else:
-            export_error = "Export blocked: both phase checkpoints and full M1 audit are required."
-        report = {
-            "schema_version": PHASE_SCHEMA_VERSION,
-            "mssv": selection["mssv"],
-            "selection_fingerprint": selection["fingerprint"],
-            "scope": selection["scope"],
-            "expected_id_count": selection["expected_count"],
-            "source_issues": source_issues,
-            "kaggle_source_issues": kaggle_source_issues,
-            "source_checkpoints": source_states,
-            "kaggle_evidence": kaggle_evidence_summary,
-            "kaggle_evidence_issues": kaggle_evidence_issues,
-            "s2_issues": s2_issues,
-            "reference_quality": reference_quality,
-            "reference_dates": reference_dates,
-            "merge_conflicts": merge_conflicts,
-            "merged_s2_ids": len(merged_ids),
-            "bbl_audit": bbl_audit,
-            "bbl_audit_error": bbl_audit_error,
-            "cohorts": cohort_audits,
-            "statistics": stats,
-            "is_reconciled": data_complete,
-            "integrity_failed_papers": stats.get("integrity_failed_papers", 0),
-            "unprocessed_papers": stats.get("unprocessed_papers"),
-            "export_status": "exported" if export_result else "blocked",
-            "export": export_result,
-            "export_error": export_error,
-            "stop_reason": ("reference_date_enrichment_stopped" if reference_dates and reference_dates["stopped"]
-                            else None if data_complete else "incomplete_or_conflicting_phase_evidence"),
+    progress_path = runner.reports_dir / f"m1_validation_{mssv}_{selection['fingerprint'][:16]}.json"
+    saved_progress = {}
+    if progress_path.exists() or progress_path.is_symlink():
+        candidate = _read_json(progress_path)
+        if (candidate.get("selection_fingerprint") == selection["fingerprint"]
+                and candidate.get("status") in {"running", "interrupted", "budget_exhausted"}):
+            saved_progress = candidate
+    if not saved_progress:
+        _write_json(progress_path, {
+            "schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": "running",
+            "mssv": mssv, "selection_fingerprint": selection["fingerprint"],
+            "expected_id_count": selection["expected_count"], "papers": {}, "cohorts": {},
+            "issues": [], "completed_cohorts": [], "next_cohort_index": 1,
             "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        report_path = runner.reports_dir / f"m1_audit_{selection['mssv']}_{selection['fingerprint'][:16]}.json"
+        })
+
+    def validate():
+        papers = dict(saved_progress.get("papers") or {})
+        s2_by_id, cohorts = {}, dict(saved_progress.get("cohorts") or {})
+        issues = list(saved_progress.get("issues") or [])
+        completed_cohorts = list(saved_progress.get("completed_cohorts") or [])
+        run_status = "completed"
+        total_cohorts = len(selection["cohorts"])
+        report_path = progress_path
+        print(f"[M1/kiểm định] Bắt đầu: {selection['expected_count']} ID, {total_cohorts} lô; tiếp tục từ {len(completed_cohorts)} lô đã kiểm tra.")
+        for cohort_index, cohort in enumerate(selection["cohorts"], start=1):
+            previous_cohort = cohorts.get(str(cohort))
+            previous_handoff = (previous_cohort or {}).get("handoff") or {}
+            previous_sha = previous_handoff.get("archive_sha256")
+            if cohort in completed_cohorts and previous_sha:
+                try:
+                    print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts}: xác minh archive đã lưu để tiếp tục.")
+                    current_handoff = _verify_source_archive(runner, cohort)
+                except KeyboardInterrupt:
+                    run_status = "interrupted"
+                    issues.append({"cohort": cohort, "issue": "validation_interrupted_verifying_saved_handoff"})
+                    break
+                except Exception:
+                    current_handoff = None
+                if current_handoff and current_handoff.get("archive_sha256") == previous_sha:
+                    print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts}: archive không đổi; dùng kết quả đã lưu.")
+                    try:
+                        s2_manifest, evidence = _validate_s2_cohort(phase_root, selection, cohort)
+                        s2_by_id.update(evidence)
+                        previous_cohort["s2_status"] = s2_manifest.get("status")
+                        previous_cohort["handoff"] = current_handoff
+                    except Exception as exc:
+                        issues.append({"cohort": cohort, "issue": "s2_checkpoint_invalid", "detail": str(exc)})
+                        previous_cohort["s2_status"] = "invalid_or_incomplete"
+                    cohorts[str(cohort)] = previous_cohort
+                    _write_json(progress_path, {
+                        "schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": "running",
+                        "mssv": mssv, "selection_fingerprint": selection["fingerprint"],
+                        "expected_id_count": selection["expected_count"], "papers": papers,
+                        "cohorts": cohorts, "issues": issues, "completed_cohorts": completed_cohorts,
+                        "next_cohort_index": cohort_index + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    continue
+            if budget.should_stop():
+                run_status = "budget_exhausted"
+                issues.append({"issue": "validation_budget_exhausted", "next_cohort": cohort})
+                print(f"[M1/kiểm định] Hết ngân sách trước lô {cohort_index}/{total_cohorts}; đã lưu tiến độ.")
+                break
+            print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts} (số {cohort}): kiểm tra nguồn.")
+            state = _source_state_manifest(phase_root / "arxiv" / f"cohort_{cohort:04d}.json", selection, cohort)
+            kaggle_issue = _kaggle_source_provenance_issue(runner, state, cohort)
+            if kaggle_issue:
+                issues.append(kaggle_issue)
+            try:
+                print(f"[M1/kiểm định] Lô {cohort}: khôi phục an toàn và kiểm tra archive.")
+                restored = runner.restore_cohort(
+                    cohort, require_manifest=True, verify_bbl_artifacts=False,
+                )
+                print(f"[M1/kiểm định] Lô {cohort}: khôi phục xong ({restored} thư mục bài).")
+            except KeyboardInterrupt:
+                run_status = "interrupted"
+                issues.append({"cohort": cohort, "issue": "validation_interrupted_during_restore"})
+                print(f"[M1/kiểm định] Đã nhận yêu cầu dừng ở lô {cohort}; thao tác khôi phục có rollback an toàn.")
+                break
+            try:
+                s2_manifest, evidence = _validate_s2_cohort(phase_root, selection, cohort)
+                s2_by_id.update(evidence)
+                s2_status = s2_manifest.get("status")
+            except Exception as exc:
+                s2_status = "invalid_or_incomplete"
+                issues.append({"cohort": cohort, "issue": "s2_checkpoint_invalid", "detail": str(exc)})
+            cohort_papers = [(member, aid) for member, aid in cohort_pairs(cohort) if member == mssv]
+            print(f"[M1/kiểm định] Lô {cohort}: kiểm tra {len(cohort_papers)} bài và checkpoint S2.")
+            for paper_index, (member, aid) in enumerate(cohort_papers, start=1):
+                if paper_index == 1 or paper_index % 10 == 0 or paper_index == len(cohort_papers):
+                    print(f"[M1/kiểm định] Lô {cohort}: bài {paper_index}/{len(cohort_papers)}.")
+                source_status, manifest = _validate_source_paper(runner, member, aid)
+                meta_status = "missing"
+                try:
+                    meta = runner.store.read_metadata(member, aid)
+                    meta_status = meta.get("status", "invalid")
+                except Exception:
+                    meta = None
+                s2 = s2_by_id.get(aid)
+                papers[aid] = {
+                    "source_status": source_status,
+                    "metadata_status": meta_status,
+                    "s2_metadata_status": s2[0].get("status") if s2 else "missing",
+                    "references_status": s2[1].get("status") if s2 else "missing",
+                    "version_count": len((manifest or {}).get("versions") or {}),
+                }
+            integrity = audit_cohort_integrity(runner.store, cohort_papers, cohort_number=cohort)
+            print(f"[M1/kiểm định] Lô {cohort}: xác minh archive nguồn và tính toàn vẹn corpus.")
+            handoff = _verify_source_archive(runner, cohort)
+            cohorts[str(cohort)] = {"integrity": integrity.to_dict(), "handoff": handoff, "s2_status": s2_status}
+            completed_cohorts.append(cohort)
+            progress = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation",
+                        "status": "running", "mssv": mssv,
+                        "selection_fingerprint": selection["fingerprint"],
+                        "expected_id_count": selection["expected_count"], "papers": papers,
+                        "cohorts": cohorts, "issues": issues,
+                        "completed_cohorts": completed_cohorts,
+                        "next_cohort_index": cohort_index + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat()}
+            _write_json(report_path, progress)
+            print(f"[M1/kiểm định] Hoàn tất lô {cohort_index}/{total_cohorts}; đã lưu tiến độ.")
+        ready_m2 = [aid for aid, row in papers.items() if row["source_status"] == "found_source_complete"]
+        ready_m3 = [aid for aid, row in papers.items() if row["source_status"] == "found_source_complete"
+                    and row["metadata_status"] == "complete"
+                    and row["references_status"] in {"complete", "not_found"}]
+        report = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": run_status, "mssv": mssv,
+                  "selection_fingerprint": selection["fingerprint"], "scope": selection["scope"],
+                  "expected_id_count": selection["expected_count"], "papers": papers,
+                  "ready_for_m2": ready_m2, "ready_for_m3": ready_m3,
+                  "cohorts": cohorts, "issues": issues, "completed_cohorts": completed_cohorts,
+                  "updated_at": datetime.now(timezone.utc).isoformat()}
         _write_json(report_path, report)
         report["report_path"] = str(report_path)
+        print(f"[M1/kiểm định] Kết thúc: {run_status}; đã xử lý {len(completed_cohorts)}/{total_cohorts} lô.")
         return report
 
     try:
         with _member_writer_lock(drive, selection):
-            _record_session(phase_root, selection, session_id, "audit")
-            result = observe_stage(
-                runner,
-                "audit",
-                0,
-                audit_and_reconcile,
-                session_id=session_id,
-                configuration={
-                    "selection_fingerprint": selection["fingerprint"],
-                    "mssv": selection["mssv"],
-                    "run_scope": selection["scope"],
-                    "expected_id_count": selection["expected_count"],
-                    "session_budget_seconds": budget_seconds,
-                },
-            )
+            _record_session(phase_root, selection, session_id, "validation")
+            try:
+                result = observe_stage(runner, "validation", 0, validate, session_id=session_id,
+                                       configuration={"selection_fingerprint": selection["fingerprint"], "mssv": mssv})
+            except KeyboardInterrupt:
+                result = _read_json(progress_path)
+                result["status"] = "interrupted"
+                result.setdefault("issues", []).append({"issue": "validation_interrupted_by_user"})
+                result["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_json(progress_path, result)
+                print("[M1/kiểm định] Đã lưu tiến độ. Chạy lại ô kiểm định với cùng phạm vi để tiếp tục.")
             finish_session_envelope(envelope, started_monotonic=started)
-            benchmark = _member_benchmark_summary(runner, phase_root, selection, result)
-            result["benchmark"] = benchmark
-            report_path = Path(result["report_path"])
-            saved_report = _read_json(report_path)
-            saved_report["benchmark"] = benchmark
-            _write_json(report_path, saved_report)
-            summary_path = runner.reports_dir / (
-                f"benchmark_observed_{selection['mssv']}_{selection['fingerprint'][:16]}.json"
-            )
-            _write_json(summary_path, benchmark)
-            result["benchmark_summary_path"] = str(summary_path)
+            result["benchmark"] = _member_benchmark_summary(runner, phase_root, selection, result)
             return result
     finally:
-        envelope_value = _read_json(envelope)
-        if envelope_value.get("status") == "running":
+        if _read_json(envelope).get("status") == "running":
             finish_session_envelope(envelope, started_monotonic=started)
+
+
+def _load_evidence(phase_root: Path, selection: dict) -> dict:
+    evidence = {}
+    for cohort in selection["cohorts"]:
+        root, checkpoint = _cohort_s2_paths(phase_root, cohort)
+        try:
+            manifest = _load_s2_manifest(checkpoint, selection, cohort)
+        except M1PhaseError:
+            continue
+        for aid in manifest["ids"]:
+            try:
+                metadata, references = _read_s2_paper(manifest, root, aid)
+            except Exception:
+                continue
+            if metadata is not None and references is not None:
+                evidence[aid] = (metadata, references)
+    return evidence
+
+
+def run_m1_normalization_member(mssv: str, *, drive_root: str | Path,
+                                local_root: str | Path, output_dir: str | Path | None = None,
+                                cohort_limit: int | None = None) -> dict:
+    """Create explicitly labeled working M1 tables from separate arXiv and S2 evidence."""
+    from src.export import export_papers_table, export_to_parquet
+    selection = build_member_selection(mssv, cohort_limit)
+    drive, local = Path(drive_root).expanduser().resolve(), Path(local_root).expanduser().resolve()
+    runner = FastProductionRunner(local_root=local, drive_root=drive)
+    phase_root = _persist_selection(drive, selection)
+    from src.bbl_handling import audit_bbl_sources
+    print(f"[M1/chuẩn hóa] Bắt đầu: {selection['expected_count']} ID.")
+    print("[M1/chuẩn hóa] Kiểm tra chính sách BBL và tạo artifact thư mục dẫn xuất.")
+    bbl_report = audit_bbl_sources(
+        runner.store,
+        selection["pairs"],
+        output_dir=runner.reports_dir / "derived_bibliography" / selection["fingerprint"],
+        report_path=runner.reports_dir / f"bbl_handling_{selection['fingerprint'][:16]}.json",
+        session_id=selection["fingerprint"][:16],
+    )
+    evidence = _load_evidence(phase_root, selection)
+    print(f"[M1/chuẩn hóa] Đã đọc bằng chứng S2 cho {len(evidence)} ID.")
+    valid_pairs = []
+    for index, pair in enumerate(selection["pairs"], start=1):
+        if index == 1 or index % 100 == 0 or index == selection["expected_count"]:
+            print(f"[M1/chuẩn hóa] Kiểm tra nguồn {index}/{selection['expected_count']}.")
+        state, _ = _validate_source_paper(runner, *pair)
+        if state == "found_source_complete":
+            valid_pairs.append(pair)
+    papers = export_papers_table(runner.store, valid_pairs, verified_only=False, require_m1_complete=False)
+    refs_by_edge = {}
+    for member, aid in valid_pairs:
+        entry = evidence.get(aid)
+        if entry is None or entry[1].get("status") != "complete":
+            continue
+        for item in entry[1].get("items", []):
+            ref_id = item.get("arxiv_id")
+            if not ref_id:
+                continue
+            row = {"arxiv_id": aid, "ref_arxiv_id": ref_id, "ref_title": item.get("title"),
+                         "ref_authors": item.get("authors"),
+                         "ref_submission_date": item.get("submission_date") or item.get("publication_date"),
+                         "ref_s2_id": item.get("s2_paper_id")}
+            key = (aid, ref_id)
+            if key not in refs_by_edge:
+                refs_by_edge[key] = row
+            else:
+                for field in ("ref_title", "ref_authors", "ref_submission_date", "ref_s2_id"):
+                    if refs_by_edge[key][field] in (None, "", []) and row[field] not in (None, "", []):
+                        refs_by_edge[key][field] = row[field]
+    refs = list(refs_by_edge.values())
+    out = Path(output_dir).resolve() if output_dir else drive / "exports" / selection["fingerprint"] / "working"
+    out.mkdir(parents=True, exist_ok=True)
+    export_to_parquet(papers, out / "papers.parquet")
+    export_to_parquet(refs, out / "references.parquet")
+    report = {"stage": "normalization", "is_working_data": True, "selection_fingerprint": selection["fingerprint"],
+              "papers_count": len(papers), "references_count": len(refs), "output_dir": str(out),
+              "excluded_ids": sorted(set(a for _, a in selection["pairs"]) - {r["arxiv_id"] for r in papers}),
+              "bbl_audit": bbl_report}
+    _atomic_json(out / "normalization_report.json", report)
+    print(f"[M1/chuẩn hóa] Hoàn tất: {len(papers)} bài, {len(refs)} tài liệu tham khảo; lưu tại {out}.")
+    return report
+
+
+def run_m1_official_export_member(mssv: str, *, drive_root: str | Path,
+                                  local_root: str | Path, output_dir: str | Path | None = None,
+                                  cohort_limit: int | None = None) -> dict:
+    """Publish official M1 tables only when every assigned paper passes validation."""
+    from src.export import validate_exported_tables
+    selection = build_member_selection(mssv, cohort_limit)
+    validation = run_m1_validation_member(mssv, drive_root=drive_root, local_root=local_root, cohort_limit=cohort_limit)
+    ready = set(validation["ready_for_m3"])
+    not_found = {aid for aid, row in validation["papers"].items() if row["source_status"] == "not_found"}
+    if len(ready | not_found) != selection["expected_count"]:
+        raise RuntimeError("Official M1 export blocked: assigned source or S2 evidence is incomplete.")
+    normalized = run_m1_normalization_member(mssv, drive_root=drive_root, local_root=local_root,
+                                             output_dir=output_dir, cohort_limit=cohort_limit)
+    out = Path(normalized["output_dir"])
+    import pyarrow.parquet as pq
+    paper_rows, ref_rows = pq.read_table(out / "papers.parquet").to_pylist(), pq.read_table(out / "references.parquet").to_pylist()
+    check = validate_exported_tables(paper_rows, ref_rows)
+    if not check["is_valid"]:
+        raise RuntimeError(f"Official M1 export failed schema validation: {check['issues'][:5]}")
+    official = out.parent / "official"
+    official.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy2(out / "papers.parquet", official / "papers.parquet")
+    shutil.copy2(out / "references.parquet", official / "references.parquet")
+    return {"status": "exported", "output_dir": str(official), "validation": check}

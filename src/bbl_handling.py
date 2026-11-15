@@ -533,7 +533,11 @@ def audit_bbl_sources(
     output_dir.mkdir(parents=True, exist_ok=True)
     items: list[dict] = []
 
-    for mssv, arxiv_id in pairs:
+    total_papers = len(pairs)
+    print(f"[M1/chuẩn hóa] Kiểm tra BBL cho {total_papers} bài.")
+    for paper_index, (mssv, arxiv_id) in enumerate(pairs, start=1):
+        if paper_index == 1 or paper_index % 100 == 0 or paper_index == total_papers:
+            print(f"[M1/chuẩn hóa] Kiểm tra BBL: bài {paper_index}/{total_papers}.")
         try:
             manifest = store.read_manifest(mssv, arxiv_id)
         except (OSError, ValueError, KeyError, AttributeError) as exc:

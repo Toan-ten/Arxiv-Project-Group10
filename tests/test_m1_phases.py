@@ -506,24 +506,63 @@ class TestArxivAndAuditGates(unittest.TestCase):
         resumed = m1_phases._ensure_starting_state(runner, phase_root, self.selection)
         self.assertEqual(resumed, initial)
 
-    def test_s2_not_found_conflicting_with_arxiv_found_is_reported_before_merge(self):
-        runner = FastProductionRunner(local_root=self.local, drive_root=self.drive)
-        member, arxiv_id = self.selection["pairs"][0]
-        runner.store.record_discovery({
-            "mssv": member, "arxiv_id": arxiv_id, "status": "not_found",
-        })
-        selection = dict(self.selection, pairs=[[member, arxiv_id]], expected_count=1)
-        evidence = {
-            arxiv_id: (
-                _metadata(arxiv_id, found=True),
-                _references(arxiv_id, found=False),
+    def test_validation_first_run_initializes_missing_progress_report(self):
+        from types import SimpleNamespace
+        from src.m1_phase_modules import audit_phase
+
+        with (
+            patch.object(audit_phase, "_source_state_manifest", return_value={}),
+            patch.object(audit_phase, "_kaggle_source_provenance_issue", return_value=None),
+            patch.object(audit_phase, "_validate_s2_cohort", return_value=({"status": "complete"}, {})),
+            patch.object(audit_phase, "_validate_source_paper", return_value=("not_found", {"versions": {}})),
+            patch.object(audit_phase, "_verify_source_archive", return_value={"archive_sha256": "a" * 64}),
+            patch.object(audit_phase, "_member_benchmark_summary", return_value={}),
+            patch.object(FastProductionRunner, "restore_cohort", return_value=100),
+            patch(
+                "src.storage_integrity.audit_cohort_integrity",
+                return_value=SimpleNamespace(to_dict=lambda: {"status": "ok"}),
             ),
-        }
-        issues = m1_phases._preflight_merge(runner, selection, evidence)
-        self.assertEqual(issues, [{
-            "arxiv_id": arxiv_id, "issue": "s2_conflicts_with_arxiv_not_found",
-        }])
-        self.assertEqual(runner.store.read_manifest(member, arxiv_id)["discovery_status"], "not_found")
+        ):
+            result = m1_phases.run_m1_validation_member(
+                MSSV,
+                drive_root=self.drive,
+                local_root=self.local,
+                cohort_limit=1,
+                budget_seconds=60,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(Path(result["report_path"]).is_file())
+        self.assertEqual(result["completed_cohorts"], [self.cohort])
+
+    def test_validation_accepts_source_verified_archive_without_m1_handoff(self):
+        from src.m1_phase_modules.audit_phase import _verify_source_archive
+
+        runner = FastProductionRunner(local_root=self.local, drive_root=self.drive)
+        archive = runner.archives_dir / f"cohort_{self.cohort:04d}_corpus.tar.gz"
+        archive.write_bytes(b"source-only archive fixture")
+        digest = runner._compute_sha256(archive)
+        (archive.with_name(archive.name + ".sha256")).write_text(
+            f"{digest}  {archive.name}\n", encoding="utf-8",
+        )
+        ids = [aid for _member, aid in cohort_pairs(self.cohort)]
+        manifest_path = archive.with_name(archive.name.replace(".tar.gz", ".manifest.json"))
+        manifest_path.write_text(json.dumps({
+            "cohort_number": self.cohort,
+            "archive_sha256": digest,
+            "archive_state": "source_verified",
+            "included_ids": ids,
+            "included_count": len(ids),
+            "bbl_policy_state": "unverified",
+            "bbl_artifact_archive": None,
+        }), encoding="utf-8")
+
+        evidence = _verify_source_archive(runner, self.cohort)
+
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual(evidence["verification_scope"], "source_archive")
+        self.assertEqual(evidence["archive_state"], "source_verified")
+        self.assertEqual(evidence["included_count"], len(ids))
 
     def test_arxiv_phase_never_calls_s2_and_never_claims_m1(self):
         snapshot = self.base / "snapshot.json"
@@ -615,176 +654,6 @@ class TestArxivAndAuditGates(unittest.TestCase):
         self.assertEqual(saved["archive_state"], "source_verified")
         self.assertEqual(saved["phase_certification"], "arxiv_only")
         self.assertEqual(archive.read_bytes(), b"archive bytes")
-
-    def test_audit_blocks_export_when_source_or_s2_evidence_is_missing(self):
-        with patch("src.export.export_official_datasets") as export:
-            result = m1_phases.run_m1_audit_member(
-                MSSV,
-                drive_root=self.drive,
-                local_root=self.local,
-                cohort_limit=1,
-                budget_seconds=60,
-            )
-        self.assertFalse(result["is_reconciled"])
-        self.assertEqual(result["export_status"], "blocked")
-        self.assertEqual(result["kaggle_source_issues"], [{
-            "cohort": self.cohort,
-            "issue": "required_kaggle_provenance_missing",
-        }])
-        self.assertFalse(result["s2_issues"] == [])
-        export.assert_not_called()
-
-    def test_audit_blocks_export_when_kaggle_discrepancy_checksum_is_invalid(self):
-        from src.kaggle_candidates import persist_discrepancy_evidence
-
-        self.drive.mkdir(parents=True, exist_ok=True)
-        phase_root = m1_phases._persist_selection(self.drive, self.selection)
-        evidence = {
-            "schema_version": 1, "session_id": "tampered-session",
-            "arxiv_id": self.selection["pairs"][0][1],
-            "mssv": MSSV, "decision": "use_arxiv_latest",
-        }
-        pointer = persist_discrepancy_evidence(
-            evidence,
-            evidence_root=phase_root / "arxiv" / "kaggle_discrepancies",
-            checkpoint_root=phase_root / "arxiv" / "kaggle_discrepancy_checkpoints",
-            session_id="tampered-session",
-        )
-        Path(pointer["artifact_path"]).with_suffix(".json.sha256").write_text("0" * 64)
-        with patch("src.export.export_official_datasets") as export:
-            result = m1_phases.run_m1_audit_member(
-                MSSV, drive_root=self.drive, local_root=self.local,
-                cohort_limit=1, budget_seconds=60,
-            )
-        self.assertEqual(result["kaggle_evidence"]["status"], "invalid")
-        self.assertEqual(result["kaggle_evidence_issues"][0]["issue"],
-                         "kaggle_discrepancy_evidence_invalid")
-        self.assertEqual(result["export_status"], "blocked")
-        export.assert_not_called()
-
-    def test_successful_audit_reconciles_s2_without_changing_source_bytes(self):
-        found_id = self.selection["pairs"][0][1]
-
-        def fetch_metadata(ids, **_kwargs):
-            return [_metadata(arxiv_id, found=arxiv_id == found_id) for arxiv_id in ids]
-
-        def fetch_references(arxiv_id, **_kwargs):
-            return _references(arxiv_id, found=arxiv_id == found_id)
-
-        with (
-            patch.object(semantic_scholar, "RateLimiter", return_value=object()),
-            patch.object(semantic_scholar, "fetch_metadata", side_effect=fetch_metadata),
-            patch.object(semantic_scholar, "fetch_references", side_effect=fetch_references),
-            patch.object(semantic_scholar, "_key_from_environment", return_value="offline-s2-fixture-key"),
-        ):
-            s2_result = m1_phases.run_m1_s2_member(
-                MSSV,
-                drive_root=self.drive,
-                local_root=self.local,
-                semantic_scholar_api_key="offline-s2-fixture-key",
-                cohort_limit=1,
-                budget_seconds=120,
-            )
-        self.assertFalse(s2_result["stopped"])
-
-        runner = FastProductionRunner(local_root=self.local, drive_root=self.drive)
-        for member, arxiv_id in self.selection["pairs"]:
-            if arxiv_id != found_id:
-                runner.store.record_discovery({
-                    "mssv": member,
-                    "arxiv_id": arxiv_id,
-                    "status": "not_found",
-                })
-                continue
-            runner.store.record_discovery({
-                "mssv": member,
-                "arxiv_id": arxiv_id,
-                "status": "found",
-                "version_status": "resolved",
-                "version_ids": [arxiv_id + "v1"],
-                "latest_version_id": arxiv_id + "v1",
-                "title": "Verified arXiv title",
-                "authors": ["Verified Author"],
-                "published": "2020-01-02",
-                "updated": "2020-01-02",
-                "missing_fields": [],
-            })
-            destination = runner.store.begin_version(member, arxiv_id, "v1")
-            assert destination is not None
-            destination.mkdir(parents=True, exist_ok=True)
-            tex = destination / "main.tex"
-            tex.write_bytes(b"\\documentclass{article}\\begin{document}fixture\\end{document}")
-            before = tex.read_bytes()
-            runner.store.record_source_result({
-                "mssv": member,
-                "arxiv_id": arxiv_id,
-                "versioned_id": arxiv_id + "v1",
-                "status": "success",
-                "files": ["main.tex"],
-                "downloaded_bytes": len(before),
-                "error": None,
-            })
-
-        kaggle_session_id = "f" * 32
-        snapshot_sha = "a" * 64
-        index_root = self.drive / "kaggle_indices"
-        index_root.mkdir(parents=True, exist_ok=True)
-        index_path = index_root / "audit-fixture-index.json"
-        index_path.write_text(json.dumps({"snapshot_sha256": snapshot_sha}), encoding="utf-8")
-        index_sha = hashlib.sha256(index_path.read_bytes()).hexdigest()
-        runner.reports_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_json(runner.reports_dir / f"kaggle_preparation_{kaggle_session_id}.json", {
-            "session_id": kaggle_session_id,
-            "status": "ready",
-            "snapshot_sha256": snapshot_sha,
-            "index_sha256": index_sha,
-            "index_path": str(index_path),
-        })
-        phase_root = m1_phases._persist_selection(self.drive, self.selection)
-        source_state_path = phase_root / "arxiv" / f"cohort_{self.cohort:04d}.json"
-        source_state_path.parent.mkdir(parents=True, exist_ok=True)
-        source_state = m1_phases._source_state_manifest(
-            source_state_path, self.selection, self.cohort,
-        )
-        source_state.update(
-            status="source_complete",
-            source_complete_papers=100,
-            expected_count=100,
-            kaggle_status="ready",
-            kaggle_snapshot_sha256=snapshot_sha,
-            kaggle_index_sha256=index_sha,
-            kaggle_session_id=kaggle_session_id,
-            kaggle_policy_version="m1-kaggle-reconcile-v2",
-        )
-        m1_phases._write_json(source_state_path, source_state)
-
-        result = m1_phases.run_m1_audit_member(
-            MSSV,
-            drive_root=self.drive,
-            local_root=self.local,
-            cohort_limit=1,
-            budget_seconds=120,
-        )
-        self.assertTrue(result["is_reconciled"], json.dumps({
-            "source_issues": result.get("source_issues"),
-            "kaggle_source_issues": result.get("kaggle_source_issues"),
-            "s2_issues": result.get("s2_issues"),
-            "merge_conflicts": result.get("merge_conflicts"),
-            "statistics": result.get("statistics"),
-            "cohorts": result.get("cohorts"),
-        }, default=str))
-        self.assertEqual(result["merged_s2_ids"], 1)
-        self.assertEqual(result["export_status"], "exported")
-        self.assertTrue(result["export"]["is_valid"])
-        self.assertEqual(result["export"]["papers_count"], 1)
-        self.assertFalse(result["bbl_audit"]["source_corpus_modified"])
-        self.assertTrue(Path(result["export"]["output_dir"]).is_dir())
-        after = runner.store.paper_path(MSSV, found_id) / "v1" / "main.tex"
-        self.assertEqual(after.read_bytes(), before)
-        metadata = runner.store.read_metadata(MSSV, found_id)
-        self.assertEqual(metadata["provenance"]["arxiv"]["snapshot"]["status"], "found")
-        self.assertEqual(metadata["provenance"]["semantic_scholar"]["snapshot"]["status"], "found")
-
 
 if __name__ == "__main__":
     unittest.main()

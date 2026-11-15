@@ -1753,6 +1753,7 @@ class FastProductionRunner:
         is_link, _, is_file = _inspect_path(archive_path)
         if is_link or not is_file:
             raise ValueError(f"Missing BBL artifact archive {expected_name}")
+        print(f"[BBL/kiểm định] Lô {number}: xác minh archive {len(files)} tệp ({archive_path.stat().st_size} byte).")
         actual_sha = self._compute_sha256(archive_path)
         if actual_sha != artifact_info.get("archive_sha256"):
             raise ValueError("BBL artifact archive checksum mismatch")
@@ -1773,7 +1774,9 @@ class FastProductionRunner:
                 raise ValueError("BBL artifact archive contains unsafe member types")
             if {member.name for member in members} != set(files):
                 raise ValueError("BBL artifact archive member list mismatch")
-            for member in members:
+            for member_index, member in enumerate(members, start=1):
+                if member_index == 1 or member_index % 100 == 0 or member_index == len(members):
+                    print(f"[BBL/kiểm định] Lô {number}: đọc archive {member_index}/{len(members)} tệp.")
                 stream = archive.extractfile(member)
                 if stream is None:
                     raise ValueError("Cannot read BBL artifact archive member")
@@ -1782,7 +1785,9 @@ class FastProductionRunner:
                     raise ValueError(f"BBL artifact member checksum mismatch: {member.name}")
                 payloads[member.name] = data
 
-        for relative, data in payloads.items():
+        for file_index, (relative, data) in enumerate(payloads.items(), start=1):
+            if file_index == 1 or file_index % 100 == 0 or file_index == len(payloads):
+                print(f"[BBL/kiểm định] Lô {number}: kiểm tra đường dẫn {file_index}/{len(payloads)} tệp.")
             relative_path = PurePosixPath(relative)
             target = self.bbl_artifact_dir.joinpath(*relative_path.parts)
             current = self.bbl_artifact_dir
@@ -1821,6 +1826,7 @@ class FastProductionRunner:
         *,
         require_manifest: bool = False,
         require_handoff: bool = False,
+        verify_bbl_artifacts: bool = True,
     ) -> int:
         """Unpack an existing cohort archive or legacy Drive corpus back to local SSD safely.
 
@@ -1933,7 +1939,8 @@ class FastProductionRunner:
             elif require_manifest:
                 raise ValueError(f"Missing accounting manifest for {archive_path.name}")
 
-        if isinstance(m_payload, dict) and "bbl_artifact_archive" in m_payload:
+        if verify_bbl_artifacts and isinstance(m_payload, dict) and "bbl_artifact_archive" in m_payload:
+            print(f"[khôi phục] Lô {number}: đang xác minh archive artifact BBL.")
             self._validate_bbl_artifact_archive(
                 number, m_payload.get("bbl_artifact_archive"), restore=True,
             )

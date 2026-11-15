@@ -28,9 +28,7 @@ Corpus giữ mọi mục tài liệu tham khảo quan sát được, kể cả m
 
 Notebook dùng batch làm đường chính và chỉ phân trang bài có references chưa xác minh được. Đối với batch, cần danh sách hợp lệ và khớp count. Đối với tuyến phân trang, hoàn tất thu thập cần kết thúc chuỗi trang hợp lệ; việc khớp count metadata được đánh giá riêng. Bất nhất sau khi hết trang được giữ thành cảnh báo, không tạo mục giả, không bỏ mục thật và không biến snapshot partial thành complete.
 
-`publicationDate` là ngày xuất bản theo Semantic Scholar. Theo Q&A môn học, có thể dùng trường này cho `ref_submission_date` để thống nhất tên cột với bảng `papers`. Khi dùng, báo cáo phải ghi rõ xuất xứ; không gọi đây là ngày nộp arXiv đã xác minh. Nếu không có `publicationDate`, để giá trị `null`, trừ khi có phép đối chiếu arXiv được ghi trong provenance.
-
-Pha kiểm toán thực hiện phép đối chiếu đó trước xuất: chỉ bổ sung các ngày còn thiếu qua metadata arXiv đã xác minh hoặc Atom `published`, lưu bằng chứng và checksum ngoài corpus. Cache và giá trị ngày được kiểm tra trước khi chiếu ra bảng. Raw S2 và mọi trường nguồn không đổi; không lấy Atom `updated` làm ngày nộp đầu tiên. Không tìm thấy ngày thì giữ null và ghi lý do. Việc bổ sung không mở rộng phạm vi tải TeX sang các bài tham chiếu ngoài phân công.
+`publicationDate` là ngày xuất bản theo Semantic Scholar. Khi chuẩn hóa bảng M1, `ref_submission_date` lấy từ `submission_date` của mục S2 nếu có, nếu không thì từ `publication_date`. Nếu cả hai trường đều thiếu, giá trị là `null`. Kiểm định và chuẩn hóa không truy vấn arXiv để bổ sung ngày, không suy ngày từ ID hoặc `updated`. Bằng chứng S2 gốc được giữ trong điểm khôi phục và là căn cứ truy nguyên giá trị đã chiếu.
 
 ## 4. Bảng xuất
 
@@ -53,7 +51,7 @@ Pha kiểm toán thực hiện phép đối chiếu đó trước xuất: chỉ 
 | `ref_arxiv_id` | Chuỗi, không null | ID arXiv của mục được trích dẫn. |
 | `ref_title` | Chuỗi hoặc null | Tiêu đề mục được trích dẫn. |
 | `ref_authors` | Danh sách chuỗi hoặc null | Tác giả mục được trích dẫn. |
-| `ref_submission_date` | Ngày hoặc null | Ngày theo quy ước ở trên, kèm xuất xứ. |
+| `ref_submission_date` | Ngày hoặc null | Giá trị chiếu từ bằng chứng S2 theo quy ước ở trên. Bảng không có cột provenance riêng; dùng điểm khôi phục S2 để truy nguyên nguồn. |
 | `ref_s2_id` | Chuỗi hoặc null | `paperId` S2 của mục được trích dẫn. |
 
 ## 5. Mã nguồn và tệp `.bbl`
@@ -66,6 +64,6 @@ Thao tác chuyển đổi không sửa manifest hay checksum nguồn. Pipeline g
 
 ## 6. Bản chụp Kaggle bắt buộc trong M1 và dữ liệu lịch sử
 
-Luồng M1 ba pha phải có Colab Secret `KAGGLE_API_TOKEN`. Pipeline tải hoặc tái sử dụng bản chụp Kaggle, xác minh SHA-256 và dựng chỉ mục theo danh sách ID được chọn. Bản chụp và chỉ mục có xuất xứ riêng; chúng hỗ trợ đối chiếu danh sách ID và lịch sử lần nộp. Atom xác nhận ID và mã nguồn của mỗi lần nộp được tải riêng. Việc tái sử dụng cache không miễn yêu cầu cấu hình khóa.
+Quy trình M1 cần Colab Secret `KAGGLE_API_TOKEN`. Pipeline tải hoặc tái sử dụng bản chụp Kaggle, xác minh SHA-256 và dựng chỉ mục theo danh sách ID được chọn. Bản chụp và chỉ mục có xuất xứ riêng; chúng hỗ trợ đối chiếu danh sách ID và lịch sử lần nộp. Atom xác nhận ID và mã nguồn của mỗi lần nộp được tải riêng. Việc tái sử dụng cache không miễn yêu cầu cấu hình khóa.
 
 Khi Kaggle không sẵn có hoặc index không hợp lệ, pha M1 dừng trước khi gọi Atom discovery và giữ nguyên checkpoint đã có. Kiểm toán chỉ chấp nhận source checkpoint có trạng thái Kaggle `ready`, SHA snapshot/index hợp lệ và bằng chứng index khớp checksum. Nếu điểm khôi phục thiếu bằng chứng xuất xứ Kaggle, cần chạy lại pha arXiv để ghi đủ bằng chứng. Dữ liệu đã lưu được giữ để kiểm tra.

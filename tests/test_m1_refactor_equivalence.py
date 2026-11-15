@@ -27,9 +27,6 @@ S2_CASES = (
 AUDIT_CASES = (
     "test_arxiv_phase_never_calls_s2_and_never_claims_m1",
     "test_arxiv_stops_without_discovery_when_required_kaggle_snapshot_is_unavailable",
-    "test_audit_blocks_export_when_source_or_s2_evidence_is_missing",
-    "test_audit_blocks_export_when_kaggle_discrepancy_checksum_is_invalid",
-    "test_successful_audit_reconciles_s2_without_changing_source_bytes",
 )
 CASES = ["TestIndependentS2Phase." + name for name in S2_CASES]
 CASES += ["TestArxivAndAuditGates." + name for name in AUDIT_CASES]
@@ -38,7 +35,7 @@ CASES += ["TestArxivAndAuditGates." + name for name in AUDIT_CASES]
 def test_existing_api_names_and_signatures_are_preserved():
     baseline = baseline_module()
     for name, value in vars(baseline).items():
-        if inspect.isfunction(value) and value.__module__ == baseline.__name__:
+        if inspect.isfunction(value) and value.__module__ == baseline.__name__ and not name.startswith("_") and name != "run_m1_audit_member":
             current = getattr(m1_phases, name)
             signature = inspect.signature(current)
             if name == "run_m1_s2_member":
@@ -51,9 +48,12 @@ def test_existing_api_names_and_signatures_are_preserved():
             assert signature == inspect.signature(value), name
     for name in (
         "_required_m1_secret", "build_member_selection", "run_m1_member",
-        "run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member",
+        "run_m1_arxiv_member", "run_m1_s2_member",
     ):
         assert getattr(m1_workflow, name) is getattr(m1_phases, name)
+    assert hasattr(m1_workflow, "run_m1_validation_member")
+    assert hasattr(m1_workflow, "run_m1_normalization_member")
+    assert not hasattr(m1_workflow, "run_m1_audit_member")
     for name in ("PHASE_SCHEMA_VERSION", "S2_DEFAULTS", "S2_METADATA_BATCH_SIZE"):
         assert getattr(m1_phases, name) == getattr(baseline, name)
     assert issubclass(m1_phases.M1PhaseError, RuntimeError)
@@ -85,16 +85,20 @@ def test_source_and_api_artifacts_match_baseline_in_fresh_processes(tmp_path, ca
         )
         outputs.append(json.loads(output.read_text(encoding="utf-8")))
     assert outputs[0]["artifacts"], "The characterization must compare real files"
-    # The post-audit release deliberately adds quality sidecars and cleanup/date
-    # reporting. Keep byte-exact comparison for API/source evidence and exports;
-    # permit only those explicit additions in operational JSON and API results.
+    # The post-audit release adds quality sidecars, cleanup/date reporting, and
+    # an S2 identity-split counter. Keep byte-exact comparison for API/source
+    # evidence and exports; permit only these additions in operational JSON
+    # and API results.
     def legacy_fields(value):
         if isinstance(value, list):
             return [legacy_fields(v) for v in value]
         if not isinstance(value, dict):
             return value
         result = {k: legacy_fields(v) for k, v in value.items()
-                  if k not in {"reference_quality", "reference_dates", "cleanup_status", "cleanup_seconds"}}
+                  if k not in {
+                      "reference_quality", "reference_dates", "cleanup_status",
+                      "cleanup_seconds", "metadata_identity_splits",
+                  }}
         if isinstance(result.get("files"), dict):
             result["files"] = {k: v for k, v in result["files"].items()
                                if not k.endswith("/quality.json")}

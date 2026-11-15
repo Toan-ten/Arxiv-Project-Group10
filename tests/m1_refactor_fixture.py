@@ -180,7 +180,7 @@ def run_fixture(implementation: str, case: str, workspace: Path) -> dict:
                 stack.enter_context(patch.object(loaded, "ResourceSampler", FixedSampler))
             if getattr(loaded, "_atomic_json", None) is _atomic_json:
                 stack.enter_context(patch.object(loaded, "_atomic_json", record_write))
-        for name in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member"):
+        for name in ("run_m1_arxiv_member", "run_m1_s2_member"):
             stack.enter_context(patch.object(module, name, record_result(getattr(module, name))))
         test.setUp()
         try:

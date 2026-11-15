@@ -1,18 +1,18 @@
 # Vận hành M1 trên Colab
 
-Hướng dẫn thao tác chuẩn nằm trong [Hướng dẫn thành viên chạy M1](../M1_COLAB_MEMBER_GUIDE.md). Notebook chạy ba pha arXiv, Semantic Scholar và kiểm toán/đối soát trên phạm vi ID xác định theo MSSV.
+Hướng dẫn thao tác chuẩn nằm trong [Hướng dẫn thành viên chạy M1](../M1_COLAB_MEMBER_GUIDE.md). Notebook chạy thu thập arXiv, thu thập Semantic Scholar, kiểm định bằng chứng và tạo bảng làm việc trên phạm vi ID xác định theo MSSV.
 
 ## Mã nguồn của phiên vận hành
 
 Notebook vận hành trong repo ghim `M1_RUNTIME_COMMIT` tại:
 
 ```text
-e29ea3c9a0525371b4ee6fb6b60ba069ac00b647
+f4b81e26ef2f5dec8a0a73fa7a79abf34534fe9c
 ```
 
 Ô cấu hình kiểm tra SHA có đủ 40 ký tự, fetch từ `origin`, checkout tới commit đó ở trạng thái detached HEAD và xác minh `HEAD` trước khi import mã M1. Nếu kernel đã nạp `src`, ô cấu hình yêu cầu khởi động lại phiên để loại bỏ module đã nạp trong bộ nhớ.
 
-Notebook dùng `reference_strategy="batch_m1"`. Mở [notebook M1 trên Colab](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/feat%2Fs2-request-optimization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb), chọn CPU, nhập MSSV và đặt `COHORT_LIMIT = 1` nếu muốn kiểm tra một lô. Sau ô cấu hình, kiểm tra SHA runtime và dòng `Chiến lược S2: batch_m1`. Có thể chạy riêng ô S2 sau cấu hình; hai Secret vẫn bắt buộc theo hợp đồng M1.
+Notebook dùng `reference_strategy="batch_m1"`. Mở [notebook M1 trên Colab](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/refactor%2Fm1-audit-normalization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb), chọn CPU, nhập MSSV và đặt `COHORT_LIMIT = 1` nếu muốn kiểm tra một lô. Sau ô cấu hình, kiểm tra SHA runtime và dòng `Chiến lược S2: batch_m1`; sau đó chạy các ô theo thứ tự trong sổ tay. Nếu pha S2 bị dừng, chạy lại ô cấu hình rồi tiếp tục bằng ô S2 với cùng MSSV, phạm vi và thư mục Drive. Hai Secret vẫn bắt buộc theo hợp đồng M1.
 
 Dữ liệu chạy thử nằm trong `M1-pipeline-optimization-pilot/<MSSV>` trên My Drive; phạm vi đầy đủ dùng `M1-pipeline-optimization-full/<MSSV>`. Chạy lại cùng MSSV, phạm vi và thư mục sẽ tái sử dụng checkpoint hợp lệ. Khi công bố phép đo, ghi rõ trạng thái dữ liệu tại thời điểm bắt đầu. Khi sao chép notebook, kiểm tra SHA đã ghim trong ô cấu hình trước khi chạy.
 

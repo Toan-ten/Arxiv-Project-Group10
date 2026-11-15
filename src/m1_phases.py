@@ -38,13 +38,12 @@ from src.m1_phase_modules.arxiv_phase import (
     run_m1_arxiv_member as _run_m1_arxiv_member_impl,
 )
 from src.m1_phase_modules.audit_phase import (
-    _merge_s2,
-    _preflight_merge,
-    _same_reference_snapshot,
     _validate_source_paper,
 )
 from src.m1_phase_modules.audit_phase import (
-    run_m1_audit_member as _run_m1_audit_member_impl,
+    run_m1_validation_member as _run_m1_validation_member_impl,
+    run_m1_normalization_member as _run_m1_normalization_member_impl,
+    run_m1_official_export_member as _run_m1_official_export_member_impl,
 )
 from src.m1_phase_modules.benchmark_summary import (
     _load_phase_observations,
@@ -176,7 +175,7 @@ def run_m1_s2_member(
     )
 
 
-def run_m1_audit_member(
+def run_m1_validation_member(
     mssv: str,
     *,
     drive_root: str | Path,
@@ -185,16 +184,29 @@ def run_m1_audit_member(
     output_dir: str | Path | None = None,
     budget_seconds: float = 10 * 60 * 60,
 ) -> dict:
-    """Validate both phases, safely merge S2, then export only complete M1 data."""
-    return _run_m1_audit_member_impl(
+    """Read and report phase evidence without reconciling or exporting it."""
+    return _run_m1_validation_member_impl(
         mssv,
         drive_root=drive_root,
         local_root=local_root,
         cohort_limit=cohort_limit,
-        output_dir=output_dir,
         budget_seconds=budget_seconds,
         runner_factory=FastProductionRunner,
     )
+
+
+def run_m1_normalization_member(mssv: str, *, drive_root: str | Path,
+                                local_root: str | Path, output_dir: str | Path | None = None,
+                                cohort_limit: int | None = None) -> dict:
+    return _run_m1_normalization_member_impl(mssv, drive_root=drive_root, local_root=local_root,
+                                             output_dir=output_dir, cohort_limit=cohort_limit)
+
+
+def run_m1_official_export_member(mssv: str, *, drive_root: str | Path,
+                                  local_root: str | Path, output_dir: str | Path | None = None,
+                                  cohort_limit: int | None = None) -> dict:
+    return _run_m1_official_export_member_impl(mssv, drive_root=drive_root, local_root=local_root,
+                                               output_dir=output_dir, cohort_limit=cohort_limit)
 
 
 def run_m1_member(
@@ -227,7 +239,8 @@ def run_m1_member(
         auto_resume_429=True,
     )
     if arxiv_result["stopped"]:
-        return {"stage": "arxiv", "arxiv": arxiv_result, "s2": None, "audit": None}
+        return {"stage": "arxiv", "arxiv": arxiv_result, "s2": None,
+                "validation": None, "normalization": None}
     s2_result = run_m1_s2_member(
         mssv,
         drive_root=drive_root,
@@ -239,21 +252,25 @@ def run_m1_member(
         reference_strategy="batch_m1",
     )
     if s2_result["stopped"]:
-        return {"stage": "s2", "arxiv": arxiv_result, "s2": s2_result, "audit": None}
-    audit_result = run_m1_audit_member(
+        return {"stage": "s2", "arxiv": arxiv_result, "s2": s2_result,
+                "validation": None, "normalization": None}
+    audit_result = run_m1_validation_member(
         mssv,
         drive_root=drive_root,
         local_root=local_root,
         cohort_limit=cohort_limit,
         budget_seconds=remaining_budget(),
     )
+    working = run_m1_normalization_member(mssv, drive_root=drive_root, local_root=local_root,
+                                          cohort_limit=cohort_limit)
     return {
-        "stage": "audit",
+        "stage": "validation",
         "mssv": mssv,
         "selection_fingerprint": arxiv_result["selection_fingerprint"],
         "arxiv": arxiv_result,
         "s2": s2_result,
-        "audit": audit_result,
-        "handoff_status": "verified" if audit_result.get("is_reconciled") else "blocked",
-        "export": audit_result.get("export"),
+        "validation": audit_result,
+        "normalization": working,
+        "handoff_status": "validated" if not audit_result.get("issues") else "partial",
+        "export": None,
     }

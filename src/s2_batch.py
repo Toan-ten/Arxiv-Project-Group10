@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 from datetime import datetime, timezone
 import json
+from typing import Callable
 from urllib.parse import urlencode
 
 from src import semantic_scholar as s2
@@ -23,6 +24,7 @@ BATCH_FIELDS = s2.METADATA_FIELDS + tuple(
 SIZE_ERRORS = {
     "response_too_large", "http_413_request_too_large", "http_400_response_too_large",
 }
+IDENTITY_ERRORS = {"arxiv_identity_mismatch", "arxiv_identity_unverified"}
 
 
 def _snapshot(identifier: str, paper: dict) -> tuple[dict | None, str | None]:
@@ -61,9 +63,10 @@ def fetch_enrichment(
     limiter: s2.RateLimiter | None = None, timeout: float = 30.0,
     max_attempts: int = 8, max_response_bytes: int = s2.MAX_RESPONSE_BYTES,
     max_retry_wait: float = 600.0, backoff_base: float = 3.0,
-    backoff_cap: float = 60.0,
+    backoff_cap: float = 60.0, on_request: Callable[[], None] | None = None,
+    on_split: Callable[[str], None] | None = None,
 ) -> list[dict]:
-    """Return metadata plus verified M1 references, splitting size errors only.
+    """Return metadata plus verified M1 references, splitting size and identity errors.
 
     A None references value requests a paginated fallback, never an empty result.
     All identities in a response are verified before returning any of its rows.
@@ -127,7 +130,12 @@ def fetch_enrichment(
             max_response_bytes=max_response_bytes, max_retry_wait=max_retry_wait,
             backoff_base=backoff_base, backoff_cap=backoff_cap,
         )
-        if response["error"] in SIZE_ERRORS and len(chunk) > 1:
+        if on_request is not None:
+            on_request()
+        if (response["error"] in (SIZE_ERRORS | IDENTITY_ERRORS)
+                and len(chunk) > 1):
+            if on_split is not None:
+                on_split(response["error"])
             middle = len(chunk) // 2
             left = request(chunk[:middle])
             stop = blocked(left)

@@ -101,13 +101,52 @@ def test_verified_empty_list_is_complete(transport):
     assert fetch(transport, [identifier])[0]["references"]["status"] == "complete"
 
 
-def test_swapped_batch_identities_fail_before_any_row_is_accepted(transport):
+def test_swapped_batch_identities_are_isolated_by_recursive_splitting(transport):
     ids = identifiers(2)
-    transport.outcomes.append([batch_paper(i) for i in reversed(ids)])
+    def response(requested):
+        requested = [identifier.removeprefix("ARXIV:") for identifier in requested]
+        ordered = list(reversed(requested)) if len(requested) > 1 else requested
+        return [batch_paper(identifier) for identifier in ordered]
+
+    transport.outcomes.extend([response] * 3)
     rows = fetch(transport, ids)
-    assert len(transport.calls) == 1
-    assert all(r["metadata"]["status"] == "invalid_response" for r in rows)
-    assert all(r["references"] is None for r in rows)
+    assert len(transport.calls) == 3
+    assert all(r["metadata"]["status"] == "found" for r in rows)
+    assert all(r["references"]["status"] == "complete" for r in rows)
+
+
+def test_identity_mismatch_isolated_to_single_id_and_request_count_is_observable(transport):
+    ids = identifiers(4)
+    invalid_id = ids[-1]
+
+    def response(requested):
+        requested = [identifier.removeprefix("ARXIV:") for identifier in requested]
+        rows = [batch_paper(identifier) for identifier in requested]
+        if invalid_id in requested:
+            index = requested.index(invalid_id)
+            rows[index]["externalIds"]["ArXiv"] = ids[0]
+        return rows
+
+    transport.outcomes.extend([response] * 5)
+    request_count = 0
+    split_reasons = []
+
+    def count_request():
+        nonlocal request_count
+        request_count += 1
+
+    rows = fetch(
+        transport, ids, max_attempts=1, on_request=count_request,
+        on_split=split_reasons.append,
+    )
+
+    assert request_count == len(transport.calls) == 5
+    assert split_reasons == ["arxiv_identity_mismatch", "arxiv_identity_mismatch"]
+    assert [row["metadata"]["status"] for row in rows] == ["found", "found", "found", "invalid_response"]
+    assert [row["metadata"]["arxiv_id"] for row in rows] == ids
+    assert rows[-1]["metadata"]["error"] == "arxiv_identity_mismatch"
+    assert rows[-1]["references"] is None
+    assert all(row["references"]["status"] == "complete" for row in rows[:-1])
 
 
 @pytest.mark.parametrize("code", [403, 429, 500])
@@ -216,6 +255,67 @@ def test_batch_phase_checkpoints_all_papers_and_second_run_uses_no_http(tmp_path
     assert batch.call_count == 1
     assert json.loads(checkpoint.read_text())["files"] == before
     paginated.assert_not_called()
+
+
+def test_batch_resume_uses_metadata_only_when_references_are_already_complete(tmp_path, monkeypatch):
+    ids = [i for member, i in s2_phase.cohort_pairs(151) if member == "24120260"]
+    monkeypatch.setattr(m1_phases, "FastProductionRunner", lambda **kw: FastProductionRunner(
+        **kw, scratch_root=tmp_path / "scratch"))
+    original_rows = [{
+        "metadata": {"arxiv_id": identifier, "status": "invalid_response", "http_status": 200,
+                     "attempts": 1, "paper": None, "error": "arxiv_identity_mismatch"},
+        "references": s2_batch._snapshot(identifier, batch_paper(identifier))[0],
+        "fallback_reason": None,
+    } for identifier in ids]
+    enrichment = Mock(return_value=original_rows)
+    monkeypatch.setattr(s2_batch, "fetch_enrichment", enrichment)
+    settings = dict(drive_root=tmp_path / "drive", local_root=tmp_path / "local",
+                    semantic_scholar_api_key="offline-key", cohort_limit=1,
+                    reference_strategy="batch_m1")
+
+    first = m1_phases.run_m1_s2_member("24120260", **settings)
+    assert first["metadata_complete"] == 0
+    assert first["references_complete"] == 100
+    checkpoint = next((tmp_path / "drive").rglob("cohort_0151/checkpoint.json"))
+    saved = json.loads(checkpoint.read_text())
+    reference_files = {
+        path: (checkpoint.parent / "papers" / path).read_bytes()
+        for path in saved["files"] if path.endswith("/references.json")
+    }
+
+    invalid_id = ids[-1]
+
+    def metadata_only(requested, *, batch_size, **_kwargs):
+        rows = []
+        for start in range(0, len(requested), batch_size):
+            chunk = requested[start:start + batch_size]
+            if invalid_id in chunk and len(chunk) > 1:
+                rows.extend({"arxiv_id": identifier, "status": "invalid_response", "http_status": 200,
+                             "attempts": 1, "paper": None, "error": "arxiv_identity_mismatch"}
+                            for identifier in chunk)
+            else:
+                rows.extend(
+                    {"arxiv_id": identifier,
+                     "status": "invalid_response" if identifier == invalid_id else "found",
+                     "http_status": 200, "attempts": 1,
+                     "paper": None if identifier == invalid_id else paper(identifier),
+                     "error": "arxiv_identity_mismatch" if identifier == invalid_id else None}
+                    for identifier in chunk
+                )
+        return rows
+
+    monkeypatch.setattr(s2, "fetch_metadata", metadata_only)
+    second = m1_phases.run_m1_s2_member("24120260", **settings)
+
+    assert second["metadata_complete"] == 99
+    assert second["references_complete"] == 100
+    assert second["cohorts"]["151"]["phase_metrics"]["metadata_identity_splits"] > 0
+    assert enrichment.call_count == 1
+    updated = json.loads(checkpoint.read_text())
+    for path, content in reference_files.items():
+        assert (checkpoint.parent / "papers" / path).read_bytes() == content
+    assert all(updated["papers"][identifier]["metadata_status"] == "found" for identifier in ids[:-1])
+    assert updated["papers"][invalid_id]["metadata_status"] == "invalid_response"
 
 
 def test_unverified_batch_uses_paginated_fallback_for_only_the_affected_paper(tmp_path, monkeypatch):
