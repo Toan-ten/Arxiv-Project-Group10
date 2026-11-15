@@ -77,12 +77,20 @@ def _s2_request_scope(strategy: str):
 def _fetch_s2_enrichment_batch(
     manifest: dict, cohort_root: Path, identifiers: list[str], config: dict,
     limiter: Any, checkpoint_write: Callable[[], None],
+    on_split: Callable[[str], None] | None = None,
 ) -> tuple[bool, int | None, int, list[str]]:
     """Persist only fully validated rows; stop without splitting 403/429."""
     from src import s2_batch, s2_integration
 
+    calls = 0
+
+    def count_request() -> None:
+        nonlocal calls
+        calls += 1
+
     rows = s2_batch.fetch_enrichment(
         identifiers, batch_size=S2_ENRICHMENT_BATCH_SIZE, limiter=limiter,
+        on_request=count_request, on_split=on_split,
         **{name: config[name] for name in (
             "timeout", "max_attempts", "max_response_bytes", "max_retry_wait",
             "backoff_base", "backoff_cap",
@@ -113,7 +121,7 @@ def _fetch_s2_enrichment_batch(
             stop = metadata["http_status"]
             if stop == 429:
                 affected.append(identifier)
-    return stop is not None, stop, 1, affected
+    return stop is not None, stop, calls, affected
 
 
 @contextmanager
@@ -265,6 +273,7 @@ def _fetch_s2_metadata_batch(
     config: dict,
     limiter: Any,
     checkpoint_write: Callable[[], None],
+    on_split: Callable[[str], None] | None = None,
 ) -> tuple[bool, int | None, int, list[str]]:
     """Fetch and commit one identity-checked metadata batch, one ID at a time."""
     from src import s2_integration, semantic_scholar
@@ -291,21 +300,52 @@ def _fetch_s2_metadata_batch(
                 or any(not isinstance(row, dict) or row.get("arxiv_id") != identifier
                        for identifier, row in zip(chunk, rows))):
             raise M1PhaseError("S2 metadata batch không khớp danh sách ID; chưa ghi bằng chứng.")
-        if (len(chunk) > 1 and all(
-            row.get("status") == "invalid_response"
-            or row.get("error") == "http_413_request_too_large"
-            for row in rows
-        )):
-            midpoint = len(chunk) // 2
-            left = request(chunk[:midpoint])
-            if any(row.get("http_status") in {403, 429} for row in left):
-                return left + [
-                    {"arxiv_id": identifier, "status": "rate_limited",
-                     "http_status": None, "attempts": 0, "paper": None,
-                     "error": "not_attempted_after_rate_limit"}
-                    for identifier in chunk[midpoint:]
-                ]
-            return left + request(chunk[midpoint:])
+        if len(chunk) > 1 and not any(row.get("http_status") in {403, 429} for row in rows):
+            split_all = all(
+                row.get("status") == "invalid_response"
+                or row.get("error") == "http_413_request_too_large"
+                for row in rows
+            )
+            identity_errors = {"arxiv_identity_mismatch", "arxiv_identity_unverified"}
+            split_indices = [
+                index for index, row in enumerate(rows)
+                if (row.get("status") == "invalid_response" and row.get("error") in identity_errors)
+                or row.get("error") == "http_413_request_too_large"
+            ]
+            if split_all:
+                if on_split is not None:
+                    reason = next((row.get("error") for row in rows if row.get("error") in identity_errors),
+                                  "invalid_response")
+                    on_split(reason)
+                midpoint = len(chunk) // 2
+                left = request(chunk[:midpoint])
+                if any(row.get("http_status") in {403, 429} for row in left):
+                    return left + [
+                        {"arxiv_id": identifier, "status": "rate_limited",
+                         "http_status": None, "attempts": 0, "paper": None,
+                         "error": "not_attempted_after_rate_limit"}
+                        for identifier in chunk[midpoint:]
+                    ]
+                return left + request(chunk[midpoint:])
+            if split_indices:
+                split_rows = list(rows)
+                start = previous = split_indices[0]
+                segments = []
+                for index in split_indices[1:]:
+                    if index != previous + 1:
+                        segments.append((start, previous + 1))
+                        start = index
+                    previous = index
+                segments.append((start, previous + 1))
+                for start, end in segments:
+                    if end - start < 2:
+                        continue
+                    reason = next((row.get("error") for row in rows[start:end]
+                                   if row.get("error") in identity_errors), "http_413_request_too_large")
+                    if on_split is not None:
+                        on_split(reason)
+                    split_rows[start:end] = request(chunk[start:end])
+                return split_rows
         return rows
 
     batch_started = time.perf_counter()
@@ -374,6 +414,7 @@ def _process_s2_cohort(
     phase_metrics = {
         "metadata_batch_calls": 0,
         "metadata_fetch_calls": 0,
+        "metadata_identity_splits": 0,
         "metadata_ids_requested": 0,
         "metadata_batch_wall_seconds": 0.0,
         "references_wall_seconds": 0.0,
@@ -492,17 +533,47 @@ def _process_s2_cohort(
                             if manifest["papers"][future_id]["metadata_status"] not in {"found", "not_found"}:
                                 candidates.append(future_id)
                         if candidates:
-                            phase_metrics["metadata_batch_calls"] += 1
-                            phase_metrics["metadata_ids_requested"] += len(candidates)
-                            fetch = (_fetch_s2_enrichment_batch if strategy == "batch_m1"
-                                     else _fetch_s2_metadata_batch)
                             if strategy == "batch_m1":
-                                phase_metrics["enrichment_batch_calls"] += 1
-                            policy_stop, policy_status, fetch_calls, policy_ids = fetch(
-                                manifest, cohort_root, candidates,
-                                config, limiter, checkpoint_write,
-                            )
-                            phase_metrics["metadata_fetch_calls"] += fetch_calls
+                                metadata_only = [
+                                    identifier for identifier in candidates
+                                    if manifest["papers"][identifier]["references_status"]
+                                    in {"complete", "not_found"}
+                                ]
+                                enrichment = [
+                                    identifier for identifier in candidates
+                                    if manifest["papers"][identifier]["references_status"]
+                                    not in {"complete", "not_found"}
+                                ]
+                                fetch_groups = [
+                                    (metadata_only, _fetch_s2_metadata_batch, False),
+                                    (enrichment, _fetch_s2_enrichment_batch, True),
+                                ]
+                            else:
+                                fetch_groups = [(candidates, _fetch_s2_metadata_batch, False)]
+
+                            policy_stop, policy_status, policy_ids = False, None, []
+                            for fetch_ids, fetch, is_enrichment in fetch_groups:
+                                if not fetch_ids:
+                                    continue
+                                phase_metrics["metadata_batch_calls"] += 1
+                                phase_metrics["metadata_ids_requested"] += len(fetch_ids)
+                                if is_enrichment:
+                                    phase_metrics["enrichment_batch_calls"] += 1
+                                fetch_options = {}
+                                def record_identity_split(reason: str) -> None:
+                                    if reason in {"arxiv_identity_mismatch", "arxiv_identity_unverified"}:
+                                        phase_metrics["metadata_identity_splits"] += 1
+
+                                fetch_options["on_split"] = record_identity_split
+                                group_stop, group_status, fetch_calls, group_policy_ids = fetch(
+                                    manifest, cohort_root, fetch_ids,
+                                    config, limiter, checkpoint_write, **fetch_options,
+                                )
+                                phase_metrics["metadata_fetch_calls"] += fetch_calls
+                                if group_stop:
+                                    policy_stop, policy_status = group_stop, group_status
+                                    policy_ids.extend(group_policy_ids)
+                                    break
                         else:
                             policy_stop, policy_status = False, None
                     finally:

@@ -12,7 +12,7 @@ Trạng thái S2 `not_found` chỉ mô tả kết quả tra cứu của Semantic
 
 S2 dùng Semantic Scholar Graph API: truy vấn batch tại `POST /graph/v1/paper/batch` lấy metadata và references; endpoint `/paper/{paper_id}/references` xử lý những bài cần phân trang. Xem [tài liệu API chính thức](https://api.semanticscholar.org/api-docs) để biết trường dữ liệu và giới hạn dịch vụ.
 
-Notebook và hàm tuần tự `run_m1_member()` dùng `reference_strategy="batch_m1"` để truy vấn metadata cùng references. Notebook dùng SHA trong `M1_RUNTIME_COMMIT`; [hướng dẫn Colab](colab.md) nêu cách kiểm tra mã thực thi.
+Notebook và hàm tuần tự `run_m1_member()` dùng `reference_strategy="batch_m1"` để truy vấn metadata cùng references. Khi metadata cần thử lại nhưng references đã hoàn tất trong checkpoint, pha chỉ truy vấn metadata và giữ nguyên references đã lưu. Notebook dùng SHA trong `M1_RUNTIME_COMMIT`; [hướng dẫn Colab](colab.md) nêu cách kiểm tra mã thực thi.
 
 | Tham số | Giá trị trong pha S2 | Phạm vi |
 |---|---:|---|
@@ -43,9 +43,9 @@ Lựa chọn `batch_m1` gom tối đa 100 ID chưa có metadata hợp lệ vào 
 
 Client xác minh ID arXiv của toàn bộ lô trước khi trả kết quả. References chỉ được công nhận hoàn tất khi trường references là danh sách, mọi mục chuẩn hóa được và số mục bằng referenceCount nguyên không âm. Thiếu danh sách hoặc thiếu/sai số lượng sẽ chuyển sang phân trang. Số lượng khớp chỉ xác nhận độ đầy đủ theo dữ liệu S2 trong phản hồi; không chứng minh đã thu thập mọi tài liệu trong LaTeX.
 
-Chỉ lỗi kích thước được nhận diện mới làm lô tách đôi. HTTP 403/429 không làm tách lô hoặc chuyển sang request phân trang; pha ghi bằng chứng và dừng theo chính sách hiện có. Lỗi định danh không được xử lý bằng cách chia lô để bỏ qua kiểm tra. References đang thu thập dở được tiếp tục qua phân trang, bảo toàn raw và kiểm tra phần đầu đã lưu; batch không ghi đè phần đã lưu. Dữ liệu hoàn tất hợp lệ được tái sử dụng.
+Lỗi kích thước và lỗi định danh arXiv trong batch làm lô metadata–references tách đôi để cô lập ID lỗi. Mỗi phần vẫn phải qua kiểm tra định danh; một ID còn sai sau truy vấn riêng được giữ ở trạng thái lỗi. HTTP 403/429 không làm tách lô hoặc chuyển sang request phân trang; pha ghi bằng chứng và dừng theo chính sách hiện có. References đang thu thập dở được tiếp tục qua phân trang, bảo toàn raw và kiểm tra phần đầu đã lưu; batch không ghi đè phần đã lưu. Dữ liệu hoàn tất hợp lệ được tái sử dụng.
 
-`metadata_batch_wall_seconds` gồm thời gian nhận metadata và references trong cùng phản hồi batch. `references_wall_seconds` đo đường phân trang. `metadata_fetch_calls` là số lời gọi hàm fetch của pha, khác với số lượt HTTP sau retry hoặc chia lô. Thời gian toàn pha và số lượt HTTP thực tế là các chỉ số vận hành chính.
+`metadata_batch_wall_seconds` gồm thời gian nhận metadata và references trong cùng phản hồi batch. `references_wall_seconds` đo đường phân trang. `metadata_fetch_calls` đếm các request batch con, kể cả lần chia lô, nhưng không cộng các lượt HTTP retry bên trong request. `metadata_identity_splits` đếm số lần chia lô do lỗi định danh. Thời gian toàn pha và số lượt HTTP thực tế là các chỉ số vận hành chính.
 
 ## Kiểm tra metadata và references
 

@@ -84,7 +84,7 @@ Pha S2 yêu cầu Colab Secret `SEMANTIC_SCHOLAR_API_KEY` và không gửi reque
 
 Semantic Scholar được truy vấn bằng Graph API. Corpus giữ mọi mục references quan sát được, kể cả mục không có arXiv ID; bảng xuất chỉ giữ mục đáp ứng lược đồ. Theo Q&A môn học, `ref_submission_date` có thể lấy từ `publicationDate` của Semantic Scholar. Provenance phải ghi nguồn của ngày này; không được diễn giải nó thành ngày nộp arXiv đã xác minh.
 
-Notebook và `run_m1_member()` truyền `reference_strategy="batch_m1"`, gom metadata cùng references tối đa 100 ID mỗi request. Client xác minh định danh và chỉ công nhận references hoàn tất khi danh sách khớp `referenceCount`; trường hợp chưa đủ bằng chứng chuyển sang phân trang. Chỉ lỗi kích thước được nhận diện mới làm lô batch tách đôi; HTTP 403/429 dừng theo chính sách hiện hành. References đang thu thập dở tiếp tục qua phân trang để bảo toàn dữ liệu đã lưu. Phạm vi trường dữ liệu và xuất xứ được nêu trong [hướng dẫn S2](../guides/s2_integration.md).
+Notebook và `run_m1_member()` truyền `reference_strategy="batch_m1"`, gom metadata cùng references tối đa 100 ID mỗi request. Client xác minh định danh và chỉ công nhận references hoàn tất khi danh sách khớp `referenceCount`; trường hợp chưa đủ bằng chứng chuyển sang phân trang. Lỗi kích thước và lỗi định danh trong batch được chia nhỏ để cô lập ID; một ID còn lỗi sau truy vấn riêng vẫn được giữ là chưa hợp lệ. HTTP 403/429 dừng theo chính sách hiện hành. References đang thu thập dở tiếp tục qua phân trang để bảo toàn dữ liệu đã lưu. Phạm vi trường dữ liệu và xuất xứ được nêu trong [hướng dẫn S2](../guides/s2_integration.md).
 
 ### Chính sách `.bbl`
 
