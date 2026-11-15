@@ -20,6 +20,8 @@ Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Ô cấu hìn
 
 Notebook gọi riêng `run_m1_validation_member()` và `run_m1_normalization_member()` sau hai pha thu thập. Kiểm định đọc điểm khôi phục arXiv/S2, khôi phục archive vào ổ cục bộ và ghi báo cáo cùng tiến độ lên Drive; không sửa corpus, archive nguồn hay điểm khôi phục arXiv/S2. Khi kiểm định hoàn tất, chuẩn hóa tạo bảng làm việc. `run_m1_official_export_member()` chỉ tạo bảng chính thức khi bằng chứng đáp ứng điều kiện trên toàn bộ phạm vi được giao.
 
+Khi tạo bảng làm việc thành công, ô 4 đọc `papers.parquet` qua `WORKING_RESULT["output_dir"]`, in kích thước, tên cột và số giá trị thiếu, rồi hiển thị 20 dòng đầu. Ô này chỉ đọc bảng làm việc.
+
 ## Phạm vi ID
 
 | MSSV | Thành viên | Dải ID | Số vị trí | Lô |

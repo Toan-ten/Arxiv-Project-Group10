@@ -17,6 +17,8 @@ Notebook ghim mã chạy bằng SHA `M1_RUNTIME_COMMIT`. Hướng dẫn phát h�
 3. Chạy ô kiểm định. Bước này kiểm tra gói nén và checkpoint, in tiến độ theo lô và lưu báo cáo sau mỗi lô hoàn tất. Bước kiểm định không nhập dữ liệu Semantic Scholar vào corpus.
 4. Chỉ khi kiểm định kết thúc với `status = "completed"`, notebook mới chạy chuẩn hóa và tạo bảng làm việc. Bảng được lưu dưới `exports/<selection_fingerprint>/working/`.
 
+Khi bảng làm việc được tạo, ô 4 đọc `papers.parquet` theo đường dẫn `WORKING_RESULT["output_dir"]`, in kích thước, tên cột và số giá trị thiếu, rồi hiển thị 20 dòng đầu. Phần xem mẫu chỉ đọc bảng; các tệp `papers.parquet`, `references.parquet` và `normalization_report.json` được giữ trong thư mục làm việc.
+
 Nếu bước kiểm định bị dừng bởi ngân sách, notebook lưu các lô đã hoàn tất và không bắt đầu chuẩn hóa. Chạy lại ô 4 với cùng MSSV, phạm vi và Drive root để tiếp tục kiểm tra. Nếu nhấn nút dừng trong lúc khôi phục gói nén, thao tác khôi phục dùng thư mục tạm và tự hoàn nguyên nếu có lỗi; hãy chạy lại ô sau khi Colab đã dừng hoàn toàn.
 
 ## 3. Theo dõi và tiếp tục

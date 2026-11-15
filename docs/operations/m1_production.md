@@ -57,6 +57,8 @@ Các đường dẫn chính được tính từ `drive_root` của thành viên:
     └── normalization_report.json
 ```
 
+`WORKING_RESULT["output_dir"]` lưu đường dẫn của bảng làm việc do chuẩn hóa tạo ra. Khi có bảng, notebook đọc `papers.parquet`, in kích thước, tên cột và số giá trị thiếu, rồi hiển thị 20 dòng đầu. Phần xem mẫu chỉ đọc dữ liệu đã xuất.
+
 `NNNN` là số lô có bốn chữ số; `folder_key` do hàm lưu trữ xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái dữ liệu lúc bắt đầu; `session_index.json` liệt kê các phiên của cùng phạm vi. Trong điểm khôi phục S2, `metadata.json` và `references.json` xuất hiện khi đã có kết quả tương ứng; `quality.json` liên kết checksum của hai tệp và có thể chưa tồn tại trước khi đánh giá chất lượng. Báo cáo kiểm định và báo cáo chuẩn hóa là đầu ra riêng trên Drive. Luồng M1 hiện tại không tra cứu arXiv để bổ sung ngày references trong kiểm định hoặc chuẩn hóa. Trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
 
 Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Kiểm định xác minh riêng điểm khôi phục arXiv, archive nguồn và bằng chứng S2; pha này không thay đổi các dữ liệu đó. Khi kiểm định hoàn tất, chuẩn hóa tạo bảng làm việc từ bài có mã nguồn hợp lệ và references S2 hoàn tất. `ref_submission_date` lấy từ `submission_date` nếu có, nếu không thì lấy `publication_date` trong bằng chứng S2; nếu cả hai đều thiếu, bảng để giá trị `null`. Xuất bảng chính thức là API riêng.
