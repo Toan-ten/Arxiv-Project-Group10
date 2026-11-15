@@ -8,7 +8,7 @@ Kho mã này chứa một quy trình thu thập và kiểm toán dữ liệu arX
 
 ## Bắt đầu
 
-Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar và kiểm toán/đối soát. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
+Quy trình Colab nằm trong [sổ tay M1](notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb). Mọi thành viên dùng cùng danh sách ID tất định theo MSSV, rồi chạy các ô arXiv, Semantic Scholar, kiểm định và chuẩn hóa. Mỗi pha có điểm khôi phục riêng; có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha.
 
 Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Ô cấu hình xác minh commit thực thi trước khi nhập mã M1. Xem [quy tắc ghim và phát hành runtime](docs/guides/colab.md).
 
@@ -16,9 +16,9 @@ Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Ô cấu hìn
 2. Thêm `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi cấp quyền truy cập cho notebook.
 3. Nhập MSSV theo [`config/group10_id_ranges.json`](config/group10_id_ranges.json), giữ `COHORT_LIMIT = None` để xử lý đủ 5.000 ID, rồi chạy ô cấu hình.
 4. Chạy ô arXiv để xác minh ID, các lần nộp và tải mã nguồn; sau đó chạy ô S2.
-5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
+5. Sau hai bước thu thập, chạy ô kiểm định. Notebook chỉ chuẩn hóa khi kiểm định hoàn tất; nếu bị dừng, chạy lại ô đó với cùng MSSV và Drive root.
 
-Notebook chạy riêng các pha `run_m1_validation_member()` và `run_m1_normalization_member()`. Validation chỉ đọc checkpoint và tạo báo cáo theo paper; normalization tạo bảng working. Muốn tạo bảng official, gọi `run_m1_official_export_member()` sau khi đủ bằng chứng trong toàn bộ phạm vi được giao.
+Notebook chạy riêng các pha `run_m1_validation_member()` và `run_m1_normalization_member()`. Kiểm định đọc checkpoint, khôi phục corpus vào ổ cục bộ và ghi báo cáo theo từng bài; dữ liệu lưu trên Drive không bị thay đổi. Chuẩn hóa tạo bảng làm việc. Muốn tạo bảng chính thức, gọi `run_m1_official_export_member()` sau khi đủ bằng chứng trong toàn bộ phạm vi được giao.
 
 ## Phạm vi ID
 
@@ -39,7 +39,7 @@ Cấu hình JSON là nguồn duy nhất để tạo các cặp thành viên–ID
 - Pha S2 yêu cầu `SEMANTIC_SCHOLAR_API_KEY`; M1 không gửi request S2 ẩn danh.
 - Điểm khôi phục, manifest và mã kiểm tra giúp tiếp tục sau khi phiên dừng. Lỗi toàn vẹn hoặc dữ liệu M1 còn thiếu sẽ chặn bàn giao.
 
-Kết thúc thu thập S2 và khớp `referenceCount` là hai kết quả riêng. Nếu đã hết trang nhưng số mục vẫn lệch, chương trình giữ dữ liệu thực nhận, ghi cảnh báo chất lượng và không tự gọi lại vì chênh lệch đó. Trước khi xuất bảng M1, pha kiểm toán bổ sung ngày còn thiếu của references bằng metadata arXiv qua cache có checksum; raw S2 được giữ nguyên. Chi tiết nằm trong [hướng dẫn tích hợp S2](docs/guides/s2_integration.md).
+Kết thúc thu thập S2 và khớp `referenceCount` là hai kết quả riêng. Nếu đã hết trang nhưng số mục vẫn lệch, chương trình giữ dữ liệu thực nhận, ghi cảnh báo chất lượng và không tự gọi lại vì chênh lệch đó. Nếu quy trình bổ sung ngày references được bật, bước đó dùng metadata arXiv qua cache có checksum; raw S2 được giữ nguyên. Chi tiết nằm trong [hướng dẫn tích hợp S2](docs/guides/s2_integration.md).
 
 Kho dữ liệu dùng lược đồ lưu trữ 2. Cấu trúc, xuất xứ và ý nghĩa các trường được mô tả trong [hợp đồng lưu trữ](docs/contracts/corpus_storage_contract.md) và [hợp đồng dữ liệu nguồn](docs/contracts/source_data_contracts.md).
 

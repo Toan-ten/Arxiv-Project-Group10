@@ -44,15 +44,86 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
     budget = SessionBudget(budget_seconds)
     session_id, envelope, started = _session_start(runner, selection, "validation")
     phase_root = _persist_selection(drive, selection)
+    progress_path = runner.reports_dir / f"m1_validation_{mssv}_{selection['fingerprint'][:16]}.json"
+    saved_progress = {}
+    try:
+        candidate = _read_json(progress_path)
+        if (candidate.get("selection_fingerprint") == selection["fingerprint"]
+                and candidate.get("status") in {"running", "interrupted", "budget_exhausted"}):
+            saved_progress = candidate
+    except (OSError, ValueError, TypeError):
+        saved_progress = {}
+    if not saved_progress:
+        _write_json(progress_path, {
+            "schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": "running",
+            "mssv": mssv, "selection_fingerprint": selection["fingerprint"],
+            "expected_id_count": selection["expected_count"], "papers": {}, "cohorts": {},
+            "issues": [], "completed_cohorts": [], "next_cohort_index": 1,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     def validate():
-        papers, s2_by_id, cohorts, issues = {}, {}, {}, []
-        for cohort in selection["cohorts"]:
+        papers = dict(saved_progress.get("papers") or {})
+        s2_by_id, cohorts = {}, dict(saved_progress.get("cohorts") or {})
+        issues = list(saved_progress.get("issues") or [])
+        completed_cohorts = list(saved_progress.get("completed_cohorts") or [])
+        run_status = "completed"
+        total_cohorts = len(selection["cohorts"])
+        report_path = progress_path
+        print(f"[M1/kiểm định] Bắt đầu: {selection['expected_count']} ID, {total_cohorts} lô; tiếp tục từ {len(completed_cohorts)} lô đã kiểm tra.")
+        for cohort_index, cohort in enumerate(selection["cohorts"], start=1):
+            previous_cohort = cohorts.get(str(cohort))
+            previous_handoff = (previous_cohort or {}).get("handoff") or {}
+            previous_sha = previous_handoff.get("archive_sha256")
+            if cohort in completed_cohorts and previous_sha:
+                try:
+                    print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts}: xác minh archive đã lưu để tiếp tục.")
+                    current_handoff = verify_cohort_handoff(runner, cohort, inspect_members=False)
+                except KeyboardInterrupt:
+                    run_status = "interrupted"
+                    issues.append({"cohort": cohort, "issue": "validation_interrupted_verifying_saved_handoff"})
+                    break
+                except Exception:
+                    current_handoff = None
+                if current_handoff and current_handoff.get("archive_sha256") == previous_sha:
+                    print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts}: archive không đổi; dùng kết quả đã lưu.")
+                    try:
+                        s2_manifest, evidence = _validate_s2_cohort(phase_root, selection, cohort)
+                        s2_by_id.update(evidence)
+                        previous_cohort["s2_status"] = s2_manifest.get("status")
+                        previous_cohort["handoff"] = current_handoff
+                    except Exception as exc:
+                        issues.append({"cohort": cohort, "issue": "s2_checkpoint_invalid", "detail": str(exc)})
+                        previous_cohort["s2_status"] = "invalid_or_incomplete"
+                    cohorts[str(cohort)] = previous_cohort
+                    _write_json(progress_path, {
+                        "schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": "running",
+                        "mssv": mssv, "selection_fingerprint": selection["fingerprint"],
+                        "expected_id_count": selection["expected_count"], "papers": papers,
+                        "cohorts": cohorts, "issues": issues, "completed_cohorts": completed_cohorts,
+                        "next_cohort_index": cohort_index + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    continue
+            if budget.should_stop():
+                run_status = "budget_exhausted"
+                issues.append({"issue": "validation_budget_exhausted", "next_cohort": cohort})
+                print(f"[M1/kiểm định] Hết ngân sách trước lô {cohort_index}/{total_cohorts}; đã lưu tiến độ.")
+                break
+            print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts} (số {cohort}): kiểm tra nguồn.")
             state = _source_state_manifest(phase_root / "arxiv" / f"cohort_{cohort:04d}.json", selection, cohort)
             kaggle_issue = _kaggle_source_provenance_issue(runner, state, cohort)
             if kaggle_issue:
                 issues.append(kaggle_issue)
-            runner.restore_cohort(cohort)
+            try:
+                print(f"[M1/kiểm định] Lô {cohort}: khôi phục an toàn và kiểm tra archive.")
+                restored = runner.restore_cohort(cohort, verify_bbl_artifacts=False)
+                print(f"[M1/kiểm định] Lô {cohort}: khôi phục xong ({restored} thư mục bài).")
+            except KeyboardInterrupt:
+                run_status = "interrupted"
+                issues.append({"cohort": cohort, "issue": "validation_interrupted_during_restore"})
+                print(f"[M1/kiểm định] Đã nhận yêu cầu dừng ở lô {cohort}; thao tác khôi phục có rollback an toàn.")
+                break
             try:
                 s2_manifest, evidence = _validate_s2_cohort(phase_root, selection, cohort)
                 s2_by_id.update(evidence)
@@ -60,9 +131,11 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
             except Exception as exc:
                 s2_status = "invalid_or_incomplete"
                 issues.append({"cohort": cohort, "issue": "s2_checkpoint_invalid", "detail": str(exc)})
-            for member, aid in cohort_pairs(cohort):
-                if member != mssv:
-                    continue
+            cohort_papers = [(member, aid) for member, aid in cohort_pairs(cohort) if member == mssv]
+            print(f"[M1/kiểm định] Lô {cohort}: kiểm tra {len(cohort_papers)} bài và checkpoint S2.")
+            for paper_index, (member, aid) in enumerate(cohort_papers, start=1):
+                if paper_index == 1 or paper_index % 10 == 0 or paper_index == len(cohort_papers):
+                    print(f"[M1/kiểm định] Lô {cohort}: bài {paper_index}/{len(cohort_papers)}.")
                 source_status, manifest = _validate_source_paper(runner, member, aid)
                 meta_status = "missing"
                 try:
@@ -78,29 +151,49 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
                     "references_status": s2[1].get("status") if s2 else "missing",
                     "version_count": len((manifest or {}).get("versions") or {}),
                 }
-            integrity = audit_cohort_integrity(runner.store, [(m, a) for m, a in cohort_pairs(cohort) if m == mssv], cohort_number=cohort)
+            integrity = audit_cohort_integrity(runner.store, cohort_papers, cohort_number=cohort)
+            print(f"[M1/kiểm định] Lô {cohort}: xác minh handoff và tính toàn vẹn archive.")
             handoff = verify_cohort_handoff(runner, cohort, inspect_members=True)
             cohorts[str(cohort)] = {"integrity": integrity.to_dict(), "handoff": handoff, "s2_status": s2_status}
+            completed_cohorts.append(cohort)
+            progress = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation",
+                        "status": "running", "mssv": mssv,
+                        "selection_fingerprint": selection["fingerprint"],
+                        "expected_id_count": selection["expected_count"], "papers": papers,
+                        "cohorts": cohorts, "issues": issues,
+                        "completed_cohorts": completed_cohorts,
+                        "next_cohort_index": cohort_index + 1,
+                        "updated_at": datetime.now(timezone.utc).isoformat()}
+            _write_json(report_path, progress)
+            print(f"[M1/kiểm định] Hoàn tất lô {cohort_index}/{total_cohorts}; đã lưu tiến độ.")
         ready_m2 = [aid for aid, row in papers.items() if row["source_status"] == "found_source_complete"]
         ready_m3 = [aid for aid, row in papers.items() if row["source_status"] == "found_source_complete"
                     and row["metadata_status"] == "complete"
                     and row["references_status"] in {"complete", "not_found"}]
-        report = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "mssv": mssv,
+        report = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": run_status, "mssv": mssv,
                   "selection_fingerprint": selection["fingerprint"], "scope": selection["scope"],
                   "expected_id_count": selection["expected_count"], "papers": papers,
                   "ready_for_m2": ready_m2, "ready_for_m3": ready_m3,
-                  "cohorts": cohorts, "issues": issues,
+                  "cohorts": cohorts, "issues": issues, "completed_cohorts": completed_cohorts,
                   "updated_at": datetime.now(timezone.utc).isoformat()}
-        report_path = runner.reports_dir / f"m1_validation_{mssv}_{selection['fingerprint'][:16]}.json"
         _write_json(report_path, report)
         report["report_path"] = str(report_path)
+        print(f"[M1/kiểm định] Kết thúc: {run_status}; đã xử lý {len(completed_cohorts)}/{total_cohorts} lô.")
         return report
 
     try:
         with _member_writer_lock(drive, selection):
             _record_session(phase_root, selection, session_id, "validation")
-            result = observe_stage(runner, "validation", 0, validate, session_id=session_id,
-                                   configuration={"selection_fingerprint": selection["fingerprint"], "mssv": mssv})
+            try:
+                result = observe_stage(runner, "validation", 0, validate, session_id=session_id,
+                                       configuration={"selection_fingerprint": selection["fingerprint"], "mssv": mssv})
+            except KeyboardInterrupt:
+                result = _read_json(progress_path)
+                result["status"] = "interrupted"
+                result.setdefault("issues", []).append({"issue": "validation_interrupted_by_user"})
+                result["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_json(progress_path, result)
+                print("[M1/kiểm định] Đã lưu tiến độ. Chạy lại ô kiểm định với cùng phạm vi để tiếp tục.")
             finish_session_envelope(envelope, started_monotonic=started)
             result["benchmark"] = _member_benchmark_summary(runner, phase_root, selection, result)
             return result
@@ -131,12 +224,14 @@ def run_m1_normalization_member(mssv: str, *, drive_root: str | Path,
                                 local_root: str | Path, output_dir: str | Path | None = None,
                                 cohort_limit: int | None = None) -> dict:
     """Create explicitly labeled working M1 tables from separate arXiv and S2 evidence."""
-    from src.export import export_papers_table, export_references_table, export_to_parquet
+    from src.export import export_papers_table, export_to_parquet
     selection = build_member_selection(mssv, cohort_limit)
     drive, local = Path(drive_root).expanduser().resolve(), Path(local_root).expanduser().resolve()
     runner = FastProductionRunner(local_root=local, drive_root=drive)
     phase_root = _persist_selection(drive, selection)
     from src.bbl_handling import audit_bbl_sources
+    print(f"[M1/chuẩn hóa] Bắt đầu: {selection['expected_count']} ID.")
+    print("[M1/chuẩn hóa] Kiểm tra chính sách BBL và tạo artifact thư mục dẫn xuất.")
     bbl_report = audit_bbl_sources(
         runner.store,
         selection["pairs"],
@@ -145,8 +240,11 @@ def run_m1_normalization_member(mssv: str, *, drive_root: str | Path,
         session_id=selection["fingerprint"][:16],
     )
     evidence = _load_evidence(phase_root, selection)
+    print(f"[M1/chuẩn hóa] Đã đọc bằng chứng S2 cho {len(evidence)} ID.")
     valid_pairs = []
-    for pair in selection["pairs"]:
+    for index, pair in enumerate(selection["pairs"], start=1):
+        if index == 1 or index % 100 == 0 or index == selection["expected_count"]:
+            print(f"[M1/chuẩn hóa] Kiểm tra nguồn {index}/{selection['expected_count']}.")
         state, _ = _validate_source_paper(runner, *pair)
         if state == "found_source_complete":
             valid_pairs.append(pair)
@@ -181,6 +279,7 @@ def run_m1_normalization_member(mssv: str, *, drive_root: str | Path,
               "excluded_ids": sorted(set(a for _, a in selection["pairs"]) - {r["arxiv_id"] for r in papers}),
               "bbl_audit": bbl_report}
     _atomic_json(out / "normalization_report.json", report)
+    print(f"[M1/chuẩn hóa] Hoàn tất: {len(papers)} bài, {len(refs)} tài liệu tham khảo; lưu tại {out}.")
     return report
 
 

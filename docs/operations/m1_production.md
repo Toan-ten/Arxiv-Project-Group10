@@ -6,9 +6,9 @@ Notebook gọi ba API pha từ `src.m1_workflow`:
 
 - `run_m1_arxiv_member`: xác minh ID arXiv, xác định các lần nộp và thu thập mã nguồn.
 - `run_m1_s2_member`: lấy metadata và references Semantic Scholar cho cùng danh sách ID, độc lập với tiến độ arXiv.
-- `run_m1_validation_member`: chỉ kiểm tra bằng chứng, ghi báo cáo từng paper; normalization và export là API riêng.
+- `run_m1_validation_member`: kiểm tra bằng chứng, ghi báo cáo theo từng bài; chuẩn hóa và xuất bảng là API riêng.
 
-Normalization chiếu dữ liệu riêng từ corpus arXiv và checkpoint S2. Validation không gọi API, không hợp nhất S2 và không ghi lại archive. Pha S2 vẫn chạy độc lập, không bắt buộc chờ mã nguồn arXiv để thu thập references. Hết trang nhưng lệch count được báo riêng trong `reference_quality`, không gây vòng tải lại. Khi dừng, sampler có thời gian chờ hữu hạn; thống kê thiếu mẫu cuối được ghi rõ thay vì thay bằng 0.
+Chuẩn hóa đọc riêng corpus arXiv và checkpoint S2 để tạo bảng làm việc. Kiểm định không gọi API, không hợp nhất S2 vào corpus và không sửa checkpoint hay archive trên Drive; archive được khôi phục vào ổ cục bộ để kiểm tra. Kiểm định ghi tiến độ sau mỗi lô và có thể tiếp tục từ báo cáo đã lưu. Pha S2 vẫn chạy độc lập, không bắt buộc chờ mã nguồn arXiv để thu thập references. Hết trang nhưng lệch count được báo riêng trong `reference_quality`, không gây vòng tải lại. Khi dừng, sampler có thời gian chờ hữu hạn; thống kê thiếu mẫu cuối được ghi rõ thay vì thay bằng 0.
 
 `run_m1_member` là hàm gọi tuần tự cả ba pha. Notebook gọi riêng từng pha để có thể tiếp tục từng pha từ điểm khôi phục.
 
@@ -22,7 +22,7 @@ Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`. Xem [cấu hình runti
 |---|---|---|
 | `run_m1_arxiv_member` | `source_complete_papers`, `cohorts`, `stopped`, `stop_reason` | Tiến độ source arXiv; `m1_complete` vẫn là `False` |
 | `run_m1_s2_member` | `metadata_complete`, `references_complete`, `cohorts`, `stopped`, `stop_reason` | Tiến độ evidence S2; `m1_complete` vẫn là `False` |
-| `run_m1_validation_member` | `ready_for_m2`, `ready_for_m3`, trạng thái theo paper và báo cáo validation | Tình trạng bằng chứng của phạm vi ID đã chọn |
+| `run_m1_validation_member` | `status`, `ready_for_m2`, `ready_for_m3`, trạng thái theo bài và báo cáo | Tình trạng bằng chứng của phạm vi ID đã chọn |
 | `run_m1_member` | Kết quả ba pha và `handoff_status` khi chuỗi chạy tới kiểm toán | `verified` phụ thuộc `is_reconciled` của pha kiểm toán |
 
 `stopped = False` chỉ cho biết pha không báo dừng, không thay thế việc kiểm tra độ bao phủ và toàn vẹn. Điều kiện hoàn tất dữ liệu và điều kiện đủ bằng chứng benchmark được đánh giá riêng. Một lô thử hoặc một bản chụp đã đối chiếu không chứng minh toàn bộ 5.000 hay 20.000 vị trí ID đã hoàn tất.

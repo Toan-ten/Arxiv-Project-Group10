@@ -118,7 +118,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
             "Ô 1 — Cấu hình Colab và phạm vi",
             "Ô 2 — Thu thập arXiv",
             "Ô 3 — Thu thập Semantic Scholar",
-            "Ô 4 — Validation và tạo bảng working",
+            "Ô 4 — Kiểm định và tạo bảng làm việc",
         ):
             with self.subTest(heading=heading):
                 self.assertIn(heading, self.text)
@@ -136,6 +136,11 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, s2_cell)
+
+    def test_notebook_skips_normalization_until_validation_finishes(self):
+        validation_cell = next(cell for cell in self.code if "run_m1_validation_member(" in cell)
+        self.assertIn('if VALIDATION_RESULT.get("status") == "completed":', validation_cell)
+        self.assertIn('"reason": "Kiểm định chưa hoàn tất', validation_cell)
 
     def test_data_handling_rules_live_in_the_data_contract(self):
         contract = (self.root / "docs" / "contracts" / "source_data_contracts.md").read_text(encoding="utf-8")
