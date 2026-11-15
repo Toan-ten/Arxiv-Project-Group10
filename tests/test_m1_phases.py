@@ -506,6 +506,35 @@ class TestArxivAndAuditGates(unittest.TestCase):
         resumed = m1_phases._ensure_starting_state(runner, phase_root, self.selection)
         self.assertEqual(resumed, initial)
 
+    def test_validation_first_run_initializes_missing_progress_report(self):
+        from types import SimpleNamespace
+        from src.m1_phase_modules import audit_phase
+
+        with (
+            patch.object(audit_phase, "_source_state_manifest", return_value={}),
+            patch.object(audit_phase, "_kaggle_source_provenance_issue", return_value=None),
+            patch.object(audit_phase, "_validate_s2_cohort", return_value=({"status": "complete"}, {})),
+            patch.object(audit_phase, "_validate_source_paper", return_value=("not_found", {"versions": {}})),
+            patch.object(audit_phase, "verify_cohort_handoff", return_value={"archive_sha256": "a" * 64}),
+            patch.object(audit_phase, "_member_benchmark_summary", return_value={}),
+            patch.object(FastProductionRunner, "restore_cohort", return_value=100),
+            patch(
+                "src.storage_integrity.audit_cohort_integrity",
+                return_value=SimpleNamespace(to_dict=lambda: {"status": "ok"}),
+            ),
+        ):
+            result = m1_phases.run_m1_validation_member(
+                MSSV,
+                drive_root=self.drive,
+                local_root=self.local,
+                cohort_limit=1,
+                budget_seconds=60,
+            )
+
+        self.assertEqual(result["status"], "completed")
+        self.assertTrue(Path(result["report_path"]).is_file())
+        self.assertEqual(result["completed_cohorts"], [self.cohort])
+
     def test_arxiv_phase_never_calls_s2_and_never_claims_m1(self):
         snapshot = self.base / "snapshot.json"
         snapshot.write_bytes(b"verified snapshot fixture")

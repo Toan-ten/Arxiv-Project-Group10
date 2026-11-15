@@ -46,13 +46,11 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
     phase_root = _persist_selection(drive, selection)
     progress_path = runner.reports_dir / f"m1_validation_{mssv}_{selection['fingerprint'][:16]}.json"
     saved_progress = {}
-    try:
+    if progress_path.exists() or progress_path.is_symlink():
         candidate = _read_json(progress_path)
         if (candidate.get("selection_fingerprint") == selection["fingerprint"]
                 and candidate.get("status") in {"running", "interrupted", "budget_exhausted"}):
             saved_progress = candidate
-    except (OSError, ValueError, TypeError):
-        saved_progress = {}
     if not saved_progress:
         _write_json(progress_path, {
             "schema_version": PHASE_SCHEMA_VERSION, "stage": "validation", "status": "running",
