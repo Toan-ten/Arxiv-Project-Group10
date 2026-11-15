@@ -22,6 +22,22 @@ Trước khi chạy, thêm cả `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY
 
 Mặc định, sổ tay chạy arXiv, S2 rồi kiểm toán. Có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha. S2 `not_found` chỉ mô tả kết quả tìm kiếm ở Semantic Scholar; trạng thái này không xác nhận ID arXiv không tồn tại.
 
+### Xem bảng sau kiểm toán
+
+Khi `export_status = "exported"`, kết quả `AUDIT_RESULT` có `export.output_dir`. Notebook đọc `papers.parquet` từ thư mục này, in kích thước, tên cột, số giá trị thiếu và hiển thị 20 dòng đầu. Ô xem dữ liệu chỉ đọc bảng đã xuất, không cập nhật corpus hoặc checkpoint. Khi kiểm toán chưa xuất bảng, notebook in `export_error` và bỏ qua phần xem mẫu.
+
+Với cấu hình mặc định trong notebook, các tệp được ghi dưới `DRIVE_ROOT/exports/<selection_fingerprint>/`:
+
+```text
+exports/<selection_fingerprint>/
+├── papers.parquet
+├── references.parquet
+├── reference_quality.json
+└── reference_conflicts.json
+```
+
+`export.output_dir` là đường dẫn notebook dùng để mở các bảng. Dấu vân tay lấy từ kết quả kiểm toán, nên không cần nhập lại thủ công.
+
 ## 3. Dừng và tiếp tục
 
 Mỗi pha có ngân sách phiên mặc định 10 giờ và điểm khôi phục riêng theo lô. Nếu một pha dừng, chạy lại đúng ô với cùng MSSV, phạm vi, SHA môi trường chạy và thư mục gốc Drive. Không xóa điểm khôi phục và không chạy đồng thời nhiều môi trường ghi cùng phạm vi.

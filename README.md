@@ -20,6 +20,8 @@ Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Ô cấu hìn
 
 Khi gọi riêng pha kiểm toán như trong notebook, kiểm tra `is_reconciled = True` và `export_status = "exported"` cho phạm vi ID đã chọn. Hàm tuần tự `run_m1_member()` trả thêm `handoff_status = "verified"` khi kết quả kiểm toán đạt điều kiện đối soát. Việc tải xong mã nguồn hoặc kết thúc một phiên không tự chứng minh M1 hoàn tất; phạm vi và kết quả kiểm toán phải được xác minh cùng nhau.
 
+Khi xuất thành công, notebook đọc `papers.parquet` từ `AUDIT_RESULT["export"]["output_dir"]` và hiển thị 20 dòng đầu cùng kích thước, tên cột và số giá trị thiếu. Phần xem mẫu chỉ đọc bảng đã xuất.
+
 ## Phạm vi ID
 
 | MSSV | Thành viên | Dải ID | Số vị trí | Lô |
