@@ -1,6 +1,6 @@
 # Điều phối lô trong thư viện
 
-`src.batch` là API thư viện xử lý tuần tự một danh sách ID và lưu nhật ký bền vững. Quy trình M1 của thành viên dùng notebook với ba pha `run_m1_arxiv_member()`, `run_m1_s2_member()` và `run_m1_validation_member() và run_m1_normalization_member()`. `run_m1_member()` gọi cùng các pha và dùng `batch_m1` cho S2. Những tham số của API thư viện dưới đây không tạo thêm chế độ vận hành M1.
+`src.batch` là API thư viện xử lý tuần tự danh sách ID và lưu nhật ký bền vững. Quy trình M1 của thành viên dùng notebook để gọi `run_m1_arxiv_member()`, `run_m1_s2_member()`, `run_m1_validation_member()` và `run_m1_normalization_member()`. `run_m1_member()` lần lượt gọi các pha trên cùng phạm vi và dùng `batch_m1` cho S2. Các tham số của API thư viện dưới đây không tạo thêm chế độ vận hành M1.
 
 ## Giao diện gọi và dữ liệu đầu vào
 

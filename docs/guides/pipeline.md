@@ -1,6 +1,6 @@
 # Xử lý ID trong thư viện
 
-Tài liệu này mô tả `src.pipeline`, API thư viện dùng để xử lý các cặp `(mssv, arxiv_id)`. Quy trình M1 của thành viên có một điểm vào vận hành là notebook. Notebook gọi ba pha qua `src.m1_workflow`; phần triển khai nằm trong `src.m1_phase_modules`. Mỗi pha dùng cùng phạm vi ID và có checkpoint riêng. `run_m1_member()` gọi tuần tự arXiv → S2 `batch_m1` → kiểm toán trên cùng phạm vi. Xem [kiến trúc và trách nhiệm các module](../architecture/repository-structure.md).
+Tài liệu này mô tả `src.pipeline`, API thư viện dùng để xử lý các cặp `(mssv, arxiv_id)`. Notebook là điểm vào vận hành M1 cho thành viên. Notebook gọi các pha qua `src.m1_workflow`; phần triển khai nằm trong `src.m1_phase_modules`. Mọi bước dùng cùng phạm vi ID; hai pha thu thập lưu điểm khôi phục riêng, kiểm định lưu báo cáo tiến độ, còn chuẩn hóa tạo lại bảng từ bằng chứng đã lưu. `run_m1_member()` lần lượt thu thập arXiv, thu thập S2 bằng `batch_m1`, kiểm định bằng chứng và tạo bảng làm việc. Xem [kiến trúc và trách nhiệm các mô-đun](../architecture/repository-structure.md).
 
 ## Kiểm thử ngoại tuyến trên Windows PowerShell
 

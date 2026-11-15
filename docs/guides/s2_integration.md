@@ -4,7 +4,7 @@
 
 Notebook gọi `run_m1_s2_member()` từ `src.m1_workflow`. Module này xuất API của `src.m1_phases`. `src.m1_phase_modules.s2_phase` điều phối pha S2; `src.m1_phase_modules.s2_evidence` quản lý manifest và bằng chứng. `src.s2_integration` xác minh và chuyển đổi dữ liệu S2 theo hợp đồng lưu trữ. Xem [kiến trúc M1](../architecture/repository-structure.md).
 
-Pha S2 nhận danh sách ID xác định theo MSSV, độc lập với tiến độ tải mã nguồn arXiv. Mỗi lô có điểm khôi phục S2 riêng. Kiểm toán chỉ hợp nhất bằng chứng S2 vào corpus sau khi xác minh dấu vân tay phạm vi, định danh và tính toàn vẹn. Runtime notebook được quyết định bởi SHA đã ghim, theo [hướng dẫn Colab](colab.md).
+Theo trình tự vận hành M1, pha S2 chạy sau arXiv trên cùng danh sách ID xác định theo MSSV. Pha này lưu bằng chứng trong điểm khôi phục riêng; việc lấy S2 không phụ thuộc trạng thái hoàn tất mã nguồn từng bài. Pha kiểm định xác minh điểm khôi phục S2 nhưng không nhập dữ liệu S2 vào corpus. Pha chuẩn hóa đọc riêng corpus arXiv và bằng chứng S2 để tạo bảng làm việc. Runtime notebook được quyết định bởi SHA đã ghim, theo [hướng dẫn Colab](colab.md).
 
 Trạng thái S2 `not_found` chỉ mô tả kết quả tra cứu của Semantic Scholar. Trạng thái này không kết luận ID arXiv không tồn tại và không thay đổi kết quả arXiv.
 
@@ -35,7 +35,7 @@ Trong mã hiện hành, một limiter được dùng suốt phiên S2, xuyên co
 
 Luồng notebook là batch → kiểm tra → lưu khi hợp lệ và khớp count; riêng bài chưa xác minh được references chuyển sang endpoint phân trang đến hết trang. Không có lượt gọi xác minh thứ ba sau phân trang. Lỗi định danh và HTTP 403/429 vẫn tuân theo chính sách lỗi, không được biến thành kết quả đủ dữ liệu.
 
-Sau phân trang, `complete` mô tả kết thúc thu thập qua API. Bản ghi `quality.json` bên cạnh evidence ghi riêng `collection_complete`, `pagination_complete`, `metadata_reference_count`, `retrieved_count`, `count_match` và cảnh báo. Bản ghi này liên kết SHA-256 của metadata/references trong checkpoint. Batch thành công không có khái niệm trang, nên `pagination_complete` là null. Khớp count không chứng minh đã bao phủ bibliography trong LaTeX.
+Sau phân trang, `complete` mô tả việc kết thúc thu thập qua API. Tệp `quality.json` cạnh bằng chứng ghi riêng `collection_complete`, `pagination_complete`, `metadata_reference_count`, `retrieved_count`, `count_match` và cảnh báo. Tệp này liên kết SHA-256 của siêu dữ liệu và tài liệu tham khảo trong điểm khôi phục. Batch thành công không có khái niệm trang, nên `pagination_complete` là `null`. Số lượng khớp không chứng minh đã thu thập đủ danh mục tài liệu trong LaTeX.
 
 Batch bị từ chối lưu `batch_fallback` trong envelope metadata: lý do, sự hiện diện của trường references và phần references gốc liên quan. Đánh giá chất lượng dựa trên bằng chứng đã xác minh, không suy diễn lý do chuyển sang phân trang khi điểm khôi phục không ghi nhận lý do đó. Đã hết trang mà count vẫn lệch thì giữ dữ liệu và cảnh báo, không tải lại khi tiếp tục chỉ vì count lệch.
 
@@ -53,7 +53,7 @@ Chỉ gắn metadata với ID yêu cầu khi `externalIds.ArXiv` khớp ID đó.
 
 Đường phân trang lấy references đến khi máy chủ xác nhận không còn trang; đường batch M1 xác minh danh sách với `referenceCount`. Corpus giữ nguyên thứ tự và dữ liệu `raw` của mọi mục quan sát được, kể cả mục thiếu `citedPaper` hoặc arXiv ID. Bảng xuất chỉ nhận mục đáp ứng lược đồ. Trường title, authors, ngày hoặc S2 paperId còn thiếu được ghi trong `missing_fields`; không tự tạo dữ liệu.
 
-`publicationDate` của S2 là ngày xuất bản theo nguồn đó. Theo Q&A môn học, có thể dùng trường này cho cột `ref_submission_date`. Báo cáo phải nêu xuất xứ của giá trị; ngày này không chứng minh ngày nộp arXiv.
+`publicationDate` của S2 là ngày xuất bản theo nguồn đó. Khi chuẩn hóa, trường này được chiếu vào `ref_submission_date` nếu `submission_date` không có giá trị. Ngày này không chứng minh ngày nộp arXiv; có thể truy nguyên về bằng chứng S2 trong điểm khôi phục.
 
 ## Tiếp tục và dừng
 
@@ -63,12 +63,8 @@ Khi các lượt thử nội bộ đã hết và gặp HTTP 429 ở metadata ho�
 
 Kiểm toán bị chặn nếu bằng chứng phân trang, định danh hoặc xuất xứ chưa đầy đủ. Xem [mô tả client cấp thấp](semantic_scholar.md), [hợp đồng dữ liệu](../contracts/source_data_contracts.md) và [hướng dẫn Colab](../M1_COLAB_MEMBER_GUIDE.md).
 
-## Bổ sung ngày trước khi xuất M1
+## Ngày trong bảng references
 
-`run_m1_validation_member()` chỉ đọc evidence cục bộ. Normalization không gọi mạng và giữ ngày không có bằng chứng là null. Ngày thiếu được giữ là null trong bảng working; nếu cần bổ sung ngày, thực hiện ở bước enrichment riêng có provenance.
+Kiểm định không gọi API và chuẩn hóa không truy vấn arXiv. Trong bảng làm việc, `ref_submission_date` lấy từ `submission_date` của mục S2 nếu có; nếu không có thì lấy `publication_date`. Nếu cả hai trường đều thiếu, giá trị là `null`. Mã chuẩn hóa không tự suy ngày từ ID, năm xuất bản hoặc trường `updated` của arXiv.
 
-Theo [tài liệu arXiv](https://info.arxiv.org/help/api/user-manual.html), Atom `published` là ngày nộp đầu tiên; `updated` thuộc lần nộp được truy vấn. Chương trình dùng `published`, chuẩn hóa ngày theo UTC và giữ phản hồi gốc để kiểm chứng, không lấy `updated` hoặc đoán ngày từ ID.
-
-Cache nằm ở `reports/phase_checkpoints/<fingerprint>/reference_dates/`: index trỏ tới bản ghi bất biến theo SHA-256; các ID cùng lô dùng chung phản hồi Atom. Giá trị ngày và danh tính được xác minh lại từ bằng chứng trước xuất. Thành công được dùng lại; dữ liệu thiếu có thời gian chờ 24 giờ, lỗi tạm thời hoặc ID chưa được phản hồi có thời gian chờ 5 phút trước lượt chạy sau. Mỗi lần gọi vẫn có retry hữu hạn và dùng backoff arXiv hiện hành; 403/429 dừng lượt bổ sung hiện tại.
-
-Ngày bổ sung chỉ thay đổi phép chiếu `ref_submission_date`, không sửa raw S2, items hay checksum nguồn. Dataset vẫn có đúng sáu cột. `reference_quality.json` trong thư mục xuất ghi cảnh báo count, số dòng còn thiếu ngày và provenance/cache bằng chứng của ngày bổ sung. Nếu nguồn không cung cấp ngày, giữ null và lý do trong cache. Pha S2 riêng không gọi arXiv để bổ sung ngày.
+Bảng references có sáu cột theo [hợp đồng dữ liệu nguồn](../contracts/source_data_contracts.md). Cột `ref_submission_date` là phép chiếu từ bằng chứng đã lưu; nó không mang trường provenance riêng. Có thể truy nguyên giá trị về checkpoint S2 gắn với `selection_fingerprint` và ID của bài trích dẫn.

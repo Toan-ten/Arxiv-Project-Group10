@@ -2,17 +2,17 @@
 
 ## Điểm vào
 
-Notebook gọi ba API pha từ `src.m1_workflow`:
+Notebook gọi ba API thu thập và kiểm định từ `src.m1_workflow`; chuẩn hóa và xuất bảng có API riêng:
 
 - `run_m1_arxiv_member`: xác minh ID arXiv, xác định các lần nộp và thu thập mã nguồn.
 - `run_m1_s2_member`: lấy metadata và references Semantic Scholar cho cùng danh sách ID, độc lập với tiến độ arXiv.
 - `run_m1_validation_member`: kiểm tra bằng chứng, ghi báo cáo theo từng bài; chuẩn hóa và xuất bảng là API riêng.
 
-Chuẩn hóa đọc riêng corpus arXiv và checkpoint S2 để tạo bảng làm việc. Kiểm định không gọi API, không hợp nhất S2 vào corpus và không sửa checkpoint hay archive trên Drive; archive được khôi phục vào ổ cục bộ để kiểm tra. Kiểm định ghi tiến độ sau mỗi lô và có thể tiếp tục từ báo cáo đã lưu. Pha S2 vẫn chạy độc lập, không bắt buộc chờ mã nguồn arXiv để thu thập references. Hết trang nhưng lệch count được báo riêng trong `reference_quality`, không gây vòng tải lại. Khi dừng, sampler có thời gian chờ hữu hạn; thống kê thiếu mẫu cuối được ghi rõ thay vì thay bằng 0.
+Kiểm định không gọi API và không hợp nhất dữ liệu S2 vào corpus. Pha này đọc điểm khôi phục arXiv/S2, khôi phục archive vào ổ cục bộ để kiểm tra, rồi ghi báo cáo và tiến độ kiểm định lên Drive. Corpus, archive nguồn và điểm khôi phục arXiv/S2 không bị sửa. Báo cáo được cập nhật sau mỗi lô và dùng để tiếp tục khi phiên bị dừng. Notebook chạy S2 sau pha arXiv trên cùng phạm vi ID; việc lấy S2 không phụ thuộc trạng thái hoàn tất của mã nguồn từng bài. Kiểm định cần archive arXiv hợp lệ. Khi phân trang kết thúc nhưng số lượng tài liệu tham khảo lệch, hệ thống ghi cảnh báo chất lượng và không tự tải lại chỉ vì chênh lệch đó. Khi dừng, bộ lấy mẫu chờ hữu hạn và ghi rõ nếu thiếu mẫu cuối.
 
-`run_m1_member` là hàm gọi tuần tự cả ba pha. Notebook gọi riêng từng pha để có thể tiếp tục từng pha từ điểm khôi phục.
+`run_m1_member()` lần lượt gọi thu thập arXiv, thu thập S2, kiểm định và chuẩn hóa. Notebook gọi riêng từng bước để người vận hành có thể tiếp tục từ điểm khôi phục hoặc báo cáo tiến độ tương ứng; chuẩn hóa tạo lại bảng từ bằng chứng đã lưu.
 
-`src.m1_workflow` xuất các API từ `src.m1_phases`. Module `m1_phases` điều phối ba pha; phần triển khai nằm trong `src.m1_phase_modules` theo [kiến trúc M1](../architecture/repository-structure.md). Notebook là điểm vào vận hành cho thành viên. Hàm `run_m1_member()` gọi cùng các pha theo thứ tự và dùng `batch_m1` cho S2.
+`src.m1_workflow` xuất các API từ `src.m1_phases`. Module `m1_phases` điều phối các pha; phần triển khai nằm trong `src.m1_phase_modules` theo [kiến trúc M1](../architecture/repository-structure.md). Notebook là điểm vào vận hành cho thành viên. Hàm `run_m1_member()` gọi cùng quy trình theo thứ tự và dùng `batch_m1` cho S2.
 
 Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`. Xem [cấu hình runtime](../guides/colab.md).
 
@@ -20,10 +20,10 @@ Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`. Xem [cấu hình runti
 
 | Lời gọi | Kết quả cần kiểm tra | Phạm vi kết luận |
 |---|---|---|
-| `run_m1_arxiv_member` | `source_complete_papers`, `cohorts`, `stopped`, `stop_reason` | Tiến độ source arXiv; `m1_complete` vẫn là `False` |
-| `run_m1_s2_member` | `metadata_complete`, `references_complete`, `cohorts`, `stopped`, `stop_reason` | Tiến độ evidence S2; `m1_complete` vẫn là `False` |
+| `run_m1_arxiv_member` | `source_complete_papers`, `cohorts`, `stopped`, `stop_reason` | Tiến độ mã nguồn arXiv; `m1_complete` vẫn là `False` |
+| `run_m1_s2_member` | `metadata_complete`, `references_complete`, `cohorts`, `stopped`, `stop_reason` | Tiến độ bằng chứng S2; `m1_complete` vẫn là `False` |
 | `run_m1_validation_member` | `status`, `ready_for_m2`, `ready_for_m3`, trạng thái theo bài và báo cáo | Tình trạng bằng chứng của phạm vi ID đã chọn |
-| `run_m1_member` | Kết quả ba pha và `handoff_status` khi chuỗi chạy tới kiểm toán | `verified` phụ thuộc `is_reconciled` của pha kiểm toán |
+| `run_m1_member` | Kết quả các bước và `handoff_status` khi chuỗi chạy tới kiểm định | `validated` khi báo cáo kiểm định không có `issues`; nếu có thì là `partial` |
 
 `stopped = False` chỉ cho biết pha không báo dừng, không thay thế việc kiểm tra độ bao phủ và toàn vẹn. Điều kiện hoàn tất dữ liệu và điều kiện đủ bằng chứng benchmark được đánh giá riêng. Một lô thử hoặc một bản chụp đã đối chiếu không chứng minh toàn bộ 5.000 hay 20.000 vị trí ID đã hoàn tất.
 
@@ -36,27 +36,30 @@ Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`. Xem [cấu hình runti
 Các đường dẫn chính được tính từ `drive_root` của thành viên:
 
 ```text
-reports/
-├── phase_checkpoints/<fingerprint>/
-│   ├── selection.json
-│   ├── starting_state.json
-│   ├── session_index.json
-│   ├── arxiv/cohort_NNNN.json
-│   ├── reference_dates/
-│   │   ├── index.json
-│   │   └── <sha256>.json
-│   └── s2/cohort_NNNN/
-│       ├── checkpoint.json
-│       └── papers/<folder_key>/
-│           ├── metadata.json
-│           ├── references.json
-│           └── quality.json
-└── phase_locks/<mssv>.lock
+<drive_root>/
+├── reports/
+│   ├── phase_checkpoints/<fingerprint>/
+│   │   ├── selection.json
+│   │   ├── starting_state.json
+│   │   ├── session_index.json
+│   │   ├── arxiv/cohort_NNNN.json
+│   │   └── s2/cohort_NNNN/
+│   │       ├── checkpoint.json
+│   │       └── papers/<folder_key>/
+│   │           ├── metadata.json
+│   │           ├── references.json
+│   │           └── quality.json
+│   ├── phase_locks/<mssv>.lock
+│   └── m1_validation_<mssv>_<fingerprint-prefix>.json
+└── exports/<fingerprint>/working/
+    ├── papers.parquet
+    ├── references.parquet
+    └── normalization_report.json
 ```
 
-`NNNN` là số lô có bốn chữ số; `folder_key` do hàm chuyển đổi ID của storage xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái bắt đầu và dấu vân tay phục vụ phép đo; `session_index.json` liệt kê các phiên của cùng phạm vi. `metadata.json` và `references.json` chỉ xuất hiện khi đã có kết quả tương ứng; `quality.json` liên kết checksum của hai tệp đó và có thể chưa tồn tại trong checkpoint chưa được đánh giá. Cache `reference_dates/` được tạo khi kiểm toán đủ điều kiện bổ sung ngày. Trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
+`NNNN` là số lô có bốn chữ số; `folder_key` do hàm lưu trữ xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái dữ liệu lúc bắt đầu; `session_index.json` liệt kê các phiên của cùng phạm vi. Trong điểm khôi phục S2, `metadata.json` và `references.json` xuất hiện khi đã có kết quả tương ứng; `quality.json` liên kết checksum của hai tệp và có thể chưa tồn tại trước khi đánh giá chất lượng. Báo cáo kiểm định và báo cáo chuẩn hóa là đầu ra riêng trên Drive. Luồng M1 hiện tại không tra cứu arXiv để bổ sung ngày references trong kiểm định hoặc chuẩn hóa. Trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
 
-Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Validation đọc riêng checkpoint arXiv và S2; normalization tạo bảng working từ bằng chứng hợp lệ. Export chính thức là API riêng.
+Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Kiểm định xác minh riêng điểm khôi phục arXiv, archive nguồn và bằng chứng S2; pha này không thay đổi các dữ liệu đó. Khi kiểm định hoàn tất, chuẩn hóa tạo bảng làm việc từ bài có mã nguồn hợp lệ và references S2 hoàn tất. `ref_submission_date` lấy từ `submission_date` nếu có, nếu không thì lấy `publication_date` trong bằng chứng S2; nếu cả hai đều thiếu, bảng để giá trị `null`. Xuất bảng chính thức là API riêng.
 
 ## Nguồn dữ liệu và giới hạn xử lý
 
@@ -82,7 +85,7 @@ Trong cùng môi trường chạy, hash snapshot vừa xác minh được dùng 
 
 Pha S2 yêu cầu Colab Secret `SEMANTIC_SCHOLAR_API_KEY` và không gửi request ẩn danh. Pha in trạng thái ban đầu và số lượng metadata/references đã có ở mỗi lô, tiến độ theo nhóm 10 ID, cùng thời gian, số request và kết quả của từng lô metadata. Notebook bật cơ chế tự tiếp tục có giới hạn sau HTTP 429 ở metadata/references: tối đa một lần mỗi lô và hai lần mỗi phiên. Chỉ tiếp tục sau khi điểm khôi phục được xác minh, thời gian chờ 5–10 phút hoàn tất và ngân sách còn đủ; vẫn tôn trọng `Retry-After`. HTTP 403, điểm khôi phục lỗi, hết ngân sách và lỗi khác vẫn làm pha dừng. Nhật ký không chứa nội dung references hoặc thông tin xác thực. Thời gian references, metadata, ghi điểm khôi phục và chờ được lưu trong số liệu pha.
 
-Semantic Scholar được truy vấn bằng Graph API. Corpus giữ mọi mục references quan sát được, kể cả mục không có arXiv ID; bảng xuất chỉ giữ mục đáp ứng lược đồ. Theo Q&A môn học, `ref_submission_date` có thể lấy từ `publicationDate` của Semantic Scholar. Provenance phải ghi nguồn của ngày này; không được diễn giải nó thành ngày nộp arXiv đã xác minh.
+Semantic Scholar được truy vấn bằng Graph API. Điểm khôi phục S2 giữ mọi mục references quan sát được, kể cả mục không có arXiv ID; bảng làm việc chỉ giữ mục đáp ứng lược đồ. Khi chuẩn hóa, `ref_submission_date` lấy từ `submission_date` nếu có, nếu không thì lấy `publication_date` trong bằng chứng S2. Giá trị này không chứng minh ngày nộp arXiv; có thể truy nguyên về điểm khôi phục S2.
 
 Notebook và `run_m1_member()` truyền `reference_strategy="batch_m1"`, gom metadata cùng references tối đa 100 ID mỗi request. Client xác minh định danh và chỉ công nhận references hoàn tất khi danh sách khớp `referenceCount`; trường hợp chưa đủ bằng chứng chuyển sang phân trang. Lỗi kích thước và lỗi định danh trong batch được chia nhỏ để cô lập ID; một ID còn lỗi sau truy vấn riêng vẫn được giữ là chưa hợp lệ. HTTP 403/429 dừng theo chính sách hiện hành. References đang thu thập dở tiếp tục qua phân trang để bảo toàn dữ liệu đã lưu. Phạm vi trường dữ liệu và xuất xứ được nêu trong [hướng dẫn S2](../guides/s2_integration.md).
 

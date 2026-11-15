@@ -6,7 +6,7 @@ Import module không gửi request hoặc ghi corpus. Pipeline và storage xử 
 quả qua [lớp tích hợp Semantic Scholar](s2_integration.md). Notebook M1 luôn
 chạy giai đoạn này. Xem thêm [tài liệu API chính thức](https://api.semanticscholar.org/api-docs).
 
-Notebook M1 dùng batch metadata cùng references làm đường chính; endpoint references riêng chỉ xử lý các bài chưa xác minh được từ batch. Hết trang API không đồng nghĩa số mục khớp `referenceCount` hoặc đủ bibliography gốc. Chênh lệch được lưu riêng trong bằng chứng chất lượng, không sửa dữ liệu nguồn. Bước bổ sung ngày arXiv thuộc pha kiểm toán trước xuất, theo [hướng dẫn tích hợp](s2_integration.md).
+Notebook M1 dùng batch để lấy siêu dữ liệu và tài liệu tham khảo; endpoint phân trang xử lý bài chưa có bằng chứng tài liệu tham khảo đầy đủ từ batch. Kết thúc phân trang không đồng nghĩa số mục khớp `referenceCount` hoặc bao phủ toàn bộ danh mục trích dẫn trong TeX. Chênh lệch được ghi trong bằng chứng chất lượng, không sửa dữ liệu nguồn. Bảng làm việc lấy ngày từ các trường ngày đã lưu trong bằng chứng S2; xem [hướng dẫn tích hợp](s2_integration.md).
 
 ## API và đầu vào
 

@@ -52,7 +52,7 @@ Gói `src.m1_phase_modules` chứa triển khai nội bộ. Bên gọi vận hà
 | `arxiv_phase.py` | Chuẩn bị và kiểm tra xuất xứ Kaggle, điều phối arXiv, điểm khôi phục mã nguồn và tự tiếp tục sau discovery 429 |
 | `s2_evidence.py` | Manifest S2, đọc/ghi bằng chứng, đối chiếu trạng thái, định danh và checksum |
 | `s2_phase.py` | Dùng lại cache, gom metadata, lấy references, xử lý ngân sách và tiếp tục S2 |
-| `audit_phase.py` | Kiểm định chỉ đọc, chuẩn hóa bảng làm việc và cổng xuất chính thức |
+| `audit_phase.py` | Kiểm tra bằng chứng, ghi báo cáo kiểm định, tạo bảng làm việc và kiểm soát điều kiện xuất chính thức |
 | `benchmark_summary.py` | Đọc quan sát các phiên và tổng hợp phép đo theo thành viên |
 
 Các pha dùng `common` và `checkpoint`; S2 và kiểm toán dùng chung `s2_evidence`. Pha kiểm toán còn dùng bộ kiểm tra xuất xứ arXiv và bộ tổng hợp benchmark. Các module nội bộ không import ngược về `m1_phases` hoặc `m1_workflow`, nhằm tránh vòng phụ thuộc.
