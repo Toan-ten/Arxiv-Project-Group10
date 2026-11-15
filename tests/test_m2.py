@@ -646,6 +646,64 @@ class M2Tests(unittest.TestCase):
         self.assertIn("baselineskip", commands)
         self.assertIn("setlength", commands)
 
+    def test_at_spacing_has_no_visible_content(self):
+        result = self.parse({"main.tex": tex(r"Value 5\@. Next sentence.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("Value 5.", content)
+        self.assertNotIn(r"\@", content)
+
+    def test_textbackslash_is_retained_as_source_token(self):
+        result = self.parse({"main.tex": tex(
+            r"Path C:\textbackslash{}temp stays literal.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\textbackslash", content)
+        self.assertIn("Path", content)
+
+    def test_boldmath_declaration_keeps_math_content(self):
+        result = self.parse({"main.tex": tex(
+            r"Before \boldmath$x+y$\unboldmath after.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("$x+y$", content)
+        self.assertNotIn(r"\boldmath", content)
+        self.assertNotIn(r"\unboldmath", content)
+
+    def test_column_grid_switches_are_layout_metadata(self):
+        body = r"Before.\twocolumngrid Between.\onecolumngrid After."
+        source = tex(body).replace(r"\begin{document}",
+                                   r"\usepackage{ltxgrid}\begin{document}")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        content = " ".join(n["content"] for n in result["elements"])
+        for value in ("Before.", "Between.", "After."):
+            self.assertIn(value, content)
+        commands = [m["command"] for m in record["layout_metadata"]]
+        self.assertIn("twocolumngrid", commands)
+        self.assertIn("onecolumngrid", commands)
+        rejected = self.parse({"main.tex": tex(r"Before.\twocolumngrid After.")},
+                              aid="2508.07874")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Undeclared grid command: twocolumngrid",
+                      rejected["versions"][0]["error"] or "")
+
+    def test_common_text_abbreviations_expand_but_local_macros_win(self):
+        result = self.parse({"main.tex": tex(r"Use \eg, this and \ie that.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("e.g.", content)
+        self.assertIn("i.e.", content)
+        local = (r"\documentclass{article}\newcommand{\eg}{custom}"
+                 r"\begin{document}Use \eg here.\end{document}")
+        overridden = self.parse({"main.tex": local}, aid="2508.07873")
+        self.assertEqual(overridden["versions"][0]["status"], "success",
+                         overridden["versions"])
+        local_content = " ".join(n["content"] for n in overridden["elements"])
+        self.assertIn("custom", local_content)
+        self.assertNotIn("e.g.", local_content)
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)

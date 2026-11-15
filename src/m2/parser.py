@@ -56,6 +56,9 @@ SI_UNIT_COMMANDS = ({
 # Documented by cvpr-org/author-kit, cvpr.sty (onedot definitions). Local
 # definitions take precedence. This is not a general package interpreter.
 CVPR_ABBREVIATIONS = {"etc": "etc.", "ie": "i.e."}
+# Common text abbreviations whose package/class definitions are unavailable to
+# the offline parser. Local definitions still take precedence.
+TEXT_ABBREVIATIONS = {"eg": "e.g.", "ie": "i.e."}
 
 
 def bibliography(gatherer, body):
@@ -300,10 +303,12 @@ class Tree:
                 end = skip_space(text, end)
             elif name == "printcredits" and self.gatherer.document_class in {"cas-dc", "cas-sc"} and name not in self.gatherer.macros:
                 self.layout_metadata.append(dict(command=name))
-            elif (name in {"flushbottom", "normalfont", "onecolumngrid"}
+            elif (name in {"flushbottom", "normalfont", "onecolumngrid", "twocolumngrid"}
                   and name not in self.gatherer.macros):
-                if name == "onecolumngrid" and not (self.gatherer.document_class or "").startswith("revtex"):
-                    raise ParseError("Undeclared REVTeX grid command: " + name)
+                if (name in {"onecolumngrid", "twocolumngrid"}
+                        and not ("ltxgrid" in self.gatherer.packages
+                                 or (self.gatherer.document_class or "").startswith(("revtex", "aastex")))):
+                    raise ParseError("Undeclared grid command: " + name)
                 # Font selection is a declaration, not a one-argument command.
                 # Following groups, math and citations remain in the parse stream.
                 if name == "normalfont":
@@ -819,6 +824,12 @@ class Tree:
             elif name == "textdegree" and name not in self.gatherer.macros:
                 # Kernel textcomp symbol: emit the actual degree sign.
                 buffer.append("\u00b0")
+            elif name == "textbackslash" and name not in self.gatherer.macros:
+                # Keep the source token: a literal backslash would be ambiguous
+                # to the later command/sentence scanners. Other retained text
+                # symbols follow the same policy.
+                buffer.append(r"\textbackslash")
+                end = skip_space(text, end)
             elif (name in {"equalcont", "cormark", "fnmark", "cortext", "fntext", "ead", "dedicatory", "pagerange", "preprint", "runningtitle", "runningauthor", "shorttitle", "shortauthors", "crefalias", "articletype"}
                   and name not in self.gatherer.macros):
                 if name == "dedicatory":
@@ -1046,8 +1057,9 @@ class Tree:
             elif (name == "SetAlgoLined" and name not in self.gatherer.macros
                   and "algorithm2e" in self.gatherer.packages):
                 self.layout_metadata.append(dict(command=name))
-            elif name in {"nobreak", "allowbreak"} and name not in self.gatherer.macros:
-                # A break penalty has no argument and no visible characters.
+            elif name in {"nobreak", "allowbreak", "@", "boldmath", "unboldmath"} and name not in self.gatherer.macros:
+                # Break/spacing penalties and math font declarations have no
+                # visible characters; surrounding content is retained.
                 pass
             elif (name in {"degr", "arcdeg", "arcmin", "arcsec"}
                   and name not in self.gatherer.macros
@@ -1257,6 +1269,13 @@ class Tree:
                     end += 1  # cvpr's onedot avoids a duplicated period.
                 buffer.append(value)
                 self.warnings.append("CVPR convention: \\" + name + " -> " + value + "; original style file not interpreted")
+            elif name in TEXT_ABBREVIATIONS and name not in self.gatherer.macros:
+                value = TEXT_ABBREVIATIONS[name]
+                if text[end:end + 1] == ".":
+                    end += 1  # avoid a duplicated period.
+                buffer.append(value)
+                self.warnings.append("Text abbreviation: \\" + name + " -> " + value +
+                                     "; original definition not available")
             elif name in self.gatherer.macros:
                 argc, default, replacement = self.gatherer.macros[name]
                 # This command path is prose: inline/display math is consumed
