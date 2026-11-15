@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Callable
 
-from src.fast_production import FastProductionRunner, cohort_pairs, verify_cohort_handoff
+from src.fast_production import FastProductionRunner, cohort_pairs
 from src.session_evidence import SessionBudget, finish_session_envelope, observe_stage
 from src.storage import _atomic_json
 from .arxiv_phase import _kaggle_source_provenance_issue, _source_state_manifest
@@ -30,6 +30,54 @@ def _validate_source_paper(runner: FastProductionRunner, mssv: str, arxiv_id: st
     if manifest.get("discovery_status") == "not_found" and manifest.get("status") == "not_found":
         return ("not_found", manifest) if manifest.get("versions") == {} else ("integrity_failure", manifest)
     return ("found_source_complete", manifest) if integrity.is_source_complete else ("source_incomplete", manifest)
+
+
+def _verify_source_archive(runner: FastProductionRunner, cohort: int) -> dict:
+    """Verify archive accounting for validation without requiring an M1 handoff state."""
+    from src.storage_integrity import _inspect_path, _read_bytes_safely
+
+    archive = runner.archives_dir / f"cohort_{cohort:04d}_corpus.tar.gz"
+    manifest_path = archive.with_name(archive.name.replace(".tar.gz", ".manifest.json"))
+    sidecar_path = archive.with_name(archive.name + ".sha256")
+    for path in (archive, sidecar_path):
+        is_link, _, is_file = _inspect_path(path)
+        if is_link or not is_file:
+            raise ValueError(f"Archive evidence is not a regular file for cohort {cohort}: {path.name}.")
+    manifest = _read_json(manifest_path)
+    actual_sha = runner._compute_sha256(archive)
+    sidecar = _read_bytes_safely(sidecar_path).decode("utf-8").strip().split()
+    if (not sidecar or sidecar[0] != actual_sha
+            or manifest.get("archive_sha256") != actual_sha
+            or manifest.get("cohort_number") != cohort):
+        raise ValueError(f"Archive accounting/checksum mismatch for cohort {cohort}.")
+
+    expected_ids = {aid for _member, aid in cohort_pairs(cohort)}
+    included_ids = manifest.get("included_ids")
+    if (not isinstance(included_ids, list)
+            or any(not isinstance(aid, str) for aid in included_ids)
+            or len(included_ids) != len(set(included_ids))
+            or not set(included_ids).issubset(expected_ids)
+            or manifest.get("included_count") != len(included_ids)):
+        raise ValueError(f"Invalid included ID accounting for cohort {cohort}.")
+
+    archive_state = manifest.get("archive_state")
+    if archive_state not in {"source_verified", "checkpoint_partial", "m1_handoff_verified", "handoff_verified"}:
+        raise ValueError(f"Unsupported archive state for cohort {cohort}: {archive_state!r}.")
+    if archive_state in {"source_verified", "m1_handoff_verified", "handoff_verified"} and set(included_ids) != expected_ids:
+        raise ValueError(f"Archive state {archive_state!r} requires all assigned IDs for cohort {cohort}.")
+
+    artifact_check = runner._validate_bbl_artifact_archive(
+        cohort, manifest.get("bbl_artifact_archive"), restore=False,
+    )
+    current_bbl_state = runner._cohort_bbl_policy_state(cohort)
+    if manifest.get("bbl_policy_state") == "complete" and current_bbl_state != "complete":
+        raise ValueError(f"BBL policy mismatch for cohort {cohort}: {current_bbl_state}.")
+    return {
+        "status": "verified", "verification_scope": "source_archive",
+        "archive_state": archive_state, "archive_sha256": actual_sha,
+        "included_count": len(included_ids), "expected_count": len(expected_ids),
+        "bbl_artifact_archive": artifact_check,
+    }
 
 
 def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
@@ -76,7 +124,7 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
             if cohort in completed_cohorts and previous_sha:
                 try:
                     print(f"[M1/kiểm định] Lô {cohort_index}/{total_cohorts}: xác minh archive đã lưu để tiếp tục.")
-                    current_handoff = verify_cohort_handoff(runner, cohort, inspect_members=False)
+                    current_handoff = _verify_source_archive(runner, cohort)
                 except KeyboardInterrupt:
                     run_status = "interrupted"
                     issues.append({"cohort": cohort, "issue": "validation_interrupted_verifying_saved_handoff"})
@@ -115,7 +163,9 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
                 issues.append(kaggle_issue)
             try:
                 print(f"[M1/kiểm định] Lô {cohort}: khôi phục an toàn và kiểm tra archive.")
-                restored = runner.restore_cohort(cohort, verify_bbl_artifacts=False)
+                restored = runner.restore_cohort(
+                    cohort, require_manifest=True, verify_bbl_artifacts=False,
+                )
                 print(f"[M1/kiểm định] Lô {cohort}: khôi phục xong ({restored} thư mục bài).")
             except KeyboardInterrupt:
                 run_status = "interrupted"
@@ -150,8 +200,8 @@ def run_m1_validation_member(mssv: str, *, drive_root: str | Path,
                     "version_count": len((manifest or {}).get("versions") or {}),
                 }
             integrity = audit_cohort_integrity(runner.store, cohort_papers, cohort_number=cohort)
-            print(f"[M1/kiểm định] Lô {cohort}: xác minh handoff và tính toàn vẹn archive.")
-            handoff = verify_cohort_handoff(runner, cohort, inspect_members=True)
+            print(f"[M1/kiểm định] Lô {cohort}: xác minh archive nguồn và tính toàn vẹn corpus.")
+            handoff = _verify_source_archive(runner, cohort)
             cohorts[str(cohort)] = {"integrity": integrity.to_dict(), "handoff": handoff, "s2_status": s2_status}
             completed_cohorts.append(cohort)
             progress = {"schema_version": PHASE_SCHEMA_VERSION, "stage": "validation",

@@ -515,7 +515,7 @@ class TestArxivAndAuditGates(unittest.TestCase):
             patch.object(audit_phase, "_kaggle_source_provenance_issue", return_value=None),
             patch.object(audit_phase, "_validate_s2_cohort", return_value=({"status": "complete"}, {})),
             patch.object(audit_phase, "_validate_source_paper", return_value=("not_found", {"versions": {}})),
-            patch.object(audit_phase, "verify_cohort_handoff", return_value={"archive_sha256": "a" * 64}),
+            patch.object(audit_phase, "_verify_source_archive", return_value={"archive_sha256": "a" * 64}),
             patch.object(audit_phase, "_member_benchmark_summary", return_value={}),
             patch.object(FastProductionRunner, "restore_cohort", return_value=100),
             patch(
@@ -534,6 +534,35 @@ class TestArxivAndAuditGates(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertTrue(Path(result["report_path"]).is_file())
         self.assertEqual(result["completed_cohorts"], [self.cohort])
+
+    def test_validation_accepts_source_verified_archive_without_m1_handoff(self):
+        from src.m1_phase_modules.audit_phase import _verify_source_archive
+
+        runner = FastProductionRunner(local_root=self.local, drive_root=self.drive)
+        archive = runner.archives_dir / f"cohort_{self.cohort:04d}_corpus.tar.gz"
+        archive.write_bytes(b"source-only archive fixture")
+        digest = runner._compute_sha256(archive)
+        (archive.with_name(archive.name + ".sha256")).write_text(
+            f"{digest}  {archive.name}\n", encoding="utf-8",
+        )
+        ids = [aid for _member, aid in cohort_pairs(self.cohort)]
+        manifest_path = archive.with_name(archive.name.replace(".tar.gz", ".manifest.json"))
+        manifest_path.write_text(json.dumps({
+            "cohort_number": self.cohort,
+            "archive_sha256": digest,
+            "archive_state": "source_verified",
+            "included_ids": ids,
+            "included_count": len(ids),
+            "bbl_policy_state": "unverified",
+            "bbl_artifact_archive": None,
+        }), encoding="utf-8")
+
+        evidence = _verify_source_archive(runner, self.cohort)
+
+        self.assertEqual(evidence["status"], "verified")
+        self.assertEqual(evidence["verification_scope"], "source_archive")
+        self.assertEqual(evidence["archive_state"], "source_verified")
+        self.assertEqual(evidence["included_count"], len(ids))
 
     def test_arxiv_phase_never_calls_s2_and_never_claims_m1(self):
         snapshot = self.base / "snapshot.json"
