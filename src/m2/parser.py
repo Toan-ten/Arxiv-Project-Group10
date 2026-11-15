@@ -36,10 +36,22 @@ DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagesty
                  "title", "author", "affiliation", "institute", "address", "email",
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize"}
 
-SI_UNIT_COMMANDS = {"micro", "mu", "milli", "centi", "nano", "pico", "kilo", "mega", "giga",
-                         "metre", "meter", "second", "hertz", "gram", "kilogram", "kelvin", "tesla",
-                         "volt", "electronvolt", "joule", "watt", "ampere", "pascal", "percent", "%",
-                         "per", "squared", "cubed", "square", "cubic", "degree", "degreeCelsius"}
+SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
+               "M", "G", "T", "P", "E", "Z", "Y"}
+SI_BASE_UNITS = {"m", "g", "s", "A", "K", "mol", "cd", "Hz", "N", "Pa", "J", "W",
+                 "C", "V", "F", "S", "Wb", "T", "H", "lm", "lx", "Bq", "Gy", "Sv",
+                 "kat", "L", "eV"}
+SI_UNIT_COMMANDS = ({
+    # Spelled-out names and siunitx prefixes/qualifiers.
+    "micro", "mu", "milli", "centi", "deci", "nano", "pico", "kilo", "mega",
+    "giga", "tera", "per", "squared", "cubed", "square", "cubic",
+    "metre", "meter", "second", "hertz", "gram", "kilogram", "kelvin", "tesla",
+    "volt", "electronvolt", "joule", "watt", "ampere", "pascal", "percent", "%",
+    "degree", "degreeCelsius", "celsius", "litre", "liter", "minute", "hour",
+    "day", "tonne", "hectare", "bar", "bel", "decibel", "neper", "permille",
+    "astronomicalunit", "atomicmassunit", "dalton",
+} | SI_BASE_UNITS
+  | {prefix + unit for prefix in SI_PREFIXES for unit in SI_BASE_UNITS})
 
 # Documented by cvpr-org/author-kit, cvpr.sty (onedot definitions). Local
 # definitions take precedence. This is not a general package interpreter.
@@ -567,7 +579,9 @@ class Tree:
                     self.parse(raw[cursor:], current(), depth + 1)
                 elif env == "widetext" and (self.gatherer.document_class or "").startswith("revtex"):
                     self.parse(raw, current(), depth + 1)
-                elif env == "wrapfigure" and "wrapfig" in self.gatherer.packages:
+                elif env in {"wrapfigure", "wraptable"} and "wrapfig" in self.gatherer.packages:
+                    # Both wrapfig floats share placement, optional overhang and
+                    # width arguments; retain the full float source as one leaf.
                     _, cursor = group(raw, 0)  # placement
                     cursor = options(raw, cursor)  # overhang
                     _, cursor = group(raw, cursor)  # width
@@ -802,6 +816,9 @@ class Tree:
             elif name == "textasciicircum" and name not in self.gatherer.macros:
                 buffer.append("^")
                 end = skip_space(text, end)
+            elif name == "textdegree" and name not in self.gatherer.macros:
+                # Kernel textcomp symbol: emit the actual degree sign.
+                buffer.append("\u00b0")
             elif (name in {"equalcont", "cormark", "fnmark", "cortext", "fntext", "ead", "dedicatory", "pagerange", "preprint", "runningtitle", "runningauthor", "shorttitle", "shortauthors", "crefalias", "articletype"}
                   and name not in self.gatherer.macros):
                 if name == "dedicatory":

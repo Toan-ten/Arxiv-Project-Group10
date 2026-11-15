@@ -606,6 +606,34 @@ class M2Tests(unittest.TestCase):
         self.assertNotIn(r"\centering", figures[0])
         self.assertEqual(sum(n["kind"] == "item" for n in result["elements"]), 3)
 
+    def test_wraptable_keeps_table_caption_and_citation(self):
+        body = (r"Before.\begin{wraptable}[10]{r}{0.5\linewidth}\centering"
+                r"\begin{tabular}{lc}Method & Score\\Ours & 1.0\\\end{tabular}"
+                r"\caption{Exact caption with \cite{k}.}\label{tab:x}"
+                r"\end{wraptable}After.\bibliography{refs}")
+        source = tex(body).replace(r"\begin{document}", r"\usepackage{wrapfig}\begin{document}")
+        result = self.parse({"main.tex": source,
+                             "refs.bib": "@article{k,title={Evidence},author={Alice}}"})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        figures = [n for n in result["elements"] if n["kind"] == "figure"]
+        self.assertEqual(len(figures), 1)
+        self.assertIn(r"\begin{tabular}{lc}", figures[0]["content"])
+        self.assertIn(r"Ours & 1.0", figures[0]["content"])
+        self.assertIn(r"\caption{Exact caption with \cite{k}.}", figures[0]["content"])
+        self.assertNotIn(r"\label", figures[0]["content"])
+        self.assertEqual([b["citation_key"] for b in result["bibtex"]], ["k"])
+        self.assertEqual([n["content"] for n in result["elements"] if n["kind"] == "sentence"],
+                         ["Before.", "After."])
+        validate_tables(result)
+
+    def test_wraptable_is_rejected_without_wrapfig(self):
+        result = self.parse({"main.tex": tex(
+            r"\begin{wraptable}{r}{0.5\linewidth}Visible text.\end{wraptable}")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Unsupported environment: wraptable", record["error"] or "")
+        self.assertEqual(result["elements"], [])
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)
@@ -2257,6 +2285,17 @@ class M2Tests(unittest.TestCase):
         for quantity in [r"\SI{1}{\unknownunit}",r"\SI{\countvalue}{Hz}"]:
             with self.subTest(quantity=quantity),tempfile.TemporaryDirectory() as td:
                 p=Path(td);p.joinpath("main.tex").write_text(tex(quantity).replace(r"\begin{document}",r"\usepackage{siunitx}\begin{document}"),encoding="utf-8");self.assertEqual(parse_versions(AID,[(1,p)])["versions"][0]["status"],"parse_error")
+
+    def test_125_si_short_unit_alias_keeps_source_quantity(self):
+        source=tex(r"Sampled at \SI{500}{\Hz}, \SI{1.0}{\ms}, \SI{2}{\kHz} and \SI{3}{\uF}.").replace(r"\begin{document}",r"\usepackage{siunitx}\begin{document}")
+        r=self.parse({"main.tex":source});self.assertEqual(r["versions"][0]["status"],"success");c=" ".join(n["content"] for n in r["elements"])
+        for quantity in (r"\SI{500}{\Hz}",r"\SI{1.0}{\ms}",r"\SI{2}{\kHz}",r"\SI{3}{\uF}"):self.assertIn(quantity,c)
+
+    def test_125_textcomp_degree_symbol_is_normalized(self):
+        r=self.parse({"main.tex":tex(r"Angles from -70\textdegree{} to +70\textdegree.")})
+        self.assertEqual(r["versions"][0]["status"],"success")
+        c=" ".join(n["content"] for n in r["elements"])
+        self.assertIn("-70\u00b0",c);self.assertIn("+70\u00b0",c)
 
     def test_125_si_local_definition_takes_precedence(self):
         source=tex(r"\SI{Meaningful text.}{After.}").replace(r"\begin{document}",r"\usepackage{siunitx}\newcommand{\SI}[2]{#1 #2}\begin{document}")
