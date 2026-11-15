@@ -704,6 +704,50 @@ class M2Tests(unittest.TestCase):
         self.assertIn("custom", local_content)
         self.assertNotIn("e.g.", local_content)
 
+    def test_aastex_received_and_date_declarations_are_metadata(self):
+        source = (r"\documentclass{aastex631}\begin{document}"
+                  r"\received{1 January 2026}\revised{2 February 2026}"
+                  r"\accepted{3 March 2026}\published{4 April 2026}"
+                  r"Body text.\end{document}")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        commands = [m["command"] for m in record["layout_metadata"]]
+        for name in ("received", "revised", "accepted", "published"):
+            self.assertIn(name, commands)
+        self.assertIn("Body text.",
+                      " ".join(n["content"] for n in result["elements"]))
+        rejected = self.parse({"main.tex": tex(r"\received{1 January 2026}Body.")},
+                              aid="2508.07875")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+
+    def test_ieee_title_abstract_index_text_parses_inner_content(self):
+        source = (r"\documentclass{IEEEtran}\begin{document}"
+                  r"\IEEEtitleabstractindextext{"
+                  r"\begin{abstract}Summary text.\end{abstract}"
+                  r"\begin{IEEEkeywords}Signal, \emph{learning}.\end{IEEEkeywords}}"
+                  r"\section{Intro}Body.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        contents = [n["content"] for n in result["elements"]]
+        self.assertIn("Summary text.", contents)
+        self.assertIn("keywords", contents)
+        self.assertIn("Body.", contents)
+
+    def test_mhchem_ce_is_retained_as_source_token(self):
+        source = tex(r"Water \ce{H2O} and \ce{CO2} stay.").replace(
+            r"\begin{document}", r"\usepackage{mhchem}\begin{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\ce{H2O}", content)
+        self.assertIn(r"\ce{CO2}", content)
+        self.assertIn("Water", content)
+        self.assertIn("stay.", content)
+        rejected = self.parse({"main.tex": tex(r"Water \ce{H2O} stays.")},
+                              aid="2508.07876")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)

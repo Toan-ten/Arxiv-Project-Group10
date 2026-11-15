@@ -830,6 +830,12 @@ class Tree:
                 # symbols follow the same policy.
                 buffer.append(r"\textbackslash")
                 end = skip_space(text, end)
+            elif name == "ce" and name not in self.gatherer.macros and "mhchem" in self.gatherer.packages:
+                # mhchem notation is retained verbatim; the offline parser does
+                # not interpret chemical formulas.
+                start = skip_space(text, end)
+                value, end = group(text, start)
+                buffer.append(r"\ce{" + value + "}")
             elif (name in {"equalcont", "cormark", "fnmark", "cortext", "fntext", "ead", "dedicatory", "pagerange", "preprint", "runningtitle", "runningauthor", "shorttitle", "shortauthors", "crefalias", "articletype"}
                   and name not in self.gatherer.macros):
                 if name == "dedicatory":
@@ -1074,7 +1080,17 @@ class Tree:
                     flush()
                     container = self.add("component", "PACS classification", current())
                     self.parse(raw, container, depth + 1)
-            elif name == "correspondingauthor" and name not in self.gatherer.macros and (self.gatherer.document_class or "").startswith("aastex"):
+            elif (name == "IEEEtitleabstractindextext" and name not in self.gatherer.macros
+                  and self.gatherer.document_class == "IEEEtran"):
+                # IEEEtran wraps abstract and index terms in one balanced group;
+                # parse the inner content instead of discarding the wrapper.
+                raw, end = group(text, end)
+                self.layout_metadata.append(dict(command=name, arguments=[raw]))
+                flush()
+                self.parse(raw, current(), depth + 1)
+            elif (name in {"correspondingauthor", "received", "revised", "accepted", "published"}
+                  and name not in self.gatherer.macros
+                  and (self.gatherer.document_class or "").startswith("aastex")):
                 value, end = group(text, end)
                 self.layout_metadata.append(dict(command=name, arguments=[value]))
             elif name in {"acknowledgments", "acks"} and name not in self.gatherer.macros:
