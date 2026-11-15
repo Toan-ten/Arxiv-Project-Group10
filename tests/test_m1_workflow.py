@@ -40,7 +40,8 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
             "stopped": False, "stop_reason": None,
         }
         self.s2 = {"stage": "s2", "stopped": False, "stop_reason": None}
-        self.audit = {"stage": "audit", "is_reconciled": True, "export": {"status": "exported"}}
+        self.validation = {"stage": "validation", "issues": []}
+        self.normalization = {"stage": "normalization", "is_working_data": True}
 
         def call(name, result):
             def _run(*args, **kwargs):
@@ -51,7 +52,8 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
         self.patchers = [
             patch.object(m1_phases, "run_m1_arxiv_member", side_effect=call("arxiv", self.arxiv)),
             patch.object(m1_phases, "run_m1_s2_member", side_effect=call("s2", self.s2)),
-            patch.object(m1_phases, "run_m1_audit_member", side_effect=call("audit", self.audit)),
+            patch.object(m1_phases, "run_m1_validation_member", side_effect=call("validation", self.validation)),
+            patch.object(m1_phases, "run_m1_normalization_member", side_effect=call("normalization", self.normalization)),
         ]
         for patcher in self.patchers:
             patcher.start()
@@ -69,21 +71,23 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
 
     def test_runs_arxiv_then_s2_then_audit_with_shared_scope(self):
         result = self.run_compat()
-        self.assertEqual([call[0] for call in self.calls], ["arxiv", "s2", "audit"])
-        for _name, args, kwargs in self.calls:
+        self.assertEqual([call[0] for call in self.calls], ["arxiv", "s2", "validation", "normalization"])
+        for name, args, kwargs in self.calls:
             self.assertEqual(args, ("24120260",))
             self.assertEqual(kwargs["drive_root"], "/tmp/drive")
             self.assertEqual(kwargs["local_root"], "/tmp/local")
             self.assertEqual(kwargs["cohort_limit"], 1)
-            self.assertGreater(kwargs["budget_seconds"], 0)
+            if name in {"arxiv", "s2"}:
+                self.assertGreater(kwargs["budget_seconds"], 0)
         self.assertEqual(self.calls[1][2]["semantic_scholar_api_key"], "s2-key")
         self.assertEqual(self.calls[1][2]["reference_strategy"], "batch_m1")
         self.assertTrue(self.calls[0][2]["auto_resume_429"])
         self.assertTrue(self.calls[1][2]["auto_resume_429"])
         self.assertEqual(self.calls[0][2]["kaggle_token"], "unused")
         self.assertEqual(result["selection_fingerprint"], "same-selection")
-        self.assertEqual(result["handoff_status"], "verified")
-        self.assertEqual(result["export"], {"status": "exported"})
+        self.assertEqual(result["handoff_status"], "validated")
+        self.assertEqual(result["normalization"], self.normalization)
+        self.assertIsNone(result["export"])
 
     def test_arxiv_stop_does_not_call_s2_or_audit(self):
         self.arxiv.update(stopped=True, stop_reason={"type": "interrupted"})
@@ -91,7 +95,7 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
         self.assertEqual([call[0] for call in self.calls], ["arxiv"])
         self.assertEqual(result["stage"], "arxiv")
         self.assertIsNone(result["s2"])
-        self.assertIsNone(result["audit"])
+        self.assertIsNone(result["validation"])
 
     def test_s2_stop_skips_audit_and_keeps_checkpoint_reason(self):
         self.s2.update(stopped=True, stop_reason={"type": "http_policy", "http_status": 429})
@@ -99,7 +103,7 @@ class TestSequentialCompatibilityWorkflow(unittest.TestCase):
         self.assertEqual([call[0] for call in self.calls], ["arxiv", "s2"])
         self.assertEqual(result["stage"], "s2")
         self.assertEqual(result["s2"]["stop_reason"]["http_status"], 429)
-        self.assertIsNone(result["audit"])
+        self.assertIsNone(result["validation"])
 
 
 if __name__ == "__main__":

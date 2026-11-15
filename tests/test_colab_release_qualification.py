@@ -70,7 +70,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                 self.assertEqual(cell["outputs"], [])
         self.assertEqual(len(self.code), 4)
         joined = "\n".join(self.code)
-        for stage in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member"):
+        for stage in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_validation_member", "run_m1_normalization_member"):
             self.assertIn(stage, joined)
         self.assertIn("userdata.get", joined)
 
@@ -91,15 +91,17 @@ class TestUnifiedNotebookContract(unittest.TestCase):
             self.assertNotIn(forbidden, self.text)
         workflow_path = self.root / "src" / "m1_workflow.py"
         workflow = workflow_path.read_text(encoding="utf-8")
-        for fragment in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_audit_member",
-                         "_process_s2_cohort", "_preflight_merge", "_merge_s2",
-                         "verify_cohort_handoff", "compute_m1_statistics", "export_official_datasets",
+        for fragment in ("run_m1_arxiv_member", "run_m1_s2_member", "run_m1_validation_member",
+                         "run_m1_normalization_member", "run_m1_official_export_member",
+                         "_process_s2_cohort",
+                         "verify_cohort_handoff", "validate_exported_tables", "export_to_parquet",
                          "SessionBudget", "selection_fingerprint"):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, workflow + phase_implementation_source(self.root))
         self.assertEqual(sum("run_m1_arxiv_member(" in cell for cell in self.code), 1)
         self.assertEqual(sum("run_m1_s2_member(" in cell for cell in self.code), 1)
-        self.assertEqual(sum("run_m1_audit_member(" in cell for cell in self.code), 1)
+        self.assertEqual(sum("run_m1_validation_member(" in cell for cell in self.code), 1)
+        self.assertEqual(sum("run_m1_normalization_member(" in cell for cell in self.code), 1)
         self.assertNotIn("runner.run_cohort", self.text)
         self.assertNotIn("runner.enrich_cohort_s2", self.text)
         self.assertNotIn("prepare_snapshot", self.text)
@@ -110,15 +112,13 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertIn("run_m1_arxiv_member(", phases)
         self.assertIn("run_m1_s2_member(", phases)
         self.assertIn("audit_bbl_sources", phases)
-        self.assertIn(
-            "thu thập arXiv → thu thập Semantic Scholar → kiểm toán và xuất bảng",
-            self.text,
-        )
+        self.assertIn("run_m1_validation_member", self.text)
+        self.assertIn("run_m1_normalization_member", self.text)
         for heading in (
             "Ô 1 — Cấu hình Colab và phạm vi",
             "Ô 2 — Thu thập arXiv",
             "Ô 3 — Thu thập Semantic Scholar",
-            "Ô 4 — Kiểm toán, đối soát và xuất bảng",
+            "Ô 4 — Validation và tạo bảng working",
         ):
             with self.subTest(heading=heading):
                 self.assertIn(heading, self.text)
@@ -177,7 +177,7 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertNotIn("M1-s2-request-optimization", setup)
         colab_url = (
             "https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/"
-            "blob/feat%2Fs2-request-optimization/notebooks/"
+            "blob/refactor%2Fm1-audit-normalization/notebooks/"
             "m1_pipeline_thu_thap_va_kiem_toan.ipynb"
         )
         self.assertIn(colab_url, self.text)
@@ -186,9 +186,10 @@ class TestUnifiedNotebookContract(unittest.TestCase):
     def test_s2_and_audit_are_mandatory_and_fail_closed(self):
         workflow = (self.root / "src" / "m1_workflow.py").read_text(encoding="utf-8")
         phases = phase_implementation_source(self.root)
-        self.assertIn("_preflight_merge", phases)
-        self.assertIn("if data_complete:", phases)
-        self.assertIn('"handoff_status": "verified" if audit_result.get("is_reconciled") else "blocked"', phases)
+        self.assertIn("def run_m1_validation_member", phases)
+        self.assertIn("def run_m1_normalization_member", phases)
+        self.assertNotIn("_merge_s2", phases)
+        self.assertNotIn("_preflight_merge", phases)
         self.assertNotIn("if True:", self.text)
 
     def test_colab_s2_429_retry_is_bounded_and_benchmark_visible(self):

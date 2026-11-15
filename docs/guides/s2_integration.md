@@ -65,7 +65,7 @@ Kiểm toán bị chặn nếu bằng chứng phân trang, định danh hoặc x
 
 ## Bổ sung ngày trước khi xuất M1
 
-`run_m1_audit_member()` bổ sung ngày sau khi hai pha đủ điều kiện đối soát, trước khi xuất bảng. Bước này có thể gọi arXiv API; các bước kiểm tra evidence vẫn chạy cục bộ. Chỉ xét reference có arXiv ID và thiếu cả ngày nộp lẫn ngày xuất bản. Chương trình dùng ngày S2 đã có trước; nếu thiếu thì dùng metadata arXiv cục bộ đã kiểm chứng hoặc gọi `query_arxiv_batch` tối đa 20 ID duy nhất/lô qua limiter arXiv hiện hành.
+`run_m1_validation_member()` chỉ đọc evidence cục bộ. Normalization không gọi mạng và giữ ngày không có bằng chứng là null. Ngày thiếu được giữ là null trong bảng working; nếu cần bổ sung ngày, thực hiện ở bước enrichment riêng có provenance.
 
 Theo [tài liệu arXiv](https://info.arxiv.org/help/api/user-manual.html), Atom `published` là ngày nộp đầu tiên; `updated` thuộc lần nộp được truy vấn. Chương trình dùng `published`, chuẩn hóa ngày theo UTC và giữ phản hồi gốc để kiểm chứng, không lấy `updated` hoặc đoán ngày từ ID.
 

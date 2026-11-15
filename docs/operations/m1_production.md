@@ -6,9 +6,9 @@ Notebook gọi ba API pha từ `src.m1_workflow`:
 
 - `run_m1_arxiv_member`: xác minh ID arXiv, xác định các lần nộp và thu thập mã nguồn.
 - `run_m1_s2_member`: lấy metadata và references Semantic Scholar cho cùng danh sách ID, độc lập với tiến độ arXiv.
-- `run_m1_audit_member`: kiểm tra bằng chứng, đối soát S2 với corpus arXiv, hợp nhất dữ liệu hợp lệ và xuất bảng.
+- `run_m1_validation_member`: chỉ kiểm tra bằng chứng, ghi báo cáo từng paper; normalization và export là API riêng.
 
-Trước xuất, pha kiểm toán bổ sung ngày references còn thiếu bằng metadata arXiv qua cache có checksum; bước này có thể gọi API. Pha S2 vẫn chạy độc lập, không bắt buộc chờ mã nguồn arXiv để thu thập references. Hết trang nhưng lệch count được báo riêng trong `reference_quality`, không gây vòng tải lại. Khi dừng, sampler có thời gian chờ hữu hạn; thống kê thiếu mẫu cuối được ghi rõ thay vì thay bằng 0.
+Normalization chiếu dữ liệu riêng từ corpus arXiv và checkpoint S2. Validation không gọi API, không hợp nhất S2 và không ghi lại archive. Pha S2 vẫn chạy độc lập, không bắt buộc chờ mã nguồn arXiv để thu thập references. Hết trang nhưng lệch count được báo riêng trong `reference_quality`, không gây vòng tải lại. Khi dừng, sampler có thời gian chờ hữu hạn; thống kê thiếu mẫu cuối được ghi rõ thay vì thay bằng 0.
 
 `run_m1_member` là hàm gọi tuần tự cả ba pha. Notebook gọi riêng từng pha để có thể tiếp tục từng pha từ điểm khôi phục.
 
@@ -22,7 +22,7 @@ Notebook vận hành dùng SHA trong `M1_RUNTIME_COMMIT`. Xem [cấu hình runti
 |---|---|---|
 | `run_m1_arxiv_member` | `source_complete_papers`, `cohorts`, `stopped`, `stop_reason` | Tiến độ source arXiv; `m1_complete` vẫn là `False` |
 | `run_m1_s2_member` | `metadata_complete`, `references_complete`, `cohorts`, `stopped`, `stop_reason` | Tiến độ evidence S2; `m1_complete` vẫn là `False` |
-| `run_m1_audit_member` | `is_reconciled`, `export_status`, `export_error` và báo cáo kiểm toán | Điều kiện đối soát và kết quả xuất của phạm vi ID đã chọn |
+| `run_m1_validation_member` | `ready_for_m2`, `ready_for_m3`, trạng thái theo paper và báo cáo validation | Tình trạng bằng chứng của phạm vi ID đã chọn |
 | `run_m1_member` | Kết quả ba pha và `handoff_status` khi chuỗi chạy tới kiểm toán | `verified` phụ thuộc `is_reconciled` của pha kiểm toán |
 
 `stopped = False` chỉ cho biết pha không báo dừng, không thay thế việc kiểm tra độ bao phủ và toàn vẹn. Điều kiện hoàn tất dữ liệu và điều kiện đủ bằng chứng benchmark được đánh giá riêng. Một lô thử hoặc một bản chụp đã đối chiếu không chứng minh toàn bộ 5.000 hay 20.000 vị trí ID đã hoàn tất.
@@ -56,7 +56,7 @@ reports/
 
 `NNNN` là số lô có bốn chữ số; `folder_key` do hàm chuyển đổi ID của storage xác định. `selection.json` giữ phạm vi ID; `starting_state.json` ghi nhận trạng thái bắt đầu và dấu vân tay phục vụ phép đo; `session_index.json` liệt kê các phiên của cùng phạm vi. `metadata.json` và `references.json` chỉ xuất hiện khi đã có kết quả tương ứng; `quality.json` liên kết checksum của hai tệp đó và có thể chưa tồn tại trong checkpoint chưa được đánh giá. Cache `reference_dates/` được tạo khi kiểm toán đủ điều kiện bổ sung ngày. Trạng thái `not_attempted` không được suy thành dữ liệu rỗng đã hoàn tất. Khóa ghi theo MSSV bao phủ cả phạm vi đầy đủ lẫn phạm vi con của cùng thành viên.
 
-Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Kiểm toán chỉ hợp nhất S2 khi dấu vân tay, định danh, xuất xứ, checksum và phân trang hợp lệ. Dữ liệu thiếu hoặc xung đột sẽ chặn xuất, không bị thay thế âm thầm.
+Pha arXiv ghi kết quả xác minh và mã nguồn, nhưng không chứng nhận M1 hoàn tất. Pha S2 cũng không thay đổi kết luận về sự tồn tại của ID arXiv. Validation đọc riêng checkpoint arXiv và S2; normalization tạo bảng working từ bằng chứng hợp lệ. Export chính thức là API riêng.
 
 ## Nguồn dữ liệu và giới hạn xử lý
 

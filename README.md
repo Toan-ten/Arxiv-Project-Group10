@@ -2,7 +2,7 @@
 
 [![Kiểm thử tự động](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml/badge.svg)](https://github.com/Toan-ten/Arxiv-Project-Group10/actions/workflows/tests.yml)
 [![Python 3.11 và 3.12](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
-[![Mở sổ tay Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/feat%2Fs2-request-optimization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb)
+[![Mở sổ tay Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Toan-ten/Arxiv-Project-Group10/blob/refactor%2Fm1-audit-normalization/notebooks/m1_pipeline_thu_thap_va_kiem_toan.ipynb)
 
 Kho mã này chứa một quy trình thu thập và kiểm toán dữ liệu arXiv của Nhóm 10. Mỗi thành viên xử lý dải ID đã cấu hình; tổng phạm vi gồm 20.000 vị trí. Số vị trí được giao, số bài báo tồn tại và số lần nộp là các đại lượng riêng.
 
@@ -18,7 +18,7 @@ Notebook vận hành tải mã theo SHA trong `M1_RUNTIME_COMMIT`. Ô cấu hìn
 4. Chạy ô arXiv để xác minh ID, các lần nộp và tải mã nguồn; sau đó chạy ô S2.
 5. Sau khi hai pha đủ bằng chứng, chạy ô kiểm toán/đối soát. Nếu một pha dừng, chạy lại riêng ô đó với cùng MSSV và Drive.
 
-Khi gọi riêng pha kiểm toán như trong notebook, kiểm tra `is_reconciled = True` và `export_status = "exported"` cho phạm vi ID đã chọn. Hàm tuần tự `run_m1_member()` trả thêm `handoff_status = "verified"` khi kết quả kiểm toán đạt điều kiện đối soát. Việc tải xong mã nguồn hoặc kết thúc một phiên không tự chứng minh M1 hoàn tất; phạm vi và kết quả kiểm toán phải được xác minh cùng nhau.
+Notebook chạy riêng các pha `run_m1_validation_member()` và `run_m1_normalization_member()`. Validation chỉ đọc checkpoint và tạo báo cáo theo paper; normalization tạo bảng working. Muốn tạo bảng official, gọi `run_m1_official_export_member()` sau khi đủ bằng chứng trong toàn bộ phạm vi được giao.
 
 ## Phạm vi ID
 

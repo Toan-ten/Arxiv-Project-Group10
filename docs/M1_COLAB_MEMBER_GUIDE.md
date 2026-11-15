@@ -14,13 +14,13 @@ Khi tiếp tục một phiên, giữ nguyên MSSV, phạm vi ID và Drive root; 
 
 Trước khi chạy, thêm cả `KAGGLE_API_TOKEN` và `SEMANTIC_SCHOLAR_API_KEY` vào Colab Secrets, rồi bật quyền truy cập notebook. Notebook kiểm tra hai khóa trước khi gắn Drive hoặc gọi API. Không dán khóa vào notebook, Drive hay nhật ký. Khóa Kaggle vẫn bắt buộc khi snapshot đã có trong bộ nhớ đệm.
 
-## 2. Chạy ba pha
+## 2. Chạy các pha
 
 1. Chạy ô arXiv. Pha này yêu cầu snapshot và index Kaggle hợp lệ, xác nhận danh sách ID bằng Atom theo lô tối đa 20 ID, đối chiếu lịch sử rồi tải mã nguồn riêng cho từng lần nộp. Khi snapshot hoặc index không sẵn sàng, pha dừng trước discovery; pipeline không chuyển sang đường arXiv-only.
 2. Chạy ô S2. Notebook dùng `batch_m1` để gom metadata cùng references theo lô tối đa 100 ID, kiểm tra định danh và số lượng trước khi công nhận đầy đủ. Bài chưa đủ bằng chứng chuyển sang phân trang. M1 dừng nếu thiếu khóa S2 và không gửi request ẩn danh. Xem [phạm vi trường dữ liệu và cơ chế phân trang](guides/s2_integration.md).
-3. Chạy ô kiểm toán/đối soát sau khi arXiv và S2 đã ghi đủ bằng chứng. Kiểm toán xác minh phạm vi, định danh, xuất xứ, mã kiểm tra và trạng thái phân trang trước khi hợp nhất dữ liệu và xuất bảng.
+3. Chạy ô validation để kiểm tra bằng chứng; sau đó chạy normalization để tạo bảng working. Hai bước này không hợp nhất S2 vào corpus và không tạo bảng official.
 
-Mặc định, sổ tay chạy arXiv, S2 rồi kiểm toán. Có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha. S2 `not_found` chỉ mô tả kết quả tìm kiếm ở Semantic Scholar; trạng thái này không xác nhận ID arXiv không tồn tại.
+Mặc định, sổ tay chạy arXiv, S2, validation rồi normalization. Có thể chạy S2 trước arXiv hoặc chạy lại riêng một pha. S2 `not_found` chỉ mô tả kết quả tìm kiếm ở Semantic Scholar; trạng thái này không xác nhận ID arXiv không tồn tại.
 
 ## 3. Dừng và tiếp tục
 
@@ -28,9 +28,9 @@ Mỗi pha có ngân sách phiên mặc định 10 giờ và điểm khôi phục
 
 Khi các lượt thử nội bộ đã hết và pha gặp HTTP 429 ở discovery arXiv hoặc metadata/references S2, sổ tay có thể tự tiếp tục trong phiên hiện tại với giới hạn một lần mỗi lô và hai lần mỗi phiên. Cơ chế chờ ngẫu nhiên 5–10 phút, tôn trọng `Retry-After` nếu lâu hơn, chỉ tiếp tục khi điểm khôi phục được xác minh và còn đủ ngân sách. HTTP 403, lỗi xác minh, hết ngân sách hoặc lỗi ở pha khác vẫn dừng. Nếu môi trường Colab bị ngắt trong lúc chờ, cần chạy lại ô thủ công bằng cùng phạm vi và thư mục gốc.
 
-Ô arXiv hoặc S2 chỉ xác nhận pha tương ứng đã chạy xong. Chỉ kết quả kiểm toán đã đối soát mới xác nhận dữ liệu đủ điều kiện xuất. Nếu kiểm toán bị chặn, đọc đường dẫn báo cáo và tóm tắt phép đo mà ô kiểm toán in ra; không diễn giải số liệu thiếu thành 0.
+Ô arXiv hoặc S2 chỉ xác nhận pha tương ứng đã chạy xong. Kết quả validation báo mức sẵn sàng theo paper; official export chạy riêng và chỉ nhận phạm vi hoàn tất. Nếu kiểm toán bị chặn, đọc đường dẫn báo cáo và tóm tắt phép đo mà ô kiểm toán in ra; không diễn giải số liệu thiếu thành 0.
 
-Trong kết quả pha kiểm toán, `is_reconciled = True` xác nhận phạm vi đã chọn đạt điều kiện đối soát; `export_status = "exported"` xác nhận bước xuất trả về kết quả. `handoff_status` thuộc giá trị trả về của hàm tương thích `run_m1_member()`, không phải trường mà notebook gọi ba pha riêng cần tìm. Kết quả của một phạm vi thử không được diễn giải thành hoàn tất phạm vi toàn thành viên hoặc toàn nhóm.
+Trong kết quả validation, `ready_for_m2` và `ready_for_m3` liệt kê paper đạt điều kiện theo từng milestone. `handoff_status` thuộc giá trị trả về của hàm tương thích `run_m1_member()`, không phải trường mà notebook gọi ba pha riêng cần tìm. Kết quả của một phạm vi thử không được diễn giải thành hoàn tất phạm vi toàn thành viên hoặc toàn nhóm.
 
 ## 4. Phép đo và phạm vi kết luận
 
