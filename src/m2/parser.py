@@ -59,6 +59,105 @@ CVPR_ABBREVIATIONS = {"etc": "etc.", "ie": "i.e."}
 # Common text abbreviations whose package/class definitions are unavailable to
 # the offline parser. Local definitions still take precedence.
 TEXT_ABBREVIATIONS = {"eg": "e.g.", "ie": "i.e."}
+# Acronym commands with documented singular/plural and short/long forms.
+ACRONYM_FORMS = {
+    "ac": ("full", False), "acf": ("full", False), "acs": ("short", False),
+    "acl": ("long", False), "acp": ("full", True), "acsp": ("short", True),
+    "aclp": ("long", True), "acfp": ("full", True),
+    "gls": ("full", False), "glspl": ("full", True),
+    "acrshort": ("short", False), "acrlong": ("long", False),
+    "acrfull": ("full", False), "acrshortpl": ("short", True),
+    "acrlongpl": ("long", True), "acrfullpl": ("full", True),
+}
+ACRONYM_PACKAGES = {"acro", "acronym", "glossaries", "glossaries-extra"}
+
+
+def key_value_pairs(raw):
+    """Parse simple comma-separated key=value options without executing TeX."""
+    chunks, current, depth = [], [], 0
+    for char in raw:
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            chunks.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    chunks.append("".join(current))
+    result = {}
+    for chunk in chunks:
+        if "=" not in chunk:
+            continue
+        key, value = chunk.split("=", 1)
+        key, value = key.strip(), value.strip()
+        if value.startswith("{") and value.endswith("}"):
+            value = value[1:-1].strip()
+        if key:
+            result[key] = value
+    return result
+
+
+def acronym_form(name):
+    """Return (form, plural, capitalize) for a documented acronym command."""
+    capitalize = name[:1] in {"A", "G"}
+    base = name[0].lower() + name[1:] if capitalize else name
+    form = ACRONYM_FORMS.get(base)
+    if form is None:
+        return None
+    return form[0], form[1], capitalize
+
+
+def acronym_definitions(gatherer):
+    """Collect source-level acronym declarations from the visited TeX files."""
+    definitions = {}
+    pattern = re.compile(r"\\(DeclareAcronym|newacronym)(?![A-Za-z])")
+    for relative in gatherer.visited:
+        if not relative.endswith((".tex", ".ltx")):
+            continue
+        try:
+            text = gatherer.read(gatherer.root / relative)
+        except ParseError:
+            continue
+        for match in pattern.finditer(text):
+            try:
+                cursor = skip_space(text, match.end())
+                if match[1] == "DeclareAcronym":
+                    key, cursor = group(text, cursor)
+                    body, cursor = group(text, cursor)
+                    values = key_value_pairs(body)
+                    short = values.get("short") or None
+                    long = values.get("long") or None
+                    short_plural = values.get("short-plural-form") or None
+                    if short and not short_plural and "short-plural" in values:
+                        short_plural = short + values["short-plural"]
+                    long_plural = values.get("long-plural-form") or None
+                    if long and not long_plural and "long-plural" in values:
+                        long_plural = long + values["long-plural"]
+                else:
+                    values = {}
+                    if text[cursor:cursor + 1] == "[":
+                        optional, cursor = group(text, cursor, "[", "]")
+                        values = key_value_pairs(optional)
+                    key, cursor = group(text, cursor)
+                    short, cursor = group(text, cursor)
+                    long, cursor = group(text, cursor)
+                    short, long = short or None, long or None
+                    short_plural = values.get("shortplural") or None
+                    long_plural = values.get("longplural") or None
+                    if short and not short_plural and "plural" in values:
+                        short_plural = short + values["plural"]
+                    if long and not long_plural and "plural" in values:
+                        long_plural = long + values["plural"]
+                key = key.strip()
+                if key and (short or long):
+                    definitions.setdefault(key, dict(
+                        short=short, long=long,
+                        short_plural=short_plural, long_plural=long_plural))
+            except ParseError:
+                continue
+    return definitions
 
 
 def bibliography(gatherer, body):
@@ -143,6 +242,26 @@ class Tree:
         self.algorithm2e_depth = 0
         self.algorithm_keywords = {}
         self.frontmatter_depth = 0
+        self.acronyms = None
+
+    def acronym_definitions(self):
+        if self.acronyms is None:
+            self.acronyms = acronym_definitions(self.gatherer)
+        return self.acronyms
+
+    @staticmethod
+    def acronym_text(entry, form, plural):
+        if plural:
+            short, long = entry["short_plural"], entry["long_plural"]
+        else:
+            short, long = entry["short"], entry["long"]
+        if form == "short":
+            return short
+        if form == "long":
+            return long
+        if short and long and short != long:
+            return long + " (" + short + ")"
+        return long or short
 
     def add(self, kind, content, parent, root=False, literal=False):
         content = content if literal else normalize(content, self.aliases)
@@ -1309,6 +1428,34 @@ class Tree:
                 buffer.append(value)
                 self.warnings.append("Text abbreviation: \\" + name + " -> " + value +
                                      "; original definition not available")
+            elif (name not in self.gatherer.macros
+                  and (acronym := acronym_form(name)) is not None
+                  and (bool(ACRONYM_PACKAGES & self.gatherer.packages)
+                       or bool(self.acronym_definitions()))):
+                cursor = skip_space(text, end)
+                starred = text[cursor:cursor + 1] == "*"
+                if starred:
+                    cursor += 1
+                optional = False
+                if text[cursor:cursor + 1] == "[":
+                    _, cursor = group(text, cursor, "[", "]")
+                    optional = True
+                key, cursor = group(text, cursor)
+                entry = self.acronym_definitions().get(key.strip())
+                value = None
+                if entry is not None and not starred and not optional:
+                    value = self.acronym_text(entry, acronym[0], acronym[1])
+                if value is None:
+                    # An acronym defined by an unvisited package or an unusual
+                    # form must not be guessed. Retain the exact source token.
+                    buffer.append(text[pos:cursor])
+                    self.warnings.append("Unresolved acronym: " + text[pos:cursor] +
+                                         "; source token retained")
+                else:
+                    if acronym[2] and value:
+                        value = value[0].upper() + value[1:]
+                    buffer.append(value)
+                end = cursor
             elif name in self.gatherer.macros:
                 argc, default, replacement = self.gatherer.macros[name]
                 # This command path is prose: inline/display math is consumed

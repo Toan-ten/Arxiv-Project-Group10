@@ -792,6 +792,61 @@ class M2Tests(unittest.TestCase):
         self.assertIn("Unsupported environment: credits",
                       rejected["versions"][0]["error"] or "")
 
+    def test_acro_declarations_expand_forms(self):
+        source = (r"\documentclass{article}\usepackage{acro}"
+                  r"\DeclareAcronym{ny}{short=NY, long=New York, short-plural=s, long-plural=s}"
+                  r"\begin{document}"
+                  r"\ac{ny} and \acs{ny} and \acl{ny}. "
+                  r"\acp{ny}.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("New York (NY)", content)
+        self.assertIn("New Yorks (NYs)", content)
+        self.assertIn("NY", content)
+        self.assertIn("New York", content)
+
+    def test_glossaries_acronyms_expand_forms(self):
+        source = (r"\documentclass{article}\usepackage{glossaries}"
+                  r"\newacronym[longplural={machine learning models}, shortplural={MLs}]"
+                  r"{mlm}{ML}{machine learning model}"
+                  r"\begin{document}\gls{mlm} and \acrshort{mlm} and \acrlong{mlm}. "
+                  r"\glspl{mlm}.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("machine learning model (ML)", content)
+        self.assertIn("machine learning models (MLs)", content)
+        self.assertIn("ML", content)
+        self.assertIn("machine learning model", content)
+
+    def test_undefined_acronym_is_retained_as_source_token(self):
+        source = tex(r"Use \ac{missing}.").replace(
+            r"\begin{document}", r"\usepackage{acro}\begin{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\ac{missing}", content)
+        self.assertTrue(any("Unresolved acronym" in warning
+                            for warning in result["versions"][0]["normalization_notes"]))
+
+    def test_acronym_without_package_or_definition_is_rejected(self):
+        result = self.parse({"main.tex": tex(r"Use \ac{missing}.")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Unsupported prose command: \\ac", record["error"] or "")
+
+    def test_local_acronym_command_definition_wins(self):
+        source = (r"\documentclass{article}\usepackage{acro}"
+                  r"\DeclareAcronym{ny}{short=NY, long=New York}"
+                  r"\newcommand{\ac}[1]{custom}"
+                  r"\begin{document}\ac{ny}\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("custom", content)
+        self.assertNotIn("New York", content)
+
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
         self.assertEqual(len(list(sentences(text))), 2)
