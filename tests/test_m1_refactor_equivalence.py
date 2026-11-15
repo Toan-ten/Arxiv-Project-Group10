@@ -85,16 +85,20 @@ def test_source_and_api_artifacts_match_baseline_in_fresh_processes(tmp_path, ca
         )
         outputs.append(json.loads(output.read_text(encoding="utf-8")))
     assert outputs[0]["artifacts"], "The characterization must compare real files"
-    # The post-audit release deliberately adds quality sidecars and cleanup/date
-    # reporting. Keep byte-exact comparison for API/source evidence and exports;
-    # permit only those explicit additions in operational JSON and API results.
+    # The post-audit release adds quality sidecars, cleanup/date reporting, and
+    # an S2 identity-split counter. Keep byte-exact comparison for API/source
+    # evidence and exports; permit only these additions in operational JSON
+    # and API results.
     def legacy_fields(value):
         if isinstance(value, list):
             return [legacy_fields(v) for v in value]
         if not isinstance(value, dict):
             return value
         result = {k: legacy_fields(v) for k, v in value.items()
-                  if k not in {"reference_quality", "reference_dates", "cleanup_status", "cleanup_seconds"}}
+                  if k not in {
+                      "reference_quality", "reference_dates", "cleanup_status",
+                      "cleanup_seconds", "metadata_identity_splits",
+                  }}
         if isinstance(result.get("files"), dict):
             result["files"] = {k: v for k, v in result["files"].items()
                                if not k.endswith("/quality.json")}
