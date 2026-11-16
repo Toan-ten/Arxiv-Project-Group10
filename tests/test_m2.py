@@ -118,6 +118,690 @@ class M2Tests(unittest.TestCase):
                 self.assertEqual({e["version"] for e in result["hierarchy"]}, {1})
                 validate_tables(result)
 
+    def test_to01_included_fragment_is_not_an_independent_document(self):
+        for index, include in enumerate(("input", "include")):
+            with self.subTest(command=include):
+                result = self.parse({
+                    "z-article.tex": tex(r"\section{Main}Main text." + "\\"
+                                        + include + r"{extras/part}"),
+                    "extras/part.tex": (r"\iffalse\documentclass{article}\fi"
+                                        r"\section{Appendix}Included evidence \cite{k}."
+                                        r"\begin{thebibliography}{1}\bibitem{k}Source reference."
+                                        r"\end{thebibliography}"),
+                }, aid=f"2508.{7872 + index:05d}")
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "success", record)
+                self.assertEqual(record["root"], "z-article.tex")
+                self.assertEqual(set(record["included_files"]), {"z-article.tex", "extras/part.tex"})
+                self.assertEqual(record["root_selection"]["policy"],
+                                 "unique_main_with_explicit_included_fragments")
+                content = " ".join(row["content"] for row in result["elements"])
+                self.assertIn("Main text.", content)
+                self.assertIn(r"Included evidence \cite{k}.", content)
+                self.assertNotIn("Source reference.", content)
+                self.assertEqual(result["bibtex"][0]["citation_key"], "k")
+                self.assertTrue(all(edge["version"] == 1 for edge in result["hierarchy"]))
+                validate_tables(result)
+
+    def test_to01_unlinked_or_uncertain_fragment_keeps_root_ambiguity(self):
+        fragment = r"\documentclass{article} Fragment content."
+        bodies = [
+            "Main text.",
+            "%\\input{extra}\nMain text.",
+            r"\newcommand{\unused}{\input{extra}}Main text.",
+            r"\iffalse\input{extra}\fi Main text.",
+        ]
+        for index, body in enumerate(bodies):
+            with self.subTest(body=body):
+                result = self.parse({"article.tex": tex(body), "extra.tex": fragment},
+                                    aid=f"2508.{7872 + index:05d}")
+                self.assertIn("found 2", result["versions"][0]["error"])
+
+    def test_to01_supplemental_information_with_literal_metadata_definition(self):
+        supplement = (r"\def\CTeXPreproc{Created by ctex v0.2.12}"
+                      r"\documentclass{article}\begin{document}"
+                      r"\title{Supplemental Information: A study}Separate results."
+                      r"\end{document}")
+        result = self.parse({"a.tex": supplement, "z.tex": tex(r"\section{Main}Actual study.")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["root"], "z.tex")
+        self.assertEqual(record["included_files"], ["z.tex"])
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertIn("Actual study.", content)
+        self.assertNotIn("Separate results.", content)
+
+    def test_to01_two_independent_documents_or_redefined_role_remain_ambiguous(self):
+        for index, second in enumerate((
+            tex(r"\title{An equally valid article}Other study."),
+            r"\def\title{Supplemental Information}\documentclass{article}"
+            r"\begin{document}\title{Other study}Other study.\end{document}",
+            r"\def\metadata{\title{Supplemental Information}}\documentclass{article}"
+            r"\begin{document}\metadata Other study.\end{document}",
+        )):
+            with self.subTest(second=second):
+                record = self.parse({"one.tex": tex("Main study."), "two.tex": second},
+                                    aid=f"2508.{7872 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_to_batch_three_roots_follow_verified_subfile_parent_and_keep_content(self):
+        files = {
+            "combined.tex": (r"\documentclass{article}\usepackage{subfiles}"
+                             r"\newcommand{\shared}{Inherited marker.}\begin{document}"
+                             r"\subfile{article}\appendix\subfile{supp}\bibliography{refs}\end{document}"),
+            "article.tex": (r"\documentclass[combined.tex]{subfiles}"
+                            r"\renewcommand{\shared}{WRONG child preamble.}\begin{document}"
+                            r"\section{Main}Body \shared\cite{k}.\end{document}\textit{}"),
+            "supp.tex": (r"\documentclass[combined.tex]{subfiles}\begin{document}"
+                         r"\section{Supplement}Supplement evidence.\end{document}"),
+            "refs.bib": "@article{k,title={Exact source},author={Alice},year={2025}}",
+        }
+        result = self.parse(files)
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["root"], "combined.tex")
+        self.assertEqual(set(record["included_files"]), {"combined.tex", "article.tex", "supp.tex"})
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertIn("Inherited marker.", content)
+        self.assertNotIn("WRONG child preamble.", content)
+        self.assertIn("Supplement evidence.", content)
+        self.assertIn(r"\cite{k}", content)
+        self.assertEqual(result["bibtex"][0]["citation_key"], "k")
+        self.assertTrue(all(edge["version"] == 1 for edge in result["hierarchy"]))
+        self.assertTrue(any("Post-document source excluded" in note for note in record["normalization_notes"]))
+        validate_tables(result)
+
+    def test_to_batch_standalone_inputs_keep_body_and_do_not_end_parent(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "main.tex").write_text(
+                r"\documentclass{article}\usepackage{standalone}\begin{document}"
+                r"Before.\input{drawing}After.\end{document}", encoding="utf-8")
+            (root / "drawing.tex").write_text(
+                r"\documentclass{standalone}\begin{document}Drawing body.\end{document}", encoding="utf-8")
+            gatherer = Gatherer(root)
+            selected, body = gatherer.gather()
+            self.assertEqual(selected, "main.tex")
+            self.assertIn("Before.", body)
+            self.assertIn("Drawing body.", body)
+            self.assertIn("After.", body)
+            self.assertNotIn(r"\documentclass", body)
+            self.assertNotIn(r"\end{document}", body)
+            result = parse_versions(AID, [(1, root)])
+            self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+
+    def test_to_batch_unlinked_standalone_and_independent_articles_stay_ambiguous(self):
+        record = self.parse({
+            "one.tex": tex("One real article."),
+            "two.tex": tex("Another real article."),
+            "drawing.tex": r"\documentclass{standalone}\begin{document}Figure.\end{document}",
+        })["versions"][0]
+        self.assertIn("found 3", record["error"])
+
+    def test_to_batch_four_mirror_roots_require_same_bytes_and_bibliography(self):
+        main = tex(r"\section{Main}Shared study \cite{k}.\bibliography{references}")
+        supplement = (r"\documentclass{osa-supplemental-document}\begin{document}"
+                      r"\title{Supplemental Document}Separate supplement.\end{document}")
+        bib = "@article{k,title={Source},author={Alice}}"
+        files = {"main.tex": main, "Supplement.tex": supplement, "references.bib": bib,
+                 "mirror/main.tex": main, "mirror/Supplement.tex": supplement,
+                 "mirror/references.bib": bib}
+        result = self.parse(files)
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["root"], "main.tex")
+        self.assertEqual(len(record["root_selection"]["equivalent_root_copies"]), 2)
+        self.assertEqual(record["included_files"], ["main.tex"])
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertIn("Shared study", content)
+        self.assertNotIn("Separate supplement.", content)
+        self.assertEqual(result["bibtex"][0]["title"], "Source")
+
+    def test_to_batch_mirror_title_or_text_without_resource_equivalence_is_ambiguous(self):
+        main = tex(r"Same study \cite{k}.\bibliography{refs}")
+        result = self.parse({
+            "main.tex": main, "refs.bib": "@article{k,title={One source}}",
+            "mirror/main.tex": main, "mirror/refs.bib": "@article{k,title={Different source}}",
+        })
+        self.assertIn("found 2", result["versions"][0]["error"])
+
+    def test_to_batch_mirror_with_relative_input_graph_is_not_assumed_equivalent(self):
+        result = self.parse({
+            "main.tex": tex(r"\input{part}"), "part.tex": "One.",
+            "mirror/main.tex": tex(r"\input{part}"), "mirror/part.tex": "Different.",
+        })
+        self.assertIn("found 2", result["versions"][0]["error"])
+
+    def test_to_batch_dotted_stems_resolve_without_replacing_the_stem(self):
+        result = self.parse({
+            "main.tex": tex(r"\section{Main}\input{parts/3.1_intro}\include{parts/3.2_more}"),
+            "parts/3.1_intro.tex": "First content.",
+            "parts/3.2_more.tex": "Second content.",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["included_files"],
+                         ["main.tex", "parts/3.1_intro.tex", "parts/3.2_more.tex"])
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertLess(content.index("First content."), content.index("Second content."))
+
+    def test_to_batch_exact_existing_resource_wins_over_suffix_fallback(self):
+        result = self.parse({
+            "main.tex": tex(r"\input{part.v1}"),
+            "part.v1": "Exact resource.",
+            "part.v1.tex": "Wrong fallback.",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertIn("part.v1", record["included_files"])
+        self.assertNotIn("part.v1.tex", record["included_files"])
+        self.assertIn("Exact resource.", " ".join(row["content"] for row in result["elements"]))
+
+    def test_to_batch_dotted_missing_or_escaping_resource_still_fails(self):
+        for index, target in enumerate(("3.1_absent", "../../outside.1")):
+            record = self.parse({"main.tex": tex(r"\input{" + target + "}")},
+                                aid=f"2508.{7900 + index:05d}")["versions"][0]
+            self.assertEqual(record["status"], "parse_error")
+            self.assertTrue("Missing compilation resource" in record["error"] or
+                            "Source escapes version directory" in record["error"])
+
+    def test_to_batch_nonutf8_comments_do_not_require_guessing_prose_encoding(self):
+        raw = (b"\\documentclass{article}\n% Legacy comment \x93\x94\xd7\xd4\n"
+               b"\\begin{document}\\section{Main}Caf\xc3\xa9 evidence.\\end{document}")
+        result = self.parse({"main.tex": raw})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertIn("Caf\u00e9 evidence.", " ".join(row["content"] for row in result["elements"]))
+        self.assertIn("comments", record["encodings"]["main.tex"])
+        self.assertTrue(any("Non-UTF8 bytes confined" in note for note in record["normalization_notes"]))
+
+    def test_to_batch_unknown_encoding_in_prose_or_literal_is_not_discarded(self):
+        bodies = [b"Invalid active \x93text.",
+                  b"Escaped percent \\% invalid \x93.",
+                  b"\\begin{verbatim}% literal \x93\\end{verbatim}"]
+        for index, body in enumerate(bodies):
+            result = self.parse({"main.tex": b"\\documentclass{article}\\begin{document}" +
+                                body + b"\\end{document}"}, aid=f"2508.{7910 + index:05d}")
+            self.assertIn("Unknown source encoding", result["versions"][0]["error"])
+
+    def test_to_batch_legacy_declared_encoding_is_still_honored(self):
+        raw = (b"\\documentclass{article}\\usepackage[latin1]{inputenc}"
+               b"\\begin{document}Caf\xe9 text.\\end{document}")
+        result = self.parse({"main.tex": raw})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("Caf\u00e9 text.", " ".join(row["content"] for row in result["elements"]))
+
+    def test_to_batch_size_limit_is_enforced_by_a_bounded_read(self):
+        from unittest.mock import mock_open
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "anthology.bib"
+            source.write_bytes(b"unchanged")
+            mocked = mock_open(read_data=b"x" * (8 * 1024 * 1024 + 2))
+            with patch.object(Path, "open", mocked):
+                with self.assertRaisesRegex(ParseError, "exceeds 8 MiB: anthology.bib"):
+                    Gatherer(root).read(source, comments=False)
+                mocked().read.assert_called_once_with(8 * 1024 * 1024 + 1)
+            self.assertEqual(source.read_bytes(), b"unchanged")
+
+    def test_to_batch_missing_tex_libraries_are_not_silently_ignored(self):
+        for index, lib in enumerate(("epsf", "xy")):
+            result = self.parse({"main.tex": tex(r"\input " + lib + "\nVisible content.")},
+                                aid=f"2508.{7920 + index:05d}")
+            self.assertEqual(result["versions"][0]["status"], "parse_error")
+            self.assertIn(f"Missing compilation resource: {lib}.tex", result["versions"][0]["error"])
+
+    def test_to_batch_existing_library_named_source_is_read_not_discarded(self):
+        result = self.parse({"main.tex": tex(r"\input{epsf}"),
+                             "epsf.tex": "Actual supplied content."})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("Actual supplied content.", " ".join(row["content"] for row in result["elements"]))
+
+    def test_to_batch_literal_enddocument_terminates_without_inventing_missing_boundary(self):
+        result = self.parse({"main.tex": r"\documentclass{article}\begin{document}"
+                             r"\section{Main}Preserved.\enddocument Ignored after termination."})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertIn("Preserved.", content)
+        self.assertNotIn("Ignored after termination.", content)
+
+    def test_to_batch_included_document_terminator_stops_the_compilation_path(self):
+        result = self.parse({
+            "main.tex": tex(r"\section{Main}Before.\input{appendix}Unreachable.\input{missing}"),
+            "appendix.tex": r"\section{Appendix}Retained appendix.\end{document}Unreachable appendix tail.",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["included_files"], ["main.tex", "appendix.tex"])
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertIn("Before.", content)
+        self.assertIn("Retained appendix.", content)
+        self.assertNotIn("Unreachable", content)
+        self.assertTrue(any("termination in included source" in note for note in record["normalization_notes"]))
+
+    def test_to_batch_missing_or_multiple_document_starts_remain_errors(self):
+        for index, source in enumerate((
+                r"\documentclass{article}\begin{document}No end.",
+                r"\documentclass{article}\begin{document}\begin{document}Two starts.\end{document}",
+                r"\documentclass{article}\def\enddocument{Custom text.}\begin{document}Body.\enddocument")):
+            record = self.parse({"main.tex": source}, aid=f"2508.{7930 + index:05d}")["versions"][0]
+            self.assertEqual(record["status"], "parse_error")
+
+    def test_to_batch_subfile_fragments_with_executed_package_preserve_order(self):
+        result = self.parse({
+            "main.tex": (r"\documentclass{article}\usepackage{amsmath,subfiles}"
+                         r"\newif\ifshow\showfalse\begin{document}"
+                         r"\section{Main}Before.\subfile{sections/part}After.\end{document}"),
+            "sections/part.tex": r"\section{Extra}Subfile fragment.",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        content = " ".join(row["content"] for row in result["elements"])
+        self.assertLess(content.index("Before."), content.index("Subfile fragment."))
+        self.assertLess(content.index("Subfile fragment."), content.index("After."))
+
+    def test_to_batch_subfile_without_package_or_with_wrong_parent_is_rejected(self):
+        record = self.parse({"main.tex": tex(r"\subfile{part}"),
+                             "part.tex": "Not implicitly supported."})["versions"][0]
+        self.assertIn("subfiles package", record["error"])
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "other.tex").write_text(tex("Other."), encoding="utf-8")
+            g = Gatherer(root)
+            with self.assertRaisesRegex(ParseError, "outside the active compilation path"):
+                g.included_document_body(root / "part.tex",
+                    r"\documentclass[other.tex]{subfiles}\begin{document}Body.\end{document}",
+                    (root / "main.tex",), "subfile")
+            with self.assertRaisesRegex(ParseError, "included document terminator"):
+                g.included_document_body(root / "part.tex", r"Body.\enddocument Hidden tail.",
+                                         (root / "main.tex",), "subfile")
+
+    def test_to_batch_aliased_document_terminator_remains_unverified(self):
+        record = self.parse({"main.tex": r"\documentclass{article}\let\enddocument\relax"
+                             r"\begin{document}Body.\enddocument"})["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("redefined document terminator", record["error"])
+
+    def test_to_batch_commented_encoding_declaration_does_not_validate_active_bytes(self):
+        raw = (b"\\documentclass{article}\n%\\usepackage[latin1]{inputenc}\n"
+               b"\\begin{document}Unknown \xe9 byte.\\end{document}")
+        record = self.parse({"main.tex": raw})["versions"][0]
+        self.assertIn("Unknown source encoding", record["error"])
+
+    def test_to_batch_redefined_subfile_and_custom_package_modes_stay_blocked(self):
+        sources = [
+            r"\documentclass{article}\usepackage{subfiles}\newcommand{\subfile}[1]{Custom body.}"
+            r"\begin{document}\subfile{part}\end{document}",
+            r"\documentclass{article}\usepackage[subpreambles=true]{standalone}"
+            r"\begin{document}Body.\end{document}",
+        ]
+        for index, source in enumerate(sources):
+            record = self.parse({"main.tex": source, "part.tex": "Original content."},
+                                aid=f"2508.{7940 + index:05d}")["versions"][0]
+            self.assertEqual(record["status"], "parse_error")
+            self.assertIn("redefined subfile" if index == 0 else "package options", record["error"])
+
+    def test_root_fix01_braced_and_unbraced_input_preserve_all_document_bodies(self):
+        results = []
+        for syntax in (r"\input{fig}", "\\input fig\n"):
+            with self.subTest(syntax=syntax), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                (root / "main.tex").write_text(
+                    r"\documentclass{article}\usepackage{standalone}\begin{document}"
+                    + "Main content.\n" + syntax + "\nMore content." + r"\end{document}",
+                    encoding="utf-8")
+                (root / "fig.tex").write_text(
+                    r"\documentclass{standalone}\begin{document}Figure content.\end{document}",
+                    encoding="utf-8")
+                result = parse_versions(AID, [(1, root)])
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "success", record)
+                self.assertEqual(record["root"], "main.tex")
+                self.assertEqual(record["included_files"], ["main.tex", "fig.tex"])
+                evidence = record["root_selection"]["excluded_documents"][0]
+                self.assertEqual(evidence["file"], "fig.tex")
+                self.assertEqual(evidence["evidence"][0]["kind"], "included_document_body")
+                content = " ".join(row["content"] for row in result["elements"])
+                self.assertLess(content.index("Main content."), content.index("Figure content."))
+                self.assertLess(content.index("Figure content."), content.index("More content."))
+                validate_tables(result)
+                results.append(result)
+        self.assertEqual(results[0], results[1])
+
+    def test_root_fix01_dynamic_or_escaping_filename_cannot_select_a_root(self):
+        forms = [r"\input \filename", r"\input fig\suffix", r"\input{fig\suffix}",
+                 r"\input fig#1", r"\input $filename", r"\input ../../fig"]
+        for index, invocation in enumerate(forms):
+            with self.subTest(invocation=invocation):
+                record = self.parse({
+                    "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}"
+                                + invocation + "\nMore content." + r"\end{document}",
+                    "fig.tex": r"\documentclass{standalone}\begin{document}Figure content.\end{document}",
+                }, aid=f"2508.{7950 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix01_unbraced_include_and_subfile_do_not_gain_root_evidence(self):
+        from src.m2.latex import root_document_inputs
+        for name in ("include", "subfile"):
+            with self.subTest(command=name):
+                probe = (r"\documentclass{article}\begin{document}"
+                         + "\\" + name + " fig\n" + r"\end{document}")
+                self.assertEqual(root_document_inputs(probe), [])
+
+    def test_root_fix01_expand_also_rejects_a_dynamic_filename_suffix(self):
+        record = self.parse({"main.tex": tex("\\input fig\\suffix\n"),
+                             "fig.tex": "Wrong prefix file."})["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Dynamic unbraced input filename", record["error"])
+
+    def test_root_fix02_literal_false_document_is_not_an_independent_root(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            main = tex("Main content.")
+            notes = ("\\iffalse\n" + tex("Inactive document.") + "\n\\fi\n")
+            (root / "main.tex").write_text(main, encoding="utf-8")
+            (root / "notes.tex").write_text(notes, encoding="utf-8")
+            raw = (root / "notes.tex").read_bytes()
+            result = parse_versions(AID, [(1, root)])
+            record = result["versions"][0]
+            self.assertEqual(record["status"], "success", record)
+            self.assertEqual(record["root"], "main.tex")
+            self.assertEqual(record["included_files"], ["main.tex"])
+            content = " ".join(row["content"] for row in result["elements"])
+            self.assertIn("Main content.", content)
+            self.assertNotIn("Inactive document.", content)
+            self.assertEqual((root / "notes.tex").read_bytes(), raw)
+            validate_tables(result)
+
+    def test_root_fix02_nested_else_unknown_or_unbalanced_blocks_remain_ambiguous(self):
+        inactive = tex("Uncertain document.")
+        notes = [
+            r"\iffalse\iftrue" + inactive + r"\fi\fi",
+            r"\iffalse" + inactive + r"\else Active branch.\fi",
+            r"\ifpdf" + inactive + r"\fi",
+            r"\ifcustom" + inactive + r"\fi",
+            r"\iffalse" + inactive,
+            r"\iffalse" + inactive + r"\fi\fi",
+            r"\def\iffalse{\iftrue}\iffalse" + inactive + r"\fi",
+            r"\let\iffalse\iftrue\iffalse" + inactive + r"\fi",
+            "{" + r"\iffalse" + inactive + r"\fi}",
+        ]
+        for index, source in enumerate(notes):
+            with self.subTest(source=source):
+                record = self.parse({"main.tex": tex("Main."), "notes.tex": source},
+                                    aid=f"2508.{7960 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix02_a_truly_independent_document_is_still_a_root(self):
+        source = r"\iffalse Ignored text.\fi" + tex("Another actual document.")
+        record = self.parse({"main.tex": tex("Main."), "notes.tex": source})["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("found 2", record["error"])
+
+    def test_root_fix02_comments_and_separate_simple_blocks_are_safe(self):
+        notes = ("%\\else \\ifpdf ignored comment\n" + r"\iffalse" +
+                 tex("First inactive.") + "\\fi\n" +
+                 r"\iffalse" + tex("Second inactive.") + r"\fi")
+        result = self.parse({"main.tex": tex("Actual main."), "notes.tex": notes})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertEqual(result["versions"][0]["included_files"], ["main.tex"])
+
+    def test_root_fix02_literal_scanner_ambiguity_is_not_erased(self):
+        sources = [
+            r"\iffalse\documentclass{article}\begin{document}"
+            r"\begin{verbatim}\fi\end{verbatim}Uncertain.\end{document}\fi",
+            r"\iffalse\begin{comment}\else\end{comment}"
+            + tex("Potentially active document.") + r"\fi",
+        ]
+        for index, notes in enumerate(sources):
+            with self.subTest(notes=notes):
+                record = self.parse({"main.tex": tex("Main."), "notes.tex": notes},
+                                    aid=f"2508.{7980 + index:05d}")["versions"][0]
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix03_inline_verb_and_starred_delimiters_are_not_roots(self):
+        forms = [r"\verb|\documentclass{article}|",
+                 r"\verb*|\documentclass{article}|",
+                 r"\verb+\documentclass{article}+",
+                 r"\verb*!\documentclass{article}!",
+                 r"\verb@\documentclass{article}@",
+                 r"\verb#\documentclass{article}#"]
+        for index, literal in enumerate(forms):
+            with self.subTest(literal=literal):
+                result = self.parse({"main.tex": tex("Main content."), "notes.tex": literal},
+                                    aid=f"2508.{8000 + index:05d}")
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "success", record)
+                self.assertEqual(record["root"], "main.tex")
+                self.assertEqual(record["included_files"], ["main.tex"])
+                content = " ".join(row["content"] for row in result["elements"])
+                self.assertIn("Main content.", content)
+                self.assertNotIn("documentclass", content)
+                validate_tables(result)
+
+    def test_root_fix03_active_independent_document_is_not_hidden_by_inline_literal(self):
+        for index, source in enumerate((
+                tex("A real second document."),
+                r"\verb|\documentclass{fake}|" + tex("A real second document."))):
+            with self.subTest(source=source):
+                record = self.parse({"main.tex": tex("Main."), "notes.tex": source},
+                                    aid=f"2508.{8010 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix03_malformed_inline_literals_cannot_silently_remove_candidate(self):
+        sources = [
+            r"\verb|\documentclass{article}",
+            "\\verb|unfinished\n" + r"\documentclass{article}|",
+            "\\verb*+unfinished\r\n" + r"\documentclass{article}+",
+            r"\verb |\documentclass{article}|",
+            r"\verb* |\documentclass{article}*",
+        ]
+        for index, source in enumerate(sources):
+            with self.subTest(source=source):
+                record = self.parse({"main.tex": tex("Main."), "notes.tex": source},
+                                    aid=f"2508.{8020 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertTrue("found 2" in record["error"] or
+                                "Unclosed inline verbatim" in record["error"], record)
+
+    def test_root_fix03_mask_is_local_and_does_not_change_expanded_source(self):
+        from src.m2.latex import mask_root_inline_verbatim
+        probe = r"Before \verb|\documentclass{fake}| after \documentclass{article}"
+        masked = mask_root_inline_verbatim(probe)
+        self.assertEqual(len(masked), len(probe))
+        self.assertTrue(masked.startswith("Before "))
+        self.assertTrue(masked.endswith(r" after \documentclass{article}"))
+        self.assertNotIn(r"\documentclass{fake}", masked)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            body = r"Before \verb|\documentclass{fake}| and \verb*+\documentclass{fake}+ after."
+            source = tex(body)
+            (root / "main.tex").write_text(source, encoding="utf-8")
+            raw = (root / "main.tex").read_bytes()
+            selected, gathered = Gatherer(root).gather()
+            self.assertEqual(selected, "main.tex")
+            expected = raw.decode("utf-8").split(r"\begin{document}", 1)[1].rsplit(r"\end{document}", 1)[0]
+            self.assertEqual(gathered, expected)
+            self.assertEqual((root / "main.tex").read_bytes(), raw)
+
+    def test_root_fix03_control_word_prefixes_and_escaped_slashes_are_not_verb(self):
+        for index, source in enumerate((
+                r"\verbatim|\documentclass{article}|",
+                r"\\verb|\documentclass{article}|")):
+            with self.subTest(source=source):
+                record = self.parse({"main.tex": tex("Main."), "notes.tex": source},
+                                    aid=f"2508.{8030 + index:05d}")["versions"][0]
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix04_transitive_fragment_preserves_order_and_citation(self):
+        result = self.parse({
+            "main.tex": (r"\documentclass{article}\usepackage{standalone}\begin{document}"
+                         r"\section{Main}Main before.\input{section}Main after."
+                         r"\bibliography{refs}\end{document}"),
+            "section.tex": r"Section before \cite{k}.\input figure" + "\nSection after.",
+            "figure.tex": r"\documentclass{standalone}\begin{document}Figure content.\end{document}",
+            "refs.bib": "@article{k,title={Source evidence},author={Alice},year={2025}}",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["root"], "main.tex")
+        self.assertEqual(record["included_files"], ["main.tex", "section.tex", "figure.tex"])
+        evidence = record["root_selection"]["excluded_documents"][0]["evidence"][0]
+        self.assertEqual(evidence["parent"], "section.tex")
+        self.assertEqual(evidence["via"], ["main.tex", "section.tex"])
+        content = " ".join(row["content"] for row in result["elements"])
+        previous = -1
+        for phrase in ["Main before.", "Section before", "Figure content.", "Section after.", "Main after."]:
+            current = content.index(phrase)
+            self.assertGreater(current, previous)
+            previous = current
+        self.assertIn(r"\cite{k}", content)
+        self.assertEqual(result["bibtex"][0]["citation_key"], "k")
+        self.assertTrue(all(edge["version"] == 1 for edge in result["hierarchy"]))
+        validate_tables(result)
+
+    def test_root_fix04_an_independent_document_remains_ambiguous(self):
+        record = self.parse({
+            "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}\input{section}\end{document}",
+            "section.tex": r"Section.\input{figure}",
+            "figure.tex": r"\documentclass{standalone}\begin{document}Drawing.\end{document}",
+            "independent.tex": tex("A different independent paper."),
+        })["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Expected exactly one documentclass root", record["error"])
+        self.assertIsNone(record["root"])
+
+    def test_root_fix04_explicit_article_input_is_not_a_standalone_document(self):
+        record = self.parse({
+            "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}\input{section}\end{document}",
+            "section.tex": r"\input{independent}",
+            "independent.tex": tex("An article, not a standalone figure."),
+        })["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("found 2", record["error"])
+
+    def test_root_fix04_cycles_discard_partial_graph_evidence(self):
+        for index, section in enumerate((
+                r"\input{figure}\input{loop}", r"\input{loop}\input{figure}")):
+            with self.subTest(section=section):
+                record = self.parse({
+                    "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}\input{section}\end{document}",
+                    "section.tex": section,
+                    "loop.tex": r"\input{section}",
+                    "figure.tex": r"\documentclass{standalone}\begin{document}Drawing.\end{document}",
+                }, aid=f"2508.{8050 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+                self.assertIsNone(record["root_selection"] if "root_selection" in record else None)
+
+    def test_root_fix04_deep_fragment_graph_is_bounded(self):
+        files = {
+            "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}\input{part0}\end{document}",
+            "figure.tex": r"\documentclass{standalone}\begin{document}Drawing.\end{document}",
+        }
+        for index in range(41):
+            files[f"part{index}.tex"] = (r"\input{" + (f"part{index+1}" if index < 40 else "figure") + "}")
+        record = self.parse(files)["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("found 2", record["error"])
+
+    def test_root_fix04_unsafe_or_conditional_fragments_do_not_prove_inclusion(self):
+        fragments = [
+            r"\input{../../figure}",
+            r"\input{\dynamic}",
+            r"\ifcustom\input{figure}\fi",
+            r"\iftrue\input{figure}\else Other.\fi",
+            r"\verb|\input{figure}|",
+            r"\newcommand{\load}{\input{figure}}\load",
+            r"\end{document}\input{figure}",
+        ]
+        for index, fragment in enumerate(fragments):
+            with self.subTest(fragment=fragment):
+                record = self.parse({
+                    "main.tex": r"\documentclass{article}\usepackage{standalone}\begin{document}\input{section}\end{document}",
+                    "section.tex": fragment,
+                    "figure.tex": r"\documentclass{standalone}\begin{document}Drawing.\end{document}",
+                }, aid=f"2508.{8060 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix04_transitive_subfile_uses_a_verified_ancestor(self):
+        result = self.parse({
+            "main.tex": r"\documentclass{article}\usepackage{subfiles}\begin{document}Main.\input{section}After.\end{document}",
+            "section.tex": r"Section.\subfile{chapter}",
+            "chapter.tex": r"\documentclass[main.tex]{subfiles}\begin{document}\section{Extra}Child content.\end{document}",
+        })
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertEqual(record["root"], "main.tex")
+        self.assertEqual(record["included_files"], ["main.tex", "section.tex", "chapter.tex"])
+        self.assertIn("Child content.", " ".join(row["content"] for row in result["elements"]))
+
+    def test_root_fix05_uncalled_balanced_common_declarations_are_not_roots(self):
+        forms = [
+            r"\newcommand{\mytemplate}{\documentclass{article}}",
+            r"\newcommand*{\mytemplate}[1]{\documentclass{article}\title{{#1}}}",
+            r"\newcommand\mytemplate[2][{Nested default}]{\documentclass{article}#1#2}",
+            r"\renewcommand{\mytemplate}{\documentclass{article}}",
+            r"\providecommand{\mytemplate}{\documentclass{article}}",
+            r"\DeclareRobustCommand{\mytemplate}{\documentclass{article}}",
+            r"\def\mytemplate{\documentclass{article}}",
+            r"\gdef\mytemplate#1#2{\documentclass{article}\title{{#1}#2}}",
+        ]
+        for index, declaration in enumerate(forms):
+            with self.subTest(declaration=declaration):
+                result = self.parse({"main.tex": tex("Main content."), "other.tex": declaration},
+                                    aid=f"2508.{8070 + index:05d}")
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "success", record)
+                self.assertEqual(record["root"], "main.tex")
+                self.assertEqual(record["included_files"], ["main.tex"])
+                self.assertNotIn("documentclass", " ".join(row["content"] for row in result["elements"]))
+
+    def test_root_fix05_an_ordinary_group_cannot_hide_an_active_root(self):
+        record = self.parse({
+            "main.tex": tex("Main."),
+            "other.tex": "{" + tex("Independent grouped document.") + "}",
+        })["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("found 2", record["error"])
+
+    def test_root_fix05_invoked_dynamic_or_malformed_declarations_stay_ambiguous(self):
+        forms = [
+            r"\newcommand{\mytemplate}{\documentclass{article}}\mytemplate",
+            r"\newcommand{\mytemplate}{\documentclass{article}}\csname mytemplate\endcsname",
+            r"\newcommand{\mytemplate}{\documentclass{article}",
+            r"\newcommand{\mytemplate}[bad]{\documentclass{article}}",
+            r"\expandafter\def\csname mytemplate\endcsname{\documentclass{article}}",
+            r"\edef\mytemplate{\documentclass{article}}",
+            r"\def\mytemplate#2{\documentclass{article}}",
+            r"\newcommand{\documentclass}{\documentclass{article}}",
+        ]
+        for index, declaration in enumerate(forms):
+            with self.subTest(declaration=declaration):
+                record = self.parse({"main.tex": tex("Main."), "other.tex": declaration},
+                                    aid=f"2508.{8080 + index:05d}")["versions"][0]
+                self.assertEqual(record["status"], "parse_error")
+                self.assertIn("found 2", record["error"])
+
+    def test_root_fix05_lexical_mask_does_not_modify_source_or_expansion(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = (r"\documentclass{article}\newcommand{\mytemplate}{\documentclass{unused}}"
+                      r"\begin{document}Body retained.\end{document}")
+            (root / "main.tex").write_text(source, encoding="utf-8")
+            (root / "other.tex").write_text(
+                r"\newcommand{\mytemplate}{\documentclass{unused}}", encoding="utf-8")
+            before = {p.name: p.read_bytes() for p in root.iterdir()}
+            selected, body = Gatherer(root).gather()
+            self.assertEqual(selected, "main.tex")
+            self.assertEqual(body, "Body retained.")
+            self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
+
     def test_multiple_roots_remain_ambiguous_without_explicit_roles(self):
         undecidable = [
             tex("Another independent article."),
@@ -2370,3 +3054,635 @@ class M2Tests(unittest.TestCase):
         for decl,body in [(r"\newcommand{\newif}[1]{Not primitive}",r"\newif\ifshow"),(r"\newcommand{\if}[2]{Not primitive}",r"\if aa True.\fi"),(r"\newcommand{\ifpdf}{Not engine}",r"\ifpdf\else\fi")]:
             with self.subTest(decl=decl),tempfile.TemporaryDirectory() as td:
                 p=Path(td);p.joinpath("main.tex").write_text(tex(decl+body),encoding="utf-8");self.assertEqual(parse_versions(AID,[(1,p)])["versions"][0]["status"],"parse_error")
+
+
+    def _batch01_parse(self, body, *, document_class="article", preamble="", files=None):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            sources = {"main.tex": r"\documentclass{" + document_class + "}" + preamble
+                       + r"\begin{document}" + body + r"\end{document}", **(files or {})}
+            for name, content in sources.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+            result = parse_versions(AID, [(1, root)])
+            validate_tables(result)
+            return result
+
+    def test_batch01_baselineskip_literal_glue_preserves_following_content(self):
+        for assignment in ("18pt", "=15.5pt", " = 12pt plus 2pt minus 1pt"):
+            with self.subTest(assignment=assignment):
+                result = self._batch01_parse(r"\baselineskip" + assignment
+                    + r" \section{Intro}Words \cite{k}.\[x=y\]After.",
+                    files={"r.bib": "@article{k,title={Evidence},year={2020}}"},
+                    preamble=r"\bibliography{r}")
+                self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+                content = " ".join(x["content"] for x in result["elements"])
+                self.assertIn(r"Words \cite{k}.", content)
+                self.assertIn(r"x=y", content)
+                self.assertIn("After.", content)
+                self.assertNotIn("18pt", content)
+                self.assertEqual(result["bibtex"][0]["citation_key"], "k")
+
+    def test_batch01_baselineskip_dynamic_or_incomplete_glue_is_not_dropped(self):
+        for value in (r"=\unknown Text.", r"=2\unknown Text.", "=12pt plus Bad Text.",
+                      "=12pt minus Bad Text.", "=12pt plus 2pt plus 3pt Text.", "=12bogus Text.",
+                      r"\section{Lost}"):
+            with self.subTest(value=value):
+                r = self._batch01_parse(r"\baselineskip" + value)
+                self.assertEqual(r["versions"][0]["status"], "parse_error")
+                self.assertEqual(r["elements"], [])
+
+    def test_batch01_baselineskip_local_macro_takes_precedence(self):
+        r = self._batch01_parse(r"\baselineskip Words.", preamble=r"\newcommand{\baselineskip}{Local}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Local Words.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_pagenumbering_supported_styles_do_not_consume_body(self):
+        for style in ("arabic", "roman", "Roman", "alph", "Alph", "gobble"):
+            with self.subTest(style=style):
+                r = self._batch01_parse(r"Before.\pagenumbering{" + style + r"}\section{Next}After.")
+                self.assertEqual(r["versions"][0]["status"], "success")
+                self.assertEqual([x["content"] for x in r["elements"]][1:], ["Before.", "Next", "After."])
+                self.assertEqual(r["versions"][0]["layout_metadata"][0]["style"], style)
+
+    def test_batch01_pagenumbering_invalid_or_missing_argument_is_not_swallowed(self):
+        for body in (r"\pagenumbering{\style}After.", r"\pagenumbering{unknown}After.",
+                     r"\pagenumbering After.", r"\pagenumbering{arabic"):
+            with self.subTest(body=body):
+                self.assertEqual(self._batch01_parse(body)["versions"][0]["status"], "parse_error")
+
+    def test_batch01_pagenumbering_local_macro_is_not_replaced(self):
+        r = self._batch01_parse(r"\pagenumbering{Actual} After.",
+                               preamble=r"\newcommand{\pagenumbering}[1]{#1 wording.}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Actual wording.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_sentence_spacing_at_sign_keeps_text_math_and_citation(self):
+        r = self._batch01_parse(r"See M.Sc.\@ thesis \cite{k}. Next $a=b$.",
+            preamble=r"\bibliography{r}", files={"r.bib": "@article{k,title={Thesis}}"})
+        self.assertEqual(r["versions"][0]["status"], "success")
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn(r"M.Sc. thesis \cite{k}.", content)
+        self.assertIn("$a=b$", content)
+
+    def test_batch01_at_sign_does_not_hide_internal_commands_or_local_definitions(self):
+        bad = self._batch01_parse(r"\@unknown{Do not lose this.}")
+        self.assertEqual(bad["versions"][0]["status"], "parse_error")
+        r = self._batch01_parse(r"\@ Tail.", preamble=r"\newcommand{\@}{Visible}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Visible Tail.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_textbackslash_is_literal_not_an_invented_citation(self):
+        r = self._batch01_parse(r"Grant IES\textbackslash R3\textbackslash243264. "
+                               r"Literal \textbackslash{}cite\{missing\}. After.")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn(r"IES\textbackslash{}R3\textbackslash{}243264", content)
+        self.assertIn(r"\textbackslash{}cite\{missing\}", content)
+        self.assertEqual(r["bibtex"], [])
+
+    def test_batch01_textbackslash_does_not_hide_real_unknown_command_or_missing_citation(self):
+        for body in (r"\textbackslash{}\unknown{Content}", r"\textbackslash{} \cite{missing}"):
+            with self.subTest(body=body):
+                self.assertEqual(self._batch01_parse(body)["versions"][0]["status"], "parse_error")
+        r = self._batch01_parse(r"\textbackslash After.",
+                               preamble=r"\newcommand{\textbackslash}{Slash word}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Slash word After.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_twocolumngrid_preserves_prose_formula_and_order(self):
+        r = self._batch01_parse(r"Before.\onecolumngrid\[a=b\]\twocolumngrid After.",
+                               document_class="revtex4-2")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertEqual([x["kind"] for x in r["elements"]], ["document", "sentence", "block_formula", "sentence"])
+        self.assertEqual([x["content"] for x in r["elements"] if x["kind"]=="sentence"], ["Before.", "After."])
+
+    def test_batch01_twocolumngrid_requires_class_or_explicit_local_definition(self):
+        self.assertEqual(self._batch01_parse(r"\twocolumngrid After.")["versions"][0]["status"], "parse_error")
+        r = self._batch01_parse(r"\twocolumngrid After.",
+                               preamble=r"\newcommand{\twocolumngrid}{Local grid text.}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Local grid text.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_eg_cvpr_iccv_onedot_keeps_citations_and_spacing(self):
+        for package in ("cvpr", "iccv"):
+            with self.subTest(package=package):
+                r = self._batch01_parse(r"Examples, \eg. cases \cite{k}, \eg, other cases.",
+                    preamble=r"\usepackage{" + package + r"}\bibliography{r}",
+                    files={"r.bib": "@article{k,title={Evidence}}"})
+                self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+                content = " ".join(x["content"] for x in r["elements"])
+                self.assertIn(r"e.g. cases \cite{k}", content)
+                self.assertIn("e.g., other cases.", content)
+                self.assertNotIn("e.g..", content)
+                self.assertIn("original style file not interpreted",
+                              " ".join(r["versions"][0]["normalization_notes"]))
+
+    def test_batch01_eg_without_package_is_not_guessed_and_local_definition_wins(self):
+        self.assertEqual(self._batch01_parse(r"\eg cases.")["versions"][0]["status"], "parse_error")
+        r = self._batch01_parse(r"\eg cases.",
+            preamble=r"\usepackage{iccv}\newcommand{\eg}{Custom phrase}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn("Custom phrase cases.", content)
+        self.assertNotIn("e.g.", content)
+
+    def test_batch01_received_retains_exact_dates_and_optional_stage(self):
+        r = self._batch01_parse(r"\received{5 August {2025}}\received[revised]{9 August 2025}"
+                               r"\received[accepted]{12 August 2025}\section{Intro}After.",
+                               document_class="acmart")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn("5 August 2025", content)
+        self.assertIn("9 August 2025", content)
+        self.assertIn("12 August 2025", content)
+        self.assertIn("After.", content)
+        self.assertEqual([x["stage"] for x in r["versions"][0]["layout_metadata"]], [None,"revised","accepted"])
+
+    def test_batch01_received_aastex_keeps_text_after_metadata(self):
+        r = self._batch01_parse(r"\received{Unspecified date}\begin{abstract}Abstract text.\end{abstract}After.",
+                               document_class="aastex631")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn("Unspecified date", content)
+        self.assertIn("Abstract text.", content)
+        self.assertIn("After.", content)
+
+    def test_batch01_received_unknown_stage_class_and_missing_or_dynamic_content_fail(self):
+        for cls, body in (("acmart",r"\received[unknown]{Date}"),
+                          ("article",r"\received{Date}"),
+                          ("acmart",r"\received Date."),
+                          ("acmart",r"\received{\unknown{Date}}"),
+                          ("aastex631",r"\received[accepted]{Date}")):
+            with self.subTest(cls=cls,body=body):
+                self.assertEqual(self._batch01_parse(body,document_class=cls)["versions"][0]["status"], "parse_error")
+
+    def test_batch01_received_local_definition_takes_precedence(self):
+        r = self._batch01_parse(r"\received{Actual wording} After.", document_class="acmart",
+                               preamble=r"\newcommand{\received}[1]{#1.}")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertIn("Actual wording.", " ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_subtitle_nested_text_math_and_citations_are_preserved(self):
+        r = self._batch01_parse(r"\subtitle{The {quiet} Sun \& $Ca$ \cite{k}}"
+                               r"\begin{abstract}Abstract follows.\end{abstract}\section{Intro}Body.",
+            document_class="aa", preamble=r"\bibliography{r}",
+            files={"r.bib":"@article{k,title={Sun study}}"})
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        content = " ".join(x["content"] for x in r["elements"])
+        self.assertIn(r"The quiet Sun \& $Ca$ \cite{k}", content)
+        self.assertIn("Abstract follows.", content)
+        self.assertIn("Body.", content)
+        self.assertEqual(r["bibtex"][0]["citation_key"],"k")
+
+    def test_batch01_empty_subtitle_leaves_following_abstract_and_section(self):
+        r = self._batch01_parse(r"\subtitle{}\begin{abstract}Abstract.\end{abstract}\section{Intro}Body.",
+                               document_class="aa")
+        self.assertEqual(r["versions"][0]["status"], "success")
+        self.assertNotIn("subtitle", [x["content"] for x in r["elements"]])
+        self.assertIn("Body.", [x["content"] for x in r["elements"]])
+
+    def test_batch01_subtitle_unknown_class_malformed_and_unknown_nested_text_fail(self):
+        for cls, body in (("article",r"\subtitle{Text}"),
+                          ("aa",r"\subtitle Missing."),
+                          ("aa",r"\subtitle{\unknown{Text}}")):
+            with self.subTest(cls=cls,body=body):
+                self.assertEqual(self._batch01_parse(body,document_class=cls)["versions"][0]["status"], "parse_error")
+
+    def test_batch01_subtitle_local_definition_and_existing_roman_logic(self):
+        r = self._batch01_parse(r"\subtitle{\uppercase\expandafter{\romannumeral2}: Inner halo}After.",
+                               document_class="aa")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        self.assertIn("II: Inner halo", " ".join(x["content"] for x in r["elements"]))
+        r = self._batch01_parse(r"\subtitle{Custom} After.", document_class="aa",
+                               preamble=r"\newcommand{\subtitle}[1]{#1 text.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Custom text."," ".join(x["content"] for x in r["elements"]))
+
+    def test_batch01_icml_notice_keeps_marker_and_following_abstract(self):
+        r = self._batch01_parse(r"\printAffiliationsAndNotice{\icmlEqualContribution}"
+                               r"\begin{abstract}Actual abstract.\end{abstract}\section{Intro}Body.",
+                               preamble=r"\usepackage{icml2025}")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        self.assertIn(r"\icmlEqualContribution{}",[x["content"] for x in r["elements"]])
+        self.assertIn("Actual abstract.",[x["content"] for x in r["elements"]])
+        self.assertIn("Body.",[x["content"] for x in r["elements"]])
+        self.assertIn("original style wording not interpreted"," ".join(r["versions"][0]["normalization_notes"]))
+
+    def test_batch01_icml_marker_outside_notice_undeclared_and_unknown_notice_fail(self):
+        for preamble,body in (("",r"\icmlEqualContribution Body."),
+                              (r"\usepackage{icml2025}",r"\icmlEqualContribution Body."),
+                              (r"\usepackage{icml2025}",r"\printAffiliationsAndNotice{\icmlEqualContribution\unknown{Body}}")):
+            with self.subTest(preamble=preamble,body=body):
+                self.assertEqual(self._batch01_parse(body,preamble=preamble)["versions"][0]["status"],"parse_error")
+
+    def test_batch01_icml_marker_explicit_local_wording_is_not_overridden(self):
+        r = self._batch01_parse(r"\printAffiliationsAndNotice{\icmlEqualContribution}After.",
+            preamble=r"\usepackage{icml2025}\newcommand{\icmlEqualContribution}{Alice and Bob contributed equally.}")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        content=" ".join(x["content"] for x in r["elements"])
+        self.assertIn("Alice and Bob contributed equally.",content)
+        self.assertNotIn(r"\icmlEqualContribution",content)
+
+    def test_batch01_ac_without_first_use_semantics_remains_explicit_error(self):
+        r = self._batch01_parse(r"\ac{TM} After.",
+            preamble=r"\usepackage{acronym}\begin{acronym}\acro{TM}{Tsetlin Machine}\end{acronym}")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertEqual(r["versions"][0]["error"],r"Unsupported prose command: \ac")
+
+    def test_batch01_new_commands_keep_versioned_hierarchy_and_shared_content(self):
+        source = r"\documentclass{revtex4-2}\begin{document}\baselineskip=12pt\pagenumbering{arabic}\section{Intro}Shared.\twocolumngrid\[a=b\]After.\end{document}"
+        p=self.paper({1:{"main.tex":source},2:{"main.tex":source}})
+        r=parse_versions(AID,[(1,p/"v1"),(2,p/"v2")])
+        validate_tables(r)
+        self.assertEqual([v["status"] for v in r["versions"]],["success","success"])
+        node=next(x for x in r["elements"] if x["content"]=="Shared.")
+        self.assertEqual({e["version"] for e in r["hierarchy"] if e["element_id"]==node["element_id"]},{1,2})
+        nodes={x["element_id"]:x for x in r["elements"]}
+        for version in (1,2):
+            edges=[e for e in r["hierarchy"] if e["version"]==version]
+            parent={e["element_id"]:e["parent_id"] for e in edges}
+            for e in edges:
+                cursor=e["element_id"];seen=set()
+                while cursor in parent:
+                    self.assertNotIn(cursor,seen);seen.add(cursor);cursor=parent[cursor]
+                self.assertEqual(nodes[cursor]["kind"],"document")
+                self.assertEqual(nodes[cursor]["content"],f"Version {version} root")
+
+
+    def test_batch02_a_vision_abbreviations_supported_packages_and_punctuation(self):
+        for package in ("iccv","cvpr","eccvabbrv","wacv"):
+            with self.subTest(package=package):
+                r=self._batch01_parse(r"\eg. cases, \ie useful work by Doe \etal~\cite{k}.",
+                    preamble=r"\usepackage{"+package+r"}\bibliography{r}",
+                    files={"r.bib":"@article{k,title={Evidence}}"})
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                content=" ".join(n["content"] for n in r["elements"])
+                self.assertIn("e.g. cases",content);self.assertIn("i.e. useful",content)
+                self.assertIn(r"et al. \cite{k}",content);self.assertNotIn("e.g..",content)
+
+    def test_batch02_a_vision_abbreviations_unknown_package_and_override(self):
+        for name in ("eg","ie","etal"):
+            with self.subTest(name=name):
+                self.assertEqual(self._batch01_parse("\\"+name+" words.")["versions"][0]["status"],"parse_error")
+                # A longer, unknown control word is not the abbreviation.
+                r=self._batch01_parse("\\"+name+"word words.",preamble=r"\usepackage{iccv}")
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+                r=self._batch01_parse("\\"+name+" words.",
+                    preamble=r"\usepackage{iccv}\newcommand{"+"\\"+name+r"}{Local}")
+                self.assertEqual(r["versions"][0]["status"],"success")
+                self.assertIn("Local words."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_restatable_keeps_heading_body_citation_and_replay(self):
+        r=self._batch01_parse(r"\section{Main}\begin{restatable}[Named \cite{k}]{theorem}{ResultA}"
+            r"Statement $x=1$.\end{restatable}\section{Proofs}\ResultA*After.",
+            preamble=r"\usepackage{thm-restate}\newtheorem{theorem}{Theorem}\bibliography{r}",
+            files={"r.bib":"@article{k,title={Theorem source}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        content=[n["content"] for n in r["elements"]]
+        self.assertEqual(content.count("Statement $x=1$."),2)
+        self.assertEqual(sum(r"Named \cite{k}"==c for c in content),2)
+        self.assertIn("After.",content)
+        self.assertEqual(r["bibtex"][0]["citation_key"],"k")
+        self.assertEqual(sum(e["version"]==1 for e in r["hierarchy"]),len(r["elements"])-1)
+
+    def test_batch02_a_restatable_unverified_unknown_type_or_collision_fails(self):
+        for pre,body in [
+            (r"\newtheorem{theorem}{Theorem}",r"\begin{restatable}{theorem}{R}Words.\end{restatable}"),
+            (r"\usepackage{thm-restate}",r"\begin{restatable}{unknown}{R}Words.\end{restatable}"),
+            (r"\usepackage{thm-restate}\newtheorem{theorem}{Theorem}",r"\begin{restatable}{theorem}{section}Lost.\end{restatable}"),
+            (r"\usepackage{thm-restate}\newtheorem{theorem}{Theorem}",r"\begin{restatable}{theorem}{R}A.\end{restatable}\begin{restatable}{theorem}{R}B.\end{restatable}"),
+            (r"\usepackage{thm-restate}\newtheorem{theorem}{Theorem}",r"\R*\begin{restatable}{theorem}{R}Words.\end{restatable}")]:
+            with self.subTest(pre=pre,body=body):
+                self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_restatable_unknown_body_and_missing_heading_reference_not_dropped(self):
+        for statement in (r"\unknown{Lost}",r"\cite{missing}"):
+            with self.subTest(statement=statement):
+                r=self._batch01_parse(r"\begin{restatable}{theorem}{R}"+statement+r"\end{restatable}",
+                    preamble=r"\usepackage{thm-restate}\newtheorem{theorem}{Theorem}")
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_restatable_source_defined_environment_takes_precedence(self):
+        r=self._batch01_parse(r"\begin{restatable}Body.\end{restatable}",
+            preamble=r"\usepackage{thm-restate}\newenvironment{restatable}{Begin.}{End.}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        content=" ".join(n["content"] for n in r["elements"])
+        for word in ("Begin.","Body.","End."):self.assertIn(word,content)
+
+    def test_batch02_a_linebreak_valid_strength_preserves_text_and_math(self):
+        for option in ("","[0]","[4]"):
+            with self.subTest(option=option):
+                r=self._batch01_parse(r"First\linebreak"+option+r" second $x$.")
+                self.assertEqual(r["versions"][0]["status"],"success")
+                self.assertIn("First second $x$."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_linebreak_bad_strength_and_local_override(self):
+        for option in ("[9]",r"[\value]","["):
+            with self.subTest(option=option):
+                self.assertEqual(self._batch01_parse(r"First\linebreak"+option+" second.")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\linebreak After.",preamble=r"\newcommand{\linebreak}{Local wording.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Local wording."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_iccv_supplement_title_keeps_appendix_and_citations(self):
+        r=self._batch01_parse(r"Main.\maketitlesupplementary\section{Proofs}Appendix \cite{k}.",
+            preamble=r"\usepackage{iccv}\bibliography{r}",files={"r.bib":"@article{k,title={Proof}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        content=[n["content"] for n in r["elements"]]
+        self.assertLess(content.index("Main."),content.index("Supplementary Material"))
+        self.assertLess(content.index("Supplementary Material"),content.index("Proofs"))
+        self.assertIn(r"Appendix \cite{k}.",content)
+
+    def test_batch02_a_supplement_unknown_aaai_and_local_override(self):
+        self.assertEqual(self._batch01_parse(r"\maketitlesupplementary Lost.",
+            preamble=r"\usepackage{aaai2026}")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\maketitlesupplementary After.",
+            preamble=r"\usepackage{iccv}\newcommand{\maketitlesupplementary}{Own title.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Own title."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_acm_teaserfigure_keeps_caption_citation_and_order_without_image(self):
+        r=self._batch01_parse(r"\begin{teaserfigure}\includegraphics{missing.png}"
+            r"\caption{Teaser $x$ \cite{k}.}\end{teaserfigure}\begin{abstract}Abstract.\end{abstract}",
+            document_class="acmart",preamble=r"\bibliography{r}",
+            files={"r.bib":"@article{k,title={Teaser reference}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertEqual(r["elements"][1]["kind"],"figure")
+        self.assertIn(r"\caption{Teaser $x$ \cite{k}.}",r["elements"][1]["content"])
+        self.assertIn("Abstract.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_a_teaserfigure_unknown_class_bad_option_and_missing_cite_fail(self):
+        for cls,body in [
+            ("article",r"\begin{teaserfigure}Caption.\end{teaserfigure}"),
+            ("acmart",r"\begin{teaserfigure}[odd]Caption.\end{teaserfigure}"),
+            ("acmart",r"\begin{teaserfigure}\caption{See \cite{missing}.}\end{teaserfigure}")]:
+            with self.subTest(cls=cls,body=body):
+                self.assertEqual(self._batch01_parse(body,document_class=cls)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_newlength_literal_and_scaled_width_keep_table_and_words(self):
+        for declaration in (r"\newlength{\colwidth}",r"\newlength\colwidth"):
+            with self.subTest(declaration=declaration):
+                r=self._batch01_parse(declaration+r"\setlength{\colwidth}{0.19\textwidth}"
+                    r"\begin{tabular}{p{\colwidth}}Cell \cite{k}.\end{tabular}After.",
+                    preamble=r"\bibliography{r}",files={"r.bib":"@article{k,title={Cell ref}}"})
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                self.assertIn(r"Cell \cite{k}"," ".join(n["content"] for n in r["elements"]))
+                self.assertIn("After.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_a_newlength_malformed_duplicate_dynamic_and_readback_fail(self):
+        for body in (r"\newlength{\section}",r"\newlength{\length\other}",r"\newlength{\x}\newlength{\x}",
+                     r"\newlength{\x}\setlength{\x}{\unknown}",
+                     r"\newlength{\x}\setlength{\x}{12pt}\baselineskip=\x",
+                     r"\setlength{\undeclared}{12pt}",r"\newlength\@bad"):
+            with self.subTest(body=body):
+                self.assertEqual(self._batch01_parse(body)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_newlength_local_command_definition_takes_precedence(self):
+        r=self._batch01_parse(r"\newlength{Actual} After.",
+            preamble=r"\newcommand{\newlength}[1]{#1 wording.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Actual wording."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_textbullet_keeps_visible_glyph_and_following_citation(self):
+        r=self._batch01_parse(r"\textbf{\textbullet}\ Contribution \cite{k}.",
+            preamble=r"\bibliography{r}",files={"r.bib":"@article{k,title={Reference}}"})
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("\u2022 Contribution "+r"\cite{k}."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_a_textbullet_local_override_and_unknown_group_not_hidden(self):
+        r=self._batch01_parse(r"\textbullet After.",preamble=r"\newcommand{\textbullet}{Marker}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Marker After."," ".join(n["content"] for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\textbullet{\unknown{Lost}}")["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_addtolength_braced_and_unbraced_layout_only(self):
+        for assignment in (r"\addtolength{\tabcolsep}{2pt}",r"\addtolength\linewidth{-2em}"):
+            with self.subTest(assignment=assignment):
+                r=self._batch01_parse(assignment+r"\section{Next}Words $x$ stay.")
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                self.assertIn("Words $x$ stay.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_a_addtolength_dynamic_target_or_value_fails(self):
+        for body in (r"\addtolength{\section}{2pt}",r"\addtolength{\tabcolsep}{\unknown}",
+                     r"\addtolength{\tabcolsep}{2pt+1pt}",r"\addtolength{\tabcolsep}"):
+            with self.subTest(body=body):
+                self.assertEqual(self._batch01_parse(body)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_a_addtolength_local_override_retains_content(self):
+        r=self._batch01_parse(r"\addtolength{One}{Two}After.",
+            preamble=r"\newcommand{\addtolength}[2]{#1 and #2.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("One and Two."," ".join(n["content"] for n in r["elements"]))
+
+
+    def test_batch02_b_restatable_literal_declaretheorem_and_replay(self):
+        r=self._batch01_parse(r"\begin{restatable}[Named]{thm}{R}Statement $x$.\end{restatable}\R*After.",
+            preamble=r"\usepackage{thmtools,thm-restate}\declaretheorem[name=Theorem]{thm}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertEqual([n["content"] for n in r["elements"]].count("Statement $x$."),2)
+
+    def test_batch02_b_declaretheorem_dynamic_hook_or_unknown_environment_stays_error(self):
+        for declaration in (r"\declaretheorem[name=\unknown]{thm}",r"\declaretheorem[preheadhook={Lost.}]{thm}",
+                            r"\declaretheorem[name=Theorem]{\dynamic}"):
+            with self.subTest(declaration=declaration):
+                r=self._batch01_parse(r"\begin{restatable}{thm}{R}Text.\end{restatable}",
+                    preamble=r"\usepackage{thmtools,thm-restate}"+declaration)
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_batch02_b_declaretheorem_in_inactive_branch_is_not_evidence(self):
+        r=self._batch01_parse(r"\begin{restatable}{thm}{R}Text.\end{restatable}",
+            preamble=r"\usepackage{thmtools,thm-restate}\iffalse\declaretheorem[name=Theorem]{thm}\fi")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertIn("Unregistered restatable theorem",r["versions"][0]["error"])
+
+    def test_batch02_b_ac_and_gls_are_not_replaced_by_keys(self):
+        for command,preamble in [
+            ("ac",r"\usepackage{acronym}\begin{acronym}\acro{TM}{Tsetlin Machine}\end{acronym}"),
+            ("gls",r"\usepackage{glossaries}\newacronym{TM}{TM}{Tsetlin Machine}")]:
+            with self.subTest(command=command):
+                r=self._batch01_parse("\\"+command+"{TM} After.",preamble=preamble)
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+                self.assertIn("Unsupported prose command",r["versions"][0]["error"])
+                self.assertEqual(r["elements"],[])
+
+    def test_batch02_b_roman_literal_int_lowercase_and_existing_uppercase(self):
+        for number,expected in [(1,"i"),(4,"iv"),(9,"ix"),(49,"xlix"),(3999,"mmmcmxcix"),(0,""),(-1,"")]:
+            with self.subTest(number=number):
+                r=self._batch01_parse(r"("+r"\romannumeral"+str(number)+r") Words $x$.")
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                self.assertIn("("+expected+") Words $x$."," ".join(n["content"] for n in r["elements"]))
+        r=self._batch01_parse(r"\uppercase\expandafter{\romannumeral4} Body.")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("IV Body."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_roman_does_not_guess_macro_integer_or_expandable_terminator(self):
+        for value in (r"\year",r"2\unknown","4000","9"*5000):
+            with self.subTest(value=value[:20]):
+                self.assertEqual(self._batch01_parse(r"\romannumeral"+value+") After.")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\romannumeral3\relax) Body.")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("iii) Body."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_roman_local_definition_wins(self):
+        r=self._batch01_parse(r"\romannumeral{Local} After.",
+            preamble=r"\newcommand{\romannumeral}[1]{#1 text.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Local text."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_cleardoublepage_preserves_text_and_override(self):
+        for pre,expected in [("","Before. After."),(r"\newcommand{\cleardoublepage}{Local text.}","Local text.")]:
+            with self.subTest(pre=pre):
+                r=self._batch01_parse(r"Before.\cleardoublepage After.",preamble=pre)
+                self.assertEqual(r["versions"][0]["status"],"success")
+                self.assertIn(expected," ".join(n["content"] for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\cleardoublepage\unknown{Lost}")["versions"][0]["status"],"parse_error")
+
+    def test_batch02_b_parskip_literal_glue_preserves_following_sections(self):
+        for value in ("4pt","=3pt"," = 3pt plus 1pt minus .5pt"):
+            with self.subTest(value=value):
+                r=self._batch01_parse(r"\parskip"+value+r"\section{Next}Words.")
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                self.assertIn("Next",[n["content"] for n in r["elements"]])
+                self.assertIn("Words.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_b_parskip_dynamic_and_local_definition(self):
+        for value in (r"=\unknown","=3pt plus Bad",r"\section{Lost}"):
+            with self.subTest(value=value):
+                self.assertEqual(self._batch01_parse(r"\parskip"+value)["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\parskip After.",preamble=r"\newcommand{\parskip}{Local text.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Local text."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_aa_acknowledgement_keeps_text_citation_and_root_parent(self):
+        r=self._batch01_parse(r"\section{Conclusions}Done.\begin{acknowledgement}Thanks \cite{k}."
+            r"\end{acknowledgement}\appendix\section{Extra}Appendix.",
+            document_class="aa",preamble=r"\bibliography{r}",files={"r.bib":"@article{k,title={Thanks}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        node=next(n for n in r["elements"] if n["content"]=="acknowledgement")
+        edge=next(e for e in r["hierarchy"] if e["element_id"]==node["element_id"])
+        root=next(n for n in r["elements"] if n["kind"]=="document")
+        self.assertEqual(edge["parent_id"],root["element_id"])
+        self.assertIn(r"Thanks \cite{k}.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_b_acknowledgement_unknown_class_and_unknown_content_fail(self):
+        for cls,body in [("article",r"\begin{acknowledgement}Words.\end{acknowledgement}"),
+                          ("aa",r"\begin{acknowledgement}\unknown{Words}\end{acknowledgement}")]:
+            with self.subTest(cls=cls):
+                self.assertEqual(self._batch01_parse(body,document_class=cls)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_b_arcsec_aa_keeps_units_math_and_following_content(self):
+        r=self._batch01_parse(r"Beam 1\arcsec\ pixel. Math $2\arcsec$ stays.",document_class="aa")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        content=" ".join(n["content"] for n in r["elements"])
+        self.assertIn("1\u2033 pixel.",content);self.assertIn(r"$2\arcsec$",content)
+
+    def test_batch02_b_arcsec_undeclared_class_or_local_override(self):
+        self.assertEqual(self._batch01_parse(r"1\arcsec angle.")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\arcsec After.",document_class="aa",
+            preamble=r"\newcommand{\arcsec}{Source unit}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Source unit After."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_leftline_reparses_heading_math_and_citations(self):
+        r=self._batch01_parse(r"\leftline{Line $x$ \cite{k}.}\section{Intro}After.",
+            preamble=r"\bibliography{r}",files={"r.bib":"@article{k,title={Ref}}"})
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn(r"Line $x$ \cite{k}.",[n["content"] for n in r["elements"]])
+        self.assertIn("After.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_b_leftline_unknown_content_and_local_override(self):
+        self.assertEqual(self._batch01_parse(r"\leftline{\unknown{Lost}}")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\leftline{Own}After.",preamble=r"\newcommand{\leftline}[1]{#1 source.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Own source."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_newcolumntype_pure_layout_keeps_table_citation(self):
+        for pre,declaration in [
+            (r"\usepackage{array}",r"\newcolumntype{P}[1]{>{\centering\arraybackslash}p{#1}}"),
+            (r"\usepackage{array,colortbl}",r"\newcolumntype{R}{>{\columncolor{gray!40}}r}"),
+            (r"\usepackage{array,tabularx}",r"\newcolumntype{s}{>{\hsize=.2\hsize}X}"),
+            (r"\usepackage{array,ragged2e}",r"\newcolumntype{R}[1]{>{\RaggedLeft\arraybackslash}p{#1}}")]:
+            with self.subTest(declaration=declaration):
+                r=self._batch01_parse(declaration+r"\begin{tabular}{P{2cm}}Cell \cite{k}.\end{tabular}After.",
+                    preamble=pre+r"\bibliography{r}",files={"r.bib":"@article{k,title={Cell evidence}}"})
+                self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+                self.assertIn(r"Cell \cite{k}"," ".join(n["content"] for n in r["elements"]))
+                self.assertIn("After.",[n["content"] for n in r["elements"]])
+
+    def test_batch02_b_newcolumntype_content_injection_cycle_or_bad_parameter_fails(self):
+        for spec,option in [(r">{Visible words}l",""),(r">{\cite{k}}l",""),(r">{\unknown}l",""),
+                            ("P",""),("p{#2}","[1]"),("p{#0}","[1]"),("X",""),
+                            (r">{\hsize=\unknown}l","")]:
+            with self.subTest(spec=spec):
+                r=self._batch01_parse(r"\newcolumntype{P}"+option+"{"+spec+"}After.",preamble=r"\usepackage{array}")
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertEqual(self._batch01_parse(r"\newcolumntype{P}{l}After.")["versions"][0]["status"],"parse_error")
+
+    def test_batch02_b_newcolumntype_conflict_and_local_override(self):
+        r=self._batch01_parse(r"\newcolumntype{P}{l}\newcolumntype{P}{r}",
+            preamble=r"\usepackage{array}")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\newcolumntype{Words}{Here}",
+            preamble=r"\newcommand{\newcolumntype}[2]{#1 #2.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Words Here."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch02_b_scalebox_reparses_math_citation_and_following_body(self):
+        r=self._batch01_parse(r"\scalebox{.9}[1.2]{Before \cite{k}.\[x=y\]After.} Tail.",
+            preamble=r"\usepackage{graphicx}\bibliography{r}",files={"r.bib":"@article{k,title={Reference}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        content=[n["content"] for n in r["elements"]]
+        for value in (r"Before \cite{k}.","After.","Tail."):self.assertIn(value,content)
+        self.assertTrue(any(n["kind"]=="block_formula" and "x=y" in n["content"] for n in r["elements"]))
+        adjacent=self._batch01_parse(r"\scalebox{1}{After.}Tail.",preamble=r"\usepackage{graphicx}")
+        self.assertEqual(adjacent["versions"][0]["status"],"success")
+        self.assertIn("After.Tail.",[n["content"] for n in adjacent["elements"]])
+
+    def test_batch02_b_scalebox_invalid_factor_undeclared_or_unknown_body_fails(self):
+        for pre,body in [(r"\usepackage{graphicx}",r"\scalebox{0}{Lost}"),
+                         (r"\usepackage{graphicx}",r"\scalebox{\dynamic}{Lost}"),
+                         (r"\usepackage{graphicx}",r"\scalebox{.9}[\dynamic]{Lost}"),
+                         (r"\usepackage{graphicx}",r"\scalebox{.9}{\unknown{Lost}}"),
+                         ("",r"\scalebox{1}{Words}")]:
+            with self.subTest(pre=pre,body=body):
+                self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch02_b_scalebox_local_definition_takes_precedence(self):
+        r=self._batch01_parse(r"\scalebox{Own}{Words}After.",
+            preamble=r"\usepackage{graphicx}\newcommand{\scalebox}[2]{#1 #2.}")
+        self.assertEqual(r["versions"][0]["status"],"success")
+        self.assertIn("Own Words."," ".join(n["content"] for n in r["elements"]))
+
+
+    def test_batch02_b_declaretheorem_inside_unused_argument_or_scope_is_not_evidence(self):
+        for hidden in (r"\title{\declaretheorem[name=Theorem]{thm}}",
+                       r"{\declaretheorem[name=Theorem]{thm}}"):
+            with self.subTest(hidden=hidden):
+                r=self._batch01_parse(r"\begin{restatable}{thm}{R}Words.\end{restatable}",
+                    preamble=r"\usepackage{thmtools,thm-restate}"+hidden)
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+                self.assertIn("Unregistered restatable theorem",r["versions"][0]["error"])
+
+
+    def test_batch02_b_custom_column_local_format_commands_are_not_assumed_invisible(self):
+        for declaration,spec in [
+            (r"\newcommand{\centering}{VISIBLE}",r">{\centering}l"),
+            (r"\newcommand{\arraybackslash}{VISIBLE}",r">{\arraybackslash}l"),
+            (r"\newcommand{\columncolor}[1]{VISIBLE}",r">{\columncolor{gray}}l"),
+            (r"\newcommand{\hsize}{VISIBLE}",r">{\hsize=.2\hsize}l"),
+            (r"\newcommand{\linewidth}{VISIBLE}",r"p{.2\linewidth}")]:
+            with self.subTest(declaration=declaration):
+                r=self._batch01_parse(r"\newcolumntype{P}{"+spec+r"}\begin{tabular}{P}Cell.\end{tabular}",
+                    preamble=r"\usepackage{array,colortbl}"+declaration)
+                self.assertEqual(r["versions"][0]["status"],"parse_error")
+                self.assertIn("Locally redefined custom column",r["versions"][0]["error"])
+
+    def test_batch02_b_redefined_roman_terminator_and_length_register_are_blocked(self):
+        for pre,body in [
+            (r"\newcommand{\relax}{VISIBLE}",r"\romannumeral2\relax) After."),
+            (r"\newcommand{\linewidth}{VISIBLE}",r"\addtolength\linewidth{2pt}After.")]:
+            with self.subTest(pre=pre):
+                r=self._batch01_parse(body,preamble=pre)
+                self.assertEqual(r["versions"][0]["status"],"parse_error")

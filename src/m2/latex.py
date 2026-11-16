@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 
 
@@ -269,7 +270,7 @@ def supplement_evidence(probe):
     """
     evidence, pos, body, front = [], 0, False, False
     classes = begins = ends = 0
-    phrase = re.compile(r"\b(?:supplemental material|supplementary information|supporting information)\b", re.I)
+    phrase = re.compile(r"\b(?:supplemental material|supplemental information|supplementary information|supporting information)\b", re.I)
     try:
         while pos < len(probe):
             pos = skip_space(probe, pos)
@@ -294,7 +295,17 @@ def supplement_evidence(probe):
                 if target in role_commands or source in {"csname", "expandafter"}:
                     return []
                 continue
-            if name.startswith("if") or name in {"else", "fi", "def", "gdef", "edef", "xdef", "catcode"}:
+            if name in {"def", "gdef"}:
+                target, pos = command(probe, skip_space(probe, pos))
+                pos = skip_space(probe, pos)
+                if probe[pos:pos + 1] != "{":
+                    return []  # Parameterized definitions need TeX semantics.
+                value, pos = group(probe, pos)
+                if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE",
+                              "huge", "Huge", "textbf", "documentclass", "begin", "end"} or "\\" in value:
+                    return []
+                continue  # Literal metadata, e.g. CTeXPreproc, cannot change roles.
+            if name.startswith("if") or name in {"else", "fi", "edef", "xdef", "catcode"}:
                 return []
             if name in {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}:
                 pos = skip_space(probe, pos)
@@ -357,6 +368,265 @@ def supplement_evidence(probe):
         return []
     return evidence if classes == begins == ends == 1 else []
 
+
+
+def literal_input_filename(text, pos, *, allow_unbraced=False):
+    """Read a literal filename; path confinement still belongs to resolve()."""
+    start = skip_space(text, pos)
+    if text[start:start + 1] == "{":
+        target, end = group(text, start)
+    elif allow_unbraced:
+        match = re.match(r"[^\s\\{}]+", text[start:])
+        if not match:
+            raise ParseError("Invalid unbraced input")
+        target, end = match[0], start + len(match[0])
+        if text[end:end + 1] in {"\\", "{"}:
+            raise ParseError("Dynamic unbraced input filename is unsupported")
+    else:
+        target, end = group(text, start)
+    if not target.strip() or re.search(r"[\\#{}$^~]", target):
+        raise ParseError("Dynamic input filename is unsupported")
+    return target, end
+
+
+def mask_inactive_root_blocks(raw_probe):
+    """Mask only self-contained, literal, non-nested iffalse blocks for roots.
+
+    No conditional is executed. Any active command outside the blocks, nested
+    or unknown condition, else, malformed boundary, or literal scanner ambiguity
+    leaves the ENTIRE probe unchanged. This intentionally favors ambiguity.
+    """
+    probe = strip_comments(raw_probe, strict_urls=False)
+    # strip_comments removes comment environments. In skipped TeX their scanner
+    # does not run, so hidden else/fi tokens cannot be certified from that view.
+    if re.search(r"\\begin\s*\{comment\}", raw_probe):
+        return probe
+    spans, pos = [], 0
+    while pos < len(probe):
+        if probe[pos] in "{}":
+            return probe  # Group/macro argument semantics are not root evidence.
+        if probe[pos] != "\\":
+            pos += 1
+            continue
+        try:
+            name, after = command(probe, pos)
+        except ParseError:
+            return probe
+        if name != "iffalse":
+            return probe  # Includes definitions/aliases/engine predicates.
+        start, cursor = pos, after
+        while cursor < len(probe):
+            if probe[cursor] != "\\":
+                cursor += 1
+                continue
+            try:
+                token, end = command(probe, cursor)
+            except ParseError:
+                return probe
+            if token == "fi":
+                spans.append((start, end))
+                pos = end
+                break
+            if token.startswith("if") or token in {"else", "or", "verb", "url", "path", "href"}:
+                return probe
+            if token in {"begin", "end"}:
+                try:
+                    env, _ = group(probe, end)
+                except ParseError:
+                    return probe
+                if env in {"verbatim", "verbatim*", "lstlisting", "comment"}:
+                    return probe  # Such scanners do not execute in skipped TeX.
+            cursor = end
+        else:
+            return probe
+    if not spans:
+        return probe
+    masked = list(probe)
+    for start, end in spans:
+        masked[start:end] = ["\n" if c == "\n" else " " for c in probe[start:end]]
+    return "".join(masked)
+
+
+def mask_root_inline_verbatim(probe):
+    """Same-length root-only view; never mask an uncertain inline literal."""
+    spans, pos = [], 0
+    while pos < len(probe):
+        if probe[pos] != "\\":
+            pos += 1
+            continue
+        match = re.match(r"\\verb(?![a-zA-Z])", probe[pos:])
+        if match:
+            cursor = pos + len(match[0])
+            if probe[cursor:cursor + 1] == "*":
+                cursor += 1  # A starred form cannot backtrack into '*' as its delimiter.
+            delimiter = probe[cursor:cursor + 1]
+            if (not delimiter or not 33 <= ord(delimiter) <= 126 or
+                    "a" <= delimiter <= "z" or "A" <= delimiter <= "Z"):
+                return probe
+            start = cursor + 1
+            stop = probe.find(delimiter, start)
+            if stop < 0 or "\n" in probe[start:stop] or "\r" in probe[start:stop]:
+                return probe  # No proof of a valid, single-line literal.
+            spans.append((pos, stop + 1))
+            pos = stop + 1
+        else:
+            try:
+                _, pos = command(probe, pos)  # Skip escaped backslashes/control words.
+            except ParseError:
+                return probe
+    if not spans:
+        return probe
+    masked = list(probe)
+    for start, end in spans:
+        masked[start:end] = [" " for _ in probe[start:end]]
+    return "".join(masked)
+
+
+def mask_uncalled_root_macro_definitions(probe):
+    """Mask isolated, balanced declarations, never execute macro replacements.
+
+    Outside invocations (other than harmless literal primitives) or dynamic
+    declaration syntax leave the whole probe unchanged. Ordinary groups are
+    scanned, not discarded, so they cannot hide an active documentclass.
+    """
+    latex = {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}
+    primitive = {"def", "gdef"}
+    reserved = latex | primitive | {
+        "documentclass", "begin", "end", "input", "include", "subfile",
+        "usepackage", "iffalse", "iftrue", "fi", "else", "relax", "par", "noindent"}
+    spans, pos = [], 0
+    try:
+        while pos < len(probe):
+            if probe[pos] != "\\":
+                pos += 1
+                continue
+            start = pos
+            name, pos = command(probe, pos)
+            if name in {"relax", "par", "noindent"}:
+                continue
+            if name not in latex | primitive:
+                return probe  # Includes calls, aliases, conditionals and csname.
+            pos = skip_space(probe, pos)
+            if name in latex and probe[pos:pos + 1] == "*":
+                pos = skip_space(probe, pos + 1)
+            if name in latex and probe[pos:pos + 1] == "{":
+                target, pos = group(probe, pos)
+                if not re.fullmatch(r"\s*\\[A-Za-z@]+\s*", target):
+                    return probe
+                target = target.strip()[1:]
+            else:
+                target, pos = command(probe, pos)
+                if not re.fullmatch(r"[A-Za-z@]+", target):
+                    return probe
+            if target in reserved:
+                return probe
+            pos = skip_space(probe, pos)
+            if name in latex:
+                count = 0
+                if probe[pos:pos + 1] == "[":
+                    value, pos = group(probe, pos, "[", "]")
+                    if not re.fullmatch(r"[0-9]", value.strip()):
+                        return probe
+                    count = int(value)
+                    pos = skip_space(probe, pos)
+                    if probe[pos:pos + 1] == "[":
+                        if count == 0:
+                            return probe
+                        _, pos = group(probe, pos, "[", "]")
+            else:
+                brace = probe.find("{", pos)
+                if brace < 0:
+                    return probe
+                parameters = re.sub(r"\s+", "", probe[pos:brace])
+                if not re.fullmatch(r"(?:#[1-9])*", parameters):
+                    return probe
+                if parameters != "".join(f"#{i}" for i in range(1, len(parameters) // 2 + 1)):
+                    return probe
+                pos = brace
+            _, pos = group(probe, pos)
+            spans.append((start, pos))
+    except ParseError:
+        return probe
+    masked = list(probe)
+    for start, end in spans:
+        masked[start:end] = ["\n" if c == "\n" else " " for c in probe[start:end]]
+    return "".join(masked)
+
+
+def root_selection_probe(raw_probe):
+    """Root evidence only; source expansion always reads the original file."""
+    return mask_uncalled_root_macro_definitions(
+        mask_root_inline_verbatim(mask_literals(mask_inactive_root_blocks(raw_probe))))
+
+
+def root_document_inputs(probe, *, packages=None, preamble_only=False, fragment=False, strict=False):
+    """Find only explicit, unconditional document-body input/include edges.
+
+    This is root-selection evidence, not conditional execution. Macro bodies,
+    comments and literal text cannot introduce edges. Uncertain control flow
+    supplies no evidence; normal expansion remains responsible for validation.
+    """
+    inputs, pos, body = [], 0, fragment
+    try:
+        while (pos := skip_space(probe, pos)) < len(probe):
+            if probe[pos] in "{[":
+                opening = probe[pos]
+                _, pos = group(probe, pos, opening, "}" if opening == "{" else "]")
+                continue
+            if probe[pos] != "\\":
+                pos += 1
+                continue
+            name, pos = command(probe, pos)
+            if (name.startswith("if") and name != "iff") or name in {
+                    "else", "fi", "let", "catcode", "csname", "expandafter",
+                    "includeonly", "endinput", "edef", "xdef"}:
+                if packages is not None:
+                    packages.clear()
+                if strict:
+                    raise ParseError("Uncertain control flow in root input graph")
+                return []
+            if name in {"def", "gdef", "newcommand", "renewcommand",
+                        "providecommand", "DeclareRobustCommand"}:
+                pos = skip_space(probe, pos)
+                if probe[pos:pos + 1] == "*":
+                    pos = skip_space(probe, pos + 1)
+                if probe[pos:pos + 1] == "{":
+                    target, pos = group(probe, pos)
+                    target = target.strip().lstrip("\\")
+                else:
+                    target, pos = command(probe, pos)
+                if target in {"input", "include", "subfile", "usepackage", "begin", "end", "documentclass"}:
+                    if packages is not None:
+                        packages.clear()
+                    if strict:
+                        raise ParseError("Redefined structural command in root input graph")
+                    return []
+                if name not in {"def", "gdef"}:
+                    pos = options(probe, options(probe, pos))
+                _, pos = group(probe, pos)
+            elif name == "usepackage" and not body:
+                value, pos = group(probe, options(probe, pos))
+                if packages is not None and not re.search(r"[\\#{}]", value):
+                    packages.update(v.strip() for v in value.split(","))
+            elif name in {"begin", "end"}:
+                env, pos = group(probe, pos)
+                if env == "document":
+                    if name == "end" or preamble_only:
+                        break
+                    body = True
+            elif name == "enddocument":
+                break
+            elif name in {"input", "include", "subfile"}:
+                target, pos = literal_input_filename(probe, pos, allow_unbraced=name == "input")
+                if body:
+                    inputs.append((name, target))
+    except ParseError:
+        if packages is not None:
+            packages.clear()
+        if strict:
+            raise
+        return []
+    return inputs
 
 
 def auxiliary_document_evidence(probe):
@@ -500,6 +770,8 @@ class Gatherer:
         self.macros = {}
         self.booleans = {}
         self.document_started = False
+        self.document_ended = False
+        self.document_terminator_redefined = False
         self.environment_depth = 0
         self.biblatex_rendering = []
         self.theorems = set()
@@ -509,44 +781,70 @@ class Gatherer:
         self.math_aliases_used = set()
 
     def read(self, path, *, comments=True):
-        raw = path.read_bytes()
+        # Bound the actual read as well as decoding: a large bibliography must
+        # not be allocated in full merely to discover that it exceeds the limit.
+        with path.open("rb") as stream:
+            raw = stream.read(8 * 1024 * 1024 + 1)
         if len(raw) > 8 * 1024 * 1024:
-            raise ParseError("Source file exceeds 8 MiB")
+            raise ParseError(f"Source file exceeds 8 MiB: {path.name}")
+        comments_removed = False
         try:
             text = raw.decode("utf-8-sig")
             encoding = "utf-8"
         except UnicodeDecodeError:
-            # Only an explicit declaration permits a non-UTF8 decoder.
-            if not re.search(rb"\\usepackage\[(?:latin1|ansinew)\]\{inputenc\}", raw):
+            lexical = mask_literals(strip_comments(raw.decode("latin-1")))
+            declared = re.search(r"\\usepackage\[(?:latin1|ansinew)\]\{inputenc\}", lexical)
+            if declared:
+                encoding = "cp1252" if "[ansinew]" in declared[0] else "latin-1"
+                text = raw.decode(encoding)
+            elif comments:
+                # Latin-1 is only a reversible byte-to-character mapping for
+                # lexing comments. Decode ALL remaining bytes strictly as UTF-8;
+                # invalid active prose, escaped %, and literal blocks still fail.
+                try:
+                    active = strip_comments(raw.decode("latin-1")).encode("latin-1")
+                    text = active.decode("utf-8-sig")
+                    comments_removed = True
+                except UnicodeDecodeError as exc:
+                    raise ParseError(f"Unknown source encoding: {path.name}") from exc
+                encoding = "utf-8 (non-UTF8 bytes confined to comments)"
+                self.math_aliases_used.add("Non-UTF8 bytes confined to TeX comments: " +
+                                           path.relative_to(self.root).as_posix())
+            else:
                 raise ParseError(f"Unknown source encoding: {path.name}")
-            encoding = "cp1252" if b"[ansinew]" in raw else "latin-1"
-            text = raw.decode(encoding)
         self.encoding[path.relative_to(self.root).as_posix()] = encoding
-        return strip_comments(text) if comments else text
+        return strip_comments(text) if comments and not comments_removed else text
 
     def resolve(self, name, current, suffix):
         name = name.strip()  # TeX ignores delimiter spaces around a literal filename.
         if re.search(r"[\\#{}$]", name):
             raise ParseError(f"Dynamic include/resource is unsupported: {name}")
-        if not Path(name).suffix:
-            name += suffix
-        candidates = [safe_path(self.root, name, current.parent),
-                      safe_path(self.root, name)]
-        for path in candidates:
-            if path.is_file():
-                return path
-        raise ParseError(f"Missing compilation resource: {name}")
+        # A dot inside a stem (3.1_intro) is not necessarily an extension.
+        # Prefer an exact file at each search location, then try the TeX/Bib
+        # suffix without removing or replacing any part of the requested name.
+        names = [name] if name.lower().endswith(suffix.lower()) else [name, name + suffix]
+        for base in (current.parent, self.root):
+            for candidate in names:
+                path = safe_path(self.root, candidate, base)
+                if path.is_file():
+                    return path
+        raise ParseError(f"Missing compilation resource: {names[-1]}")
 
-    def expand(self, path, stack=(), scope_depth=0):
+    def expand(self, path, stack=(), scope_depth=0, *, body_mode=None):
         if path in stack or len(stack) >= 40:
             raise ParseError(f"Include cycle/depth limit: {path.name}")
         text = self.read(path)
+        if re.search(r"\\(?:let|futurelet)\s*\\enddocument\b", mask_literals(text)):
+            # Refuse uncertain alias semantics; do not execute or alter aliases.
+            self.document_terminator_redefined = True
         self.expanded_bytes += len(text)
         if self.expanded_bytes > 16 * 1024 * 1024:
             raise ParseError("Expanded source exceeds 16 MiB")
         rel = path.relative_to(self.root).as_posix()
         if rel not in self.visited:
             self.visited.append(rel)
+        if body_mode:
+            text = self.included_document_body(path, text, stack, body_mode)
         # Protect definitions: a literal \input in a macro is not an invocation.
         out, pos = [], 0
         while pos < len(text):
@@ -588,6 +886,16 @@ class Gatherer:
                 if name != "providecommand" or macro not in self.macros:
                     self.macros[macro] = (argc, default, body)
                 out.append(" ")
+            elif name == "usepackage" and not self.document_started and name not in self.macros:
+                after_options = options(text, end)
+                value, after = group(text, after_options)
+                if not re.search(r"[\\#{}]", value):
+                    names = {v.strip() for v in value.split(",")}
+                    if after_options != skip_space(text, end) and names & {"standalone", "subfiles"}:
+                        raise ParseError("Unsupported included-document package options")
+                    self.packages.update(names)
+                out.append(text[pos:after])
+                end = after
             elif name == "begin":
                 env, start = group(text, end)
                 if env == "document":
@@ -769,24 +1077,27 @@ class Gatherer:
                 text = splice_tokens(text, pos, selected, after)
                 continue
             elif name in {"input", "include", "subfile"}:
-                # subfiles with their own document environments require TeX semantics.
-                if name == "subfile":
-                    raise ParseError("subfile compilation is not supported")
-                start = skip_space(text, end)
-                if text[start:start + 1] == "{":
-                    target, end = group(text, start)
-                else:
-                    m = re.match(r"[^\s\\{}]+", text[start:])
-                    if not m:
-                        raise ParseError("Invalid unbraced input")
-                    target, end = m[0], start + len(m[0])
+                if name == "subfile" and name in self.macros:
+                    raise ParseError("Locally redefined subfile requires TeX semantics")
+                if name == "subfile" and "subfiles" not in self.packages:
+                    raise ParseError("subfile requires a literal subfiles package declaration")
+                target, end = literal_input_filename(text, end, allow_unbraced=True)
                 if name != "include" or self.include_only is None or target in self.include_only:
                     resource = self.resolve(target, path, ".tex")
                     if resource.suffix.lower() == ".bbl":
                         # A rendered bibliography is data, not executable TeX setup.
                         self.register_bbl(resource, "explicit_input", path, target)
                     else:
-                        out.append("\n" + self.expand(resource, (*stack, path), scope_depth) + "\n")
+                        mode = "subfile" if name == "subfile" else None
+                        if mode is None and "standalone" in self.packages:
+                            probe = mask_literals(self.read(resource))
+                            declaration = self.root_class(probe)
+                            if declaration and declaration[0] == "standalone":
+                                mode = "standalone"
+                        out.append("\n" + self.expand(resource, (*stack, path), scope_depth,
+                                                       body_mode=mode) + "\n")
+                        if self.document_ended:
+                            break  # An explicit terminator in an input ends TeX globally.
             elif name == "includeonly":
                 targets, end = group(text, end)
                 self.include_only = {s.strip() for s in targets.split(",")}
@@ -815,11 +1126,22 @@ class Gatherer:
                         if bib not in self.bib_files:
                             self.bib_files.append(bib)
                 out.append(" ")
+            elif name == "enddocument":
+                if (name in self.macros or self.document_terminator_redefined or
+                        not self.document_started or self.environment_depth or scope_depth):
+                    raise ParseError("Ambiguous or redefined document terminator: enddocument")
+                out.append(r"\end{document}")
+                self.document_ended = True
+                self.math_aliases_used.add("Explicit enddocument terminator: " + rel)
+                break
             elif name == "end":
                 env, after = group(text, end)
                 out.append(text[pos:after])
                 end = after
                 if env == "document":
+                    self.document_ended = True
+                    if stack:
+                        self.math_aliases_used.add("Explicit document termination in included source: " + rel)
                     break
                 self.environment_depth -= 1
             else:
@@ -851,18 +1173,190 @@ class Gatherer:
             self.register_bbl(candidates[0], "document_jobname", self.document_root,
                               self.document_root.stem + ".bbl")
 
+    @staticmethod
+    def root_class(probe):
+        """Read a literal leading class; do not execute definitions/conditions."""
+        probe = probe.removeprefix("\ufeff").removeprefix("\xef\xbb\xbf")
+        pos = skip_space(probe, 0)
+        if not probe.startswith(r"\documentclass", pos):
+            return None
+        try:
+            name, pos = command(probe, pos)
+            if name != "documentclass":
+                return None
+            opts = ""
+            pos = skip_space(probe, pos)
+            if probe[pos:pos + 1] == "[":
+                opts, pos = group(probe, pos, "[", "]")
+            cls, pos = group(probe, pos)
+            return cls.strip(), opts.strip()
+        except ParseError:
+            return None
+
+    def included_document_body(self, path, text, stack, mode):
+        """Honor explicit subfiles/standalone links, retaining the whole body."""
+        probe = mask_literals(text)
+        declaration = self.root_class(probe)
+        if re.search(r"\\enddocument\b", probe):
+            raise ParseError("Early/aliased included document terminator: " + path.name)
+        starts = list(re.finditer(r"\\begin\s*\{document\}", probe))
+        ends = list(re.finditer(r"\\end\s*\{document\}", probe))
+        if mode == "subfile" and declaration is None and not starts and not ends:
+            return text  # subfiles also accepts ordinary input fragments.
+        if not declaration or len(starts) != 1 or len(ends) != 1 or starts[0].end() > ends[0].start():
+            raise ParseError("Ambiguous/missing included document environment: " + path.name)
+        cls, options_text = declaration
+        if mode == "subfile":
+            if cls != "subfiles" or not options_text:
+                raise ParseError("Unverified subfile parent declaration: " + path.name)
+            parent = self.resolve(options_text, path, ".tex")
+            if parent not in stack:
+                raise ParseError("Subfile parent is outside the active compilation path: " + path.name)
+        elif cls != "standalone":
+            raise ParseError("Unverified standalone input: " + path.name)
+        if probe[ends[0].end():].strip():
+            self.math_aliases_used.add("Post-document source excluded after explicit " +
+                                       mode + " terminator: " + path.relative_to(self.root).as_posix())
+        self.math_aliases_used.add("Included document body via " + mode + ": " +
+                                   path.relative_to(self.root).as_posix())
+        return text[starts[0].end():ends[0].start()]
+
+    def root_copy_signature(self, path, probe):
+        """Prove a narrow mirror case, not merely matching manuscript titles.
+
+        No input graph or directory-dependent bibliography can be assumed
+        equivalent. Only same-jobname byte copies with identical local TeX/Bib
+        resources are eligible; other duplicate drafts remain ambiguous.
+        """
+        if re.search(r"\\(?:input|include|subfile|import|subimport|includeonly|"
+                     r"jobname|IfFileExists|InputIfFileExists|openin|read)\b", probe):
+            return None
+        try:
+            for match in re.finditer(r"\\(?:bibliography|addbibresource|usepackage)\b", probe):
+                value, _ = group(probe, options(probe, match.end()))
+                if re.search(r"[/\\#{}$]", value) or ".." in value:
+                    return None
+        except ParseError:
+            return None
+        files, total = {}, 0
+        for candidate in path.parent.iterdir():
+            if candidate.suffix.lower() not in {".tex", ".bib", ".bbl", ".sty", ".cls", ".cfg"} or not candidate.is_file():
+                continue
+            safe_path(self.root, candidate.relative_to(self.root).as_posix())
+            total += candidate.stat().st_size
+            if total > 16 * 1024 * 1024 or len(files) >= 128:
+                return None
+            files[candidate.name] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        return path.name, tuple(sorted(files.items()))
+
+    def root_include_relations(self, parent, probe, root_probes):
+        """Bounded literal edges through fragments, with no speculative execution.
+
+        Complete independent document candidates are terminal vertices. A cycle,
+        uncertain fragment, unsafe path or resource limit invalidates the whole
+        traversal; no partially collected evidence can suppress another root.
+        """
+        relations, visited, byte_count = [], {parent}, 0
+
+        def walk(path, source, chain, fragment):
+            nonlocal byte_count
+            if len(chain) >= 40:
+                raise ParseError("Root input graph depth limit")
+            inputs = root_document_inputs(source, fragment=fragment, strict=True)
+            for name, target in inputs:
+                child = self.resolve(target, path, ".tex").resolve()
+                if child in chain:
+                    raise ParseError("Root input graph include cycle")
+                if len(relations) >= 1024:
+                    raise ParseError("Root input graph edge limit")
+                relations.append((path, name, target, child, chain))
+                if child in root_probes or child.suffix.lower() == ".bbl":
+                    continue
+                if child in visited:
+                    continue
+                if len(visited) >= 128:
+                    raise ParseError("Root input graph file limit")
+                visited.add(child)
+                with child.open("rb") as stream:
+                    raw = stream.read(8 * 1024 * 1024 + 1)
+                byte_count += len(raw)
+                if len(raw) > 8 * 1024 * 1024 or byte_count > 16 * 1024 * 1024:
+                    raise ParseError("Root input graph source size limit")
+                child_probe = root_selection_probe(raw.decode("latin-1"))
+                if re.search(r"\\(?:documentclass|enddocument)\b|\\(?:begin|end)\s*\{document\}", child_probe):
+                    raise ParseError("Unverified document boundary in root input fragment")
+                walk(child, child_probe, (*chain, child), True)
+
+        try:
+            walk(parent, probe, (parent,), False)
+        except (ParseError, OSError):
+            return []
+        return relations
+
     def gather(self):
-        roots, roles = [], {}
+        roots, roles, probes = [], {}, {}
         for path in sorted(self.root.rglob("*.tex")):
             # Root detection only needs ASCII syntax; do not decode/parse unused auxiliaries.
             raw_probe = path.read_bytes().decode("latin-1")
             if r"\documentclass" not in raw_probe:
                 continue  # no literal root can match, regardless of file name
-            probe = mask_literals(strip_comments(raw_probe, strict_urls=False))
+            probe = root_selection_probe(raw_probe)
             if re.search(r"\\documentclass(?:\s*\[[^\]]*\])?\s*\{", probe):
                 roots.append(path)
+                probes[path] = probe
                 roles[path] = supplement_evidence(probe) or auxiliary_document_evidence(probe)
+                declaration = self.root_class(probe)
+                if not roles[path] and declaration and declaration[0] == "osa-supplemental-document":
+                    roles[path] = [dict(kind="class_role", value="osa-supplemental-document")]
+        copies = []
         if len(roots) > 1:
+            signatures, unique = {}, []
+            # A shallow representative is chosen only AFTER equivalence is
+            # established from bytes/resources, never from a preferred filename.
+            for path in sorted(roots, key=lambda p: (len(p.relative_to(self.root).parts),
+                                                     p.relative_to(self.root).as_posix())):
+                signature = self.root_copy_signature(path, probes[path])
+                if signature is not None and signature in signatures:
+                    copies.append(dict(
+                        file=path.relative_to(self.root).as_posix(),
+                        equivalent_to=signatures[signature].relative_to(self.root).as_posix(),
+                        evidence="identical_jobname_source_and_local_tex_bib_resources"))
+                else:
+                    unique.append(path)
+                    if signature is not None:
+                        signatures[signature] = path
+            roots = unique
+        if len(roots) > 1:
+            # A literal declaration in an explicitly included fragment does not
+            # make it an independent document. Do not discard unlinked files or
+            # independent documents, even when their names suggest a supplement.
+            fragments = {path for path in roots if not re.search(
+                r"\\(?:begin|end)\s*\{document\}", probes[path])}
+            for parent in roots:
+                if parent in fragments or roles[parent]:
+                    continue
+                parent_packages = set()
+                root_document_inputs(probes[parent], packages=parent_packages, preamble_only=True)
+                for current, name, target, child, chain in self.root_include_relations(
+                        parent, probes[parent], probes):
+                    kind = "included_document_fragment" if child in fragments else None
+                    if child in probes and child not in fragments:
+                        declaration = self.root_class(probes[child])
+                        if declaration and declaration[0] == "standalone" and "standalone" in parent_packages:
+                            kind = "included_document_body"
+                        elif declaration and declaration[0] == "subfiles" and name == "subfile" and "subfiles" in parent_packages:
+                            try:
+                                if self.resolve(declaration[1], child, ".tex") in chain:
+                                    kind = "included_document_body"
+                            except ParseError:
+                                pass
+                    if kind:
+                        evidence = dict(
+                            kind=kind, parent=current.relative_to(self.root).as_posix(),
+                            command=name, target=target)
+                        if len(chain) > 1:
+                            evidence["via"] = [p.relative_to(self.root).as_posix() for p in chain]
+                        roles[child] = [evidence]
             mains = [path for path in roots if not roles[path]]
             if len(mains) == 1:
                 chosen = mains[0]
@@ -875,9 +1369,19 @@ class Gatherer:
                 if any(e["kind"] == "independent_auxiliary_role" for path in roots if path != chosen for e in roles[path]):
                     self.root_selection["policy"] = "unique_main_with_explicit_auxiliary_documents"
                     self.root_selection["excluded_documents"] = self.root_selection.pop("excluded_supplements")
+                if any(e["kind"] in {"included_document_fragment", "included_document_body"} for path in roots
+                       if path != chosen for e in roles[path]):
+                    self.root_selection["policy"] = "unique_main_with_explicit_included_fragments"
+                    if "excluded_supplements" in self.root_selection:
+                        self.root_selection["excluded_documents"] = self.root_selection.pop("excluded_supplements")
                 roots = [chosen]
         if len(roots) != 1:
             raise ParseError(f"Expected exactly one documentclass root, found {len(roots)}")
+        if copies:
+            if self.root_selection is None:
+                self.root_selection = dict(policy="equivalent_document_copies",
+                                           selected=roots[0].relative_to(self.root).as_posix())
+            self.root_selection["equivalent_root_copies"] = copies
         self.document_root = roots[0]
         # Establish only literal root class/options before resolving source
         # conditionals. No compiler mode or external package is guessed.
@@ -885,6 +1389,7 @@ class Gatherer:
         declared = re.search(r"\\documentclass(?:\s*\[([^\]]*)\])?\s*\{([^{}]+)\}", header)
         self.document_class = declared[2].strip() if declared else None
         self.class_options = {v.strip() for v in (declared[1] or "").split(",")} if declared else set()
+        root_document_inputs(header, packages=self.packages, preamble_only=True)
         text = self.expand(roots[0])
         lexical = mask_literals(text)
         class_match = re.search(r"\\documentclass(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
@@ -893,6 +1398,41 @@ class Gatherer:
             r"\\usepackage(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
             for name in packages.split(",")}
         self.theorems = set(re.findall(r"\\newtheorem\*?\s*\{([^}]+)\}", lexical))
+        # thm-restate may name a theorem declared through thmtools rather
+        # than newtheorem. Only literal preamble declarations with formatting/
+        # counter options are evidence; hooks can print content and are refused.
+        document_start = re.search(r"\\begin\s*\{document\}", lexical)
+        preamble = lexical[:document_start.start()] if document_start else lexical
+        if self.packages & {"thmtools", "thm-restate"} and "declaretheorem" not in self.macros:
+            scan = 0
+            while scan < len(preamble):
+                if preamble[scan] == "{":
+                    _, scan = group(preamble, scan)
+                    continue
+                if preamble[scan] == "[":
+                    _, scan = group(preamble, scan, "[", "]")
+                    continue
+                if preamble[scan] != "\\":
+                    scan += 1
+                    continue
+                token, scan = command(preamble, scan)
+                if token != "declaretheorem":
+                    continue
+                cursor = skip_space(preamble, scan)
+                settings = None
+                if preamble[cursor:cursor + 1] == "[":
+                    settings, cursor = group(preamble, cursor, "[", "]")
+                theorem, cursor = group(preamble, cursor)
+                if not re.fullmatch(r"[A-Za-z]+", theorem):
+                    raise ParseError("Unsupported dynamic declaretheorem name")
+                for setting in (settings or "").split(","):
+                    if not setting.strip():
+                        continue
+                    pair = re.fullmatch(r"\s*(name|style|numberwithin|sibling|numbered|sharenumber|parent)\s*=\s*([A-Za-z][A-Za-z0-9 -]*)\s*", setting)
+                    if not pair:
+                        raise ParseError("Unsupported declaretheorem option/hook: " + setting)
+                self.theorems.add(theorem)
+                scan = cursor
         self.local_environments |= set(re.findall(
             r"\\(?:newenvironment|renewenvironment|provideenvironment)\*?\s*\{([^{}]+)\}", lexical))
         starts = list(re.finditer(r"\\begin\s*\{document\}", lexical))
