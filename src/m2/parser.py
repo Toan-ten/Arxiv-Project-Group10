@@ -36,10 +36,22 @@ DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagesty
                  "title", "author", "affiliation", "institute", "address", "email",
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize"}
 
-SI_UNIT_COMMANDS = {"micro", "mu", "milli", "centi", "nano", "pico", "kilo", "mega", "giga",
-                         "metre", "meter", "second", "hertz", "gram", "kilogram", "kelvin", "tesla",
-                         "volt", "electronvolt", "joule", "watt", "ampere", "pascal", "percent", "%",
-                         "per", "squared", "cubed", "square", "cubic", "degree", "degreeCelsius"}
+SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
+               "M", "G", "T", "P", "E", "Z", "Y"}
+SI_BASE_UNITS = {"m", "g", "s", "A", "K", "mol", "cd", "Hz", "N", "Pa", "J", "W",
+                 "C", "V", "F", "S", "Wb", "T", "H", "lm", "lx", "Bq", "Gy", "Sv",
+                 "kat", "L", "eV"}
+SI_UNIT_COMMANDS = ({
+    # Spelled-out names and siunitx prefixes/qualifiers.
+    "micro", "mu", "milli", "centi", "deci", "nano", "pico", "kilo", "mega",
+    "giga", "tera", "per", "squared", "cubed", "square", "cubic",
+    "metre", "meter", "second", "hertz", "gram", "kilogram", "kelvin", "tesla",
+    "volt", "electronvolt", "joule", "watt", "ampere", "pascal", "percent", "%",
+    "degree", "degreeCelsius", "celsius", "litre", "liter", "minute", "hour",
+    "day", "tonne", "hectare", "bar", "bel", "decibel", "neper", "permille",
+    "astronomicalunit", "atomicmassunit", "dalton",
+} | SI_BASE_UNITS
+  | {prefix + unit for prefix in SI_PREFIXES for unit in SI_BASE_UNITS})
 
 # Documented by cvpr-org/author-kit, cvpr.sty (onedot definitions). Local
 # definitions take precedence. This is not a general package interpreter.
@@ -193,6 +205,7 @@ class Tree:
         self.algorithm2e_depth = 0
         self.algorithm_keywords = {}
         self.frontmatter_depth = 0
+        self.credits_depth = 0
         self.icml_notice_depth = 0
         self.restatements = {}
         self.layout_lengths = set()
@@ -289,6 +302,11 @@ class Tree:
                     end += 1
                 end = options(text, end)
                 title, end = group(text, end)
+                if self.credits_depth:
+                    labels = {"ackname": "Acknowledgments", "discintname": "Disclosure of Interests"}
+                    for label, value in labels.items():
+                        if title.strip() == "\\" + label and label not in self.gatherer.macros:
+                            title = value
                 # Springer back-matter headings are unnumbered peers of
                 # sections, not prose to discard or children of Conclusions.
                 rank = LEVELS.get(name, LEVELS["section"])
@@ -304,6 +322,9 @@ class Tree:
                 if not reference_section:
                     eid = self.add("heading", title, current())
                     headings.append((rank, eid))
+            elif (self.credits_depth and name in {"ackname", "discintname"}
+                  and name not in self.gatherer.macros):
+                buffer.append({"ackname": "Acknowledgments", "discintname": "Disclosure of Interests"}[name])
             elif (name == "subjclass" and name not in self.gatherer.macros
                   and self.gatherer.document_class in {"amsart", "amsproc", "amsbook", "tsp-short"}):
                 # AMS title metadata, not a prose macro to discard. Preserve
@@ -359,8 +380,10 @@ class Tree:
                 self.layout_metadata.append(dict(command=name))
             elif (name in {"flushbottom", "normalfont", "onecolumngrid", "twocolumngrid"}
                   and name not in self.gatherer.macros):
-                if name in {"onecolumngrid", "twocolumngrid"} and not (self.gatherer.document_class or "").startswith("revtex"):
-                    raise ParseError("Undeclared REVTeX grid command: " + name)
+                if (name in {"onecolumngrid", "twocolumngrid"}
+                        and not ("ltxgrid" in self.gatherer.packages
+                                 or (self.gatherer.document_class or "").startswith(("revtex", "aastex")))):
+                    raise ParseError("Undeclared grid command: " + name)
                 # Font selection is a declaration, not a one-argument command.
                 # Following groups, math and citations remain in the parse stream.
                 if name == "normalfont":
@@ -728,7 +751,9 @@ class Tree:
                     self.parse(raw[cursor:], current(), depth + 1)
                 elif env == "widetext" and (self.gatherer.document_class or "").startswith("revtex"):
                     self.parse(raw, current(), depth + 1)
-                elif env == "wrapfigure" and "wrapfig" in self.gatherer.packages:
+                elif env in {"wrapfigure", "wraptable"} and "wrapfig" in self.gatherer.packages:
+                    # Both wrapfig floats share placement, optional overhang and
+                    # width arguments; retain the full float source as one leaf.
                     _, cursor = group(raw, 0)  # placement
                     cursor = options(raw, cursor)  # overhang
                     _, cursor = group(raw, cursor)  # width
@@ -839,6 +864,19 @@ class Tree:
                 elif env == "algorithmic":
                     container = self.add("component", env, current())
                     self.algorithmic(raw, container, depth + 1)
+                elif env == "credits" and self.gatherer.document_class == "llncs":
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined LLNCS credits requires environment semantics")
+                    if optional_title is not None:
+                        raise ParseError("Unsupported LLNCS credits option")
+                    # Labels are interpreted at their command/heading position,
+                    # never by substituting over literal code or the whole body.
+                    self.layout_metadata.append(dict(environment=env))
+                    self.credits_depth += 1
+                    try:
+                        self.parse(raw, current(), depth + 1)
+                    finally:
+                        self.credits_depth -= 1
                 elif env in CONTAINERS or env in self.gatherer.theorems:
                     if env in {"appendices", "appendix"} and depth == 0:
                         # An explicit appendix division is not a child of the
@@ -963,6 +1001,15 @@ class Tree:
             elif name == "textasciicircum" and name not in self.gatherer.macros:
                 buffer.append("^")
                 end = skip_space(text, end)
+            elif name == "textdegree" and name not in self.gatherer.macros:
+                # Kernel textcomp symbol: emit the actual degree sign.
+                buffer.append("\u00b0")
+            elif name == "ce" and name not in self.gatherer.macros and "mhchem" in self.gatherer.packages:
+                # mhchem notation is retained verbatim; the offline parser does
+                # not interpret chemical formulas.
+                start = skip_space(text, end)
+                value, end = group(text, start)
+                buffer.append(r"\ce{" + value + "}")
             elif (name in {"equalcont", "cormark", "fnmark", "cortext", "fntext", "ead", "dedicatory", "pagerange", "preprint", "runningtitle", "runningauthor", "shorttitle", "shortauthors", "crefalias", "articletype"}
                   and name not in self.gatherer.macros):
                 if name == "dedicatory":
@@ -1190,8 +1237,9 @@ class Tree:
             elif (name == "SetAlgoLined" and name not in self.gatherer.macros
                   and "algorithm2e" in self.gatherer.packages):
                 self.layout_metadata.append(dict(command=name))
-            elif name in {"nobreak", "allowbreak"} and name not in self.gatherer.macros:
-                # A break penalty has no argument and no visible characters.
+            elif name in {"nobreak", "allowbreak", "boldmath", "unboldmath"} and name not in self.gatherer.macros:
+                # Break/spacing penalties and math font declarations have no
+                # visible characters; surrounding content is retained.
                 pass
             elif (name in {"degr", "arcdeg", "arcmin", "arcsec"}
                   and name not in self.gatherer.macros
@@ -1207,7 +1255,17 @@ class Tree:
                     flush()
                     container = self.add("component", "PACS classification", current())
                     self.parse(raw, container, depth + 1)
-            elif name == "correspondingauthor" and name not in self.gatherer.macros and (self.gatherer.document_class or "").startswith("aastex"):
+            elif (name == "IEEEtitleabstractindextext" and name not in self.gatherer.macros
+                  and self.gatherer.document_class == "IEEEtran"):
+                # IEEEtran wraps abstract and index terms in one balanced group;
+                # parse the inner content instead of discarding the wrapper.
+                raw, end = group(text, end)
+                self.layout_metadata.append(dict(command=name, arguments=[raw]))
+                flush()
+                self.parse(raw, current(), depth + 1)
+            elif (name in {"correspondingauthor", "revised", "accepted", "published"}
+                  and name not in self.gatherer.macros
+                  and (self.gatherer.document_class or "").startswith("aastex")):
                 value, end = group(text, end)
                 self.layout_metadata.append(dict(command=name, arguments=[value]))
             elif name in {"acknowledgments", "acks"} and name not in self.gatherer.macros:
@@ -1251,7 +1309,7 @@ class Tree:
                 value, end = group(text, start)
                 known = {r"\parskip", r"\parindent", r"\tabcolsep", r"\columnsep",
                          r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep",
-                         r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep"}
+                         r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep", r"\baselineskip"}
                 if target.strip().removeprefix("\\") in self.layout_lengths:
                     literal = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip())
                     scaled = re.fullmatch(r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*\\(textwidth|linewidth|columnwidth)", value.strip())

@@ -5,6 +5,8 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+
+import pytest
 from unittest.mock import patch
 
 from src.m2.bibliography import parse_bibitems, parse_bibtex, unify
@@ -1289,6 +1291,406 @@ class M2Tests(unittest.TestCase):
         self.assertNotIn("htpb", figures[0])
         self.assertNotIn(r"\centering", figures[0])
         self.assertEqual(sum(n["kind"] == "item" for n in result["elements"]), 3)
+
+    def test_wraptable_keeps_table_caption_and_citation(self):
+        body = (r"Before.\begin{wraptable}[10]{r}{0.5\linewidth}\centering"
+                r"\begin{tabular}{lc}Method & Score\\Ours & 1.0\\\end{tabular}"
+                r"\caption{Exact caption with \cite{k}.}\label{tab:x}"
+                r"\end{wraptable}After.\bibliography{refs}")
+        source = tex(body).replace(r"\begin{document}", r"\usepackage{wrapfig}\begin{document}")
+        result = self.parse({"main.tex": source,
+                             "refs.bib": "@article{k,title={Evidence},author={Alice}}"})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        figures = [n for n in result["elements"] if n["kind"] == "figure"]
+        self.assertEqual(len(figures), 1)
+        self.assertIn(r"\begin{tabular}{lc}", figures[0]["content"])
+        self.assertIn(r"Ours & 1.0", figures[0]["content"])
+        self.assertIn(r"\caption{Exact caption with \cite{k}.}", figures[0]["content"])
+        self.assertNotIn(r"\label", figures[0]["content"])
+        self.assertEqual([b["citation_key"] for b in result["bibtex"]], ["k"])
+        self.assertEqual([n["content"] for n in result["elements"] if n["kind"] == "sentence"],
+                         ["Before.", "After."])
+        validate_tables(result)
+
+    def test_wraptable_is_rejected_without_wrapfig(self):
+        result = self.parse({"main.tex": tex(
+            r"\begin{wraptable}{r}{0.5\linewidth}Visible text.\end{wraptable}")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Unsupported environment: wraptable", record["error"] or "")
+        self.assertEqual(result["elements"], [])
+
+    def test_layout_declarations_baselineskip_and_pagenumbering(self):
+        source = tex(r"\pagenumbering{roman}\baselineskip=12pt"
+                    r"\setlength{\baselineskip}{14pt}Visible text.")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertIn("Visible text.", " ".join(n["content"] for n in result["elements"]))
+        commands = [m["command"] for m in record["layout_metadata"]]
+        self.assertIn("pagenumbering", commands)
+        self.assertIn("baselineskip", commands)
+        self.assertIn("setlength", commands)
+
+    def test_at_spacing_has_no_visible_content(self):
+        result = self.parse({"main.tex": tex(r"Value 5\@. Next sentence.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("Value 5.", content)
+        self.assertNotIn(r"\@", content)
+
+    def test_textbackslash_is_retained_as_source_token(self):
+        result = self.parse({"main.tex": tex(
+            r"Path C:\textbackslash{}temp stays literal.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\textbackslash", content)
+        self.assertIn("Path", content)
+
+    def test_boldmath_declaration_keeps_math_content(self):
+        result = self.parse({"main.tex": tex(
+            r"Before \boldmath$x+y$\unboldmath after.")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("$x+y$", content)
+        self.assertNotIn(r"\boldmath", content)
+        self.assertNotIn(r"\unboldmath", content)
+
+    def test_column_grid_switches_are_layout_metadata(self):
+        body = r"Before.\twocolumngrid Between.\onecolumngrid After."
+        source = tex(body).replace(r"\begin{document}",
+                                   r"\usepackage{ltxgrid}\begin{document}")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        content = " ".join(n["content"] for n in result["elements"])
+        for value in ("Before.", "Between.", "After."):
+            self.assertIn(value, content)
+        commands = [m["command"] for m in record["layout_metadata"]]
+        self.assertIn("twocolumngrid", commands)
+        self.assertIn("onecolumngrid", commands)
+        rejected = self.parse({"main.tex": tex(r"Before.\twocolumngrid After.")},
+                              aid="2508.07874")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Undeclared grid command: twocolumngrid",
+                      rejected["versions"][0]["error"] or "")
+
+    def test_common_text_abbreviations_expand_but_local_macros_win(self):
+        # Preserve package-aware interpretation from Batch 02; this is not a
+        # fallback meaning for arbitrary undefined control sequences.
+        source = tex(r"Use \eg, this and \ie that.").replace(
+            r"\begin{document}", r"\usepackage{iccv}\begin{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("e.g.", content)
+        self.assertIn("i.e.", content)
+        local = (r"\documentclass{article}\newcommand{\eg}{custom}"
+                 r"\begin{document}Use \eg here.\end{document}")
+        overridden = self.parse({"main.tex": local}, aid="2508.07873")
+        self.assertEqual(overridden["versions"][0]["status"], "success",
+                         overridden["versions"])
+        local_content = " ".join(n["content"] for n in overridden["elements"])
+        self.assertIn("custom", local_content)
+        self.assertNotIn("e.g.", local_content)
+        for command_name in ("eg", "ie"):
+            with self.subTest(command=command_name):
+                rejected = self._batch01_parse("\\" + command_name + " text.")
+                self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+                self.assertEqual(rejected["versions"][0]["error"],
+                                 "Unsupported prose command: \\" + command_name)
+
+    def test_aastex_received_and_date_declarations_are_metadata(self):
+        source = (r"\documentclass{aastex631}\begin{document}"
+                  r"\received{1 January 2026}\revised{2 February 2026}"
+                  r"\accepted{3 March 2026}\published{4 April 2026}"
+                  r"Body text.\end{document}")
+        result = self.parse({"main.tex": source})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        commands = [m["command"] for m in record["layout_metadata"]]
+        for name in ("received", "revised", "accepted", "published"):
+            self.assertIn(name, commands)
+        self.assertIn("Body text.",
+                      " ".join(n["content"] for n in result["elements"]))
+        rejected = self.parse({"main.tex": tex(r"\received{1 January 2026}Body.")},
+                              aid="2508.07875")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+
+    def test_ieee_title_abstract_index_text_parses_inner_content(self):
+        source = (r"\documentclass{IEEEtran}\begin{document}"
+                  r"\IEEEtitleabstractindextext{"
+                  r"\begin{abstract}Summary text.\end{abstract}"
+                  r"\begin{IEEEkeywords}Signal, \emph{learning}.\end{IEEEkeywords}}"
+                  r"\section{Intro}Body.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        contents = [n["content"] for n in result["elements"]]
+        self.assertIn("Summary text.", contents)
+        self.assertIn("keywords", contents)
+        self.assertIn("Body.", contents)
+
+    def test_mhchem_ce_is_retained_as_source_token(self):
+        source = tex(r"Water \ce{H2O} and \ce{CO2} stay.").replace(
+            r"\begin{document}", r"\usepackage{mhchem}\begin{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\ce{H2O}", content)
+        self.assertIn(r"\ce{CO2}", content)
+        self.assertIn("Water", content)
+        self.assertIn("stay.", content)
+        rejected = self.parse({"main.tex": tex(r"Water \ce{H2O} stays.")},
+                              aid="2508.07876")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+
+    def test_acmart_teaserfigure_is_a_figure_leaf(self):
+        body = (r"Before.\begin{teaserfigure}"
+                r"\includegraphics[width=\textwidth]{teaser.pdf}"
+                r"\caption{Teaser caption.}\Description{Teaser description.}"
+                r"\end{teaserfigure}After.")
+        source = tex(body).replace("{article}", "{acmart}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        figures = [n["content"] for n in result["elements"] if n["kind"] == "figure"]
+        self.assertEqual(len(figures), 1)
+        self.assertIn(r"\includegraphics[width=\textwidth]{teaser.pdf}", figures[0])
+        self.assertIn(r"\caption{Teaser caption.}", figures[0])
+        self.assertIn(r"\Description{Teaser description.}", figures[0])
+        self.assertIn("Before.", " ".join(n["content"] for n in result["elements"]))
+        self.assertIn("After.", " ".join(n["content"] for n in result["elements"]))
+        rejected = self.parse({"main.tex": tex(
+            r"\begin{teaserfigure}Text.\end{teaserfigure}")}, aid="2508.07877")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Unsupported environment: teaserfigure",
+                      rejected["versions"][0]["error"] or "")
+
+    def test_llncs_credits_environment_keeps_acknowledgments_and_disclosure(self):
+        source = (r"\documentclass{llncs}\begin{document}"
+                  r"\section{Conclusion}Body."
+                  r"\begin{credits}"
+                  r"\subsubsection{\ackname}Funded by a grant. "
+                  r"\subsubsection{\discintname}No competing interests."
+                  r"\end{credits}\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        contents = [n["content"] for n in result["elements"]]
+        self.assertIn("Acknowledgments", contents)
+        self.assertIn("Disclosure of Interests", contents)
+        content = " ".join(contents)
+        self.assertIn("Funded by a grant.", content)
+        self.assertIn("No competing interests.", content)
+        self.assertTrue(any(m.get("environment") == "credits"
+                            for m in result["versions"][0]["layout_metadata"]))
+        rejected = self.parse({"main.tex": tex(r"\begin{credits}Text.\end{credits}")},
+                              aid="2508.07878")
+        self.assertEqual(rejected["versions"][0]["status"], "parse_error")
+        self.assertIn("Unsupported environment: credits",
+                      rejected["versions"][0]["error"] or "")
+
+    @pytest.mark.xfail(strict=True, raises=AssertionError,
+        reason="Source acronym forms are not integrated: active-definition validation and first-use/reset/scope semantics are unimplemented.")
+    def test_acro_declarations_expand_forms(self):
+        source = (r"\documentclass{article}\usepackage{acro}"
+                  r"\DeclareAcronym{ny}{short=NY, long=New York, short-plural=s, long-plural=s}"
+                  r"\begin{document}"
+                  r"\ac{ny} and \acs{ny} and \acl{ny}. "
+                  r"\acp{ny}.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("New York (NY)", content)
+        self.assertIn("New Yorks (NYs)", content)
+        self.assertIn("NY", content)
+        self.assertIn("New York", content)
+
+
+    @pytest.mark.xfail(strict=True, raises=AssertionError,
+        reason="Glossary expansion is not integrated: first-use/reset/scope semantics and active declaration validation are unimplemented.")
+    def test_glossaries_acronyms_expand_forms(self):
+        source = (r"\documentclass{article}\usepackage{glossaries}"
+                  r"\newacronym[longplural={machine learning models}, shortplural={MLs}]"
+                  r"{mlm}{ML}{machine learning model}"
+                  r"\begin{document}\gls{mlm} and \acrshort{mlm} and \acrlong{mlm}. "
+                  r"\glspl{mlm}.\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("machine learning model (ML)", content)
+        self.assertIn("machine learning models (MLs)", content)
+        self.assertIn("ML", content)
+        self.assertIn("machine learning model", content)
+
+
+    @pytest.mark.xfail(strict=True, raises=AssertionError,
+        reason="Unresolved acronym token retention as success is not accepted by M2 integration; unresolved semantic content remains unsupported.")
+    def test_undefined_acronym_is_retained_as_source_token(self):
+        source = tex(r"Use \ac{missing}.").replace(
+            r"\begin{document}", r"\usepackage{acro}\begin{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"\ac{missing}", content)
+        self.assertTrue(any("Unresolved acronym" in warning
+                            for warning in result["versions"][0]["normalization_notes"]))
+
+
+    def test_acronym_without_package_or_definition_is_rejected(self):
+        result = self.parse({"main.tex": tex(r"Use \ac{missing}.")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error")
+        self.assertIn("Unsupported prose command: \\ac", record["error"] or "")
+
+    def test_local_acronym_command_definition_wins(self):
+        source = (r"\documentclass{article}\usepackage{acro}"
+                  r"\DeclareAcronym{ny}{short=NY, long=New York}"
+                  r"\newcommand{\ac}[1]{custom}"
+                  r"\begin{document}\ac{ny}\end{document}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("custom", content)
+        self.assertNotIn("New York", content)
+
+
+
+    def test_merge_inactive_or_uncalled_acronym_definitions_are_not_expansion_evidence(self):
+        for package, declaration, invocation in (
+            ("acro", r"\DeclareAcronym{ny}{short=NY,long=New York}", r"\ac{ny}"),
+            ("glossaries", r"\newacronym{ny}{NY}{New York}", r"\gls{ny}"),
+        ):
+            for declaration_context in (
+                r"\iffalse" + declaration + r"\fi",
+                r"\newcommand{\unused}{" + declaration + "}",
+            ):
+                with self.subTest(package=package, declaration_context=declaration_context):
+                    result = self._batch01_parse(
+                        "Before. " + invocation + " After.",
+                        preamble=r"\usepackage{" + package + "}" + declaration_context)
+                    record = result["versions"][0]
+                    self.assertEqual(record["status"], "parse_error", record)
+                    self.assertEqual(record["error"],
+                                     "Unsupported prose command: " + invocation.split("{", 1)[0])
+                    self.assertEqual(result["elements"], [])
+                    self.assertEqual(result["hierarchy"], [])
+
+    def test_merge_unresolved_acronym_version_does_not_corrupt_valid_sibling_version(self):
+        bad = (r"\documentclass{article}\usepackage{acro}"
+               r"\DeclareAcronym{ny}{short=NY,long=New York}"
+               r"\begin{document}Before \ac{ny}. Then \ac{ny}."
+               r"\acreset{ny}\ac{ny}.\end{document}")
+        good = tex(r"\section{Intro}Verified sibling \cite{k}.\bibliography{refs}")
+        p = self.paper({1: {"main.tex": bad},
+                        2: {"main.tex": good, "refs.bib": "@article{k,title={Evidence}}"}})
+        result = parse_versions(AID, [(1, p / "v1"), (2, p / "v2")])
+        self.assertEqual([v["status"] for v in result["versions"]], ["parse_error", "success"])
+        self.assertEqual(result["versions"][0]["error"], r"Unsupported prose command: \ac")
+        self.assertEqual({e["version"] for e in result["hierarchy"]}, {2})
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn(r"Verified sibling \cite{k}.", content)
+        self.assertNotIn("New York", content)
+        self.assertEqual([b["citation_key"] for b in result["bibtex"]], ["k"])
+        validate_tables(result)
+
+    def test_merge_credits_preserves_literals_local_macros_and_versioned_edges(self):
+        source = (r"\documentclass{llncs}\begin{document}\section{Conclusion}Before."
+                  r"\begin{credits}\subsubsection{\ackname}Supported by \cite{k}. "
+                  r"\verb|\ackname|"
+                  r"\begin{verbatim}\discintname\end{verbatim}"
+                  r"\subsubsection{\discintname}No conflict.\end{credits}After."
+                  r"\bibliography{r}\end{document}")
+        p = self.paper({1: {"main.tex": source, "r.bib": "@article{k,title={Evidence}}"},
+                        2: {"main.tex": source, "r.bib": "@article{k,title={Evidence}}"}})
+        result = parse_versions(AID, [(1, p / "v1"), (2, p / "v2")])
+        self.assertEqual([v["status"] for v in result["versions"]], ["success", "success"], result["versions"])
+        contents = [n["content"] for n in result["elements"]]
+        self.assertIn("Acknowledgments", contents)
+        self.assertIn("Disclosure of Interests", contents)
+        self.assertTrue(any(r"\verb|\ackname|" in c for c in contents))
+        self.assertTrue(any(r"\discintname" in c for c in contents))
+        self.assertTrue(any(r"Supported by \cite{k}." == c for c in contents))
+        self.assertIn("After.", contents)
+        self.assertEqual([b["citation_key"] for b in result["bibtex"]], ["k"])
+        shared = next(n["element_id"] for n in result["elements"] if n["content"] == "Acknowledgments")
+        self.assertEqual({e["version"] for e in result["hierarchy"] if e["element_id"] == shared}, {1, 2})
+        validate_tables(result)
+
+    def test_merge_credits_local_labels_and_environment_are_not_replaced(self):
+        result = self._batch01_parse(
+            r"\begin{credits}\ackname Text.\discintname End.\end{credits}",
+            document_class="llncs",
+            preamble=r"\newcommand{\ackname}{Local thanks}\newcommand{\discintname}{Local disclosure}")
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(n["content"] for n in result["elements"])
+        self.assertIn("Local thanks", content)
+        self.assertIn("Local disclosure", content)
+        self.assertNotIn("Acknowledgments", content)
+        for preamble, body in (
+            ("", r"\begin{credits}[unknown]Text.\end{credits}"),
+            ("", r"\ackname Outside."),
+            (r"\renewenvironment{credits}{\unknown}{Done.}", r"\begin{credits}Text.\end{credits}"),
+        ):
+            with self.subTest(preamble=preamble, body=body):
+                result = self._batch01_parse(body, document_class="llncs", preamble=preamble)
+                self.assertEqual(result["versions"][0]["status"], "parse_error")
+
+    def test_merge_grid_package_extension_keeps_local_override_and_math(self):
+        for cls, preamble in (
+            ("aastex631", ""),
+            ("revtex4-2", ""),
+            ("article", r"\usepackage{ltxgrid}"),
+        ):
+            with self.subTest(cls=cls):
+                result = self._batch01_parse(
+                    r"\onecolumngrid Before $x$.\twocolumngrid After.",
+                    document_class=cls, preamble=preamble)
+                self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+                self.assertIn("Before $x$.", [n["content"] for n in result["elements"]])
+                self.assertIn("After.", [n["content"] for n in result["elements"]])
+        result = self._batch01_parse(
+            r"\onecolumngrid After.",
+            preamble=r"\usepackage{ltxgrid}\newcommand{\onecolumngrid}{Local grid text.}")
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("Local grid text.", [n["content"] for n in result["elements"]])
+
+    def test_merge_declared_length_and_baseline_handlers_coexist(self):
+        result = self._batch01_parse(
+            r"\newlength{\mywidth}\setlength{\mywidth}{0.5\linewidth}"
+            r"\baselineskip=12pt plus 1pt\setlength{\baselineskip}{14pt}"
+            r"\pagenumbering{gobble}Before $x$.\textbackslash{}cite\{literal\}.After.")
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn(r"\textbackslash{}cite\{literal\}", " ".join(n["content"] for n in result["elements"]))
+        self.assertEqual(result["bibtex"], [])
+        commands = [m["command"] for m in result["versions"][0]["layout_metadata"]]
+        for name in ("newlength", "setlength", "baselineskip", "pagenumbering"):
+            self.assertIn(name, commands)
+        validate_tables(result)
+
+    def test_merge_new_symbol_chemical_and_ieee_handlers_keep_local_macros(self):
+        for name in ("textdegree", "ce", "boldmath", "unboldmath", "IEEEtitleabstractindextext"):
+            with self.subTest(name=name):
+                result = self._batch01_parse(
+                    "\\" + name + " After.",
+                    document_class="IEEEtran",
+                    preamble=r"\usepackage{mhchem}\newcommand{" + "\\" + name + r"}{Local content.}")
+                self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+                self.assertIn("Local content.", [n["content"] for n in result["elements"]])
+
+    def test_merge_ieee_wrapper_keeps_citations_equations_and_following_section(self):
+        result = self._batch01_parse(
+            r"\IEEEtitleabstractindextext{\begin{abstract}Summary \cite{k}.\end{abstract}"
+            r"\begin{IEEEkeywords}Signals.\end{IEEEkeywords}}"
+            r"\section{Intro}Body.\[x=1\]\bibliography{r}",
+            document_class="IEEEtran",
+            files={"r.bib": "@article{k,title={Evidence}}"})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = [n["content"] for n in result["elements"]]
+        self.assertIn(r"Summary \cite{k}.", content)
+        self.assertIn("Intro", content)
+        self.assertIn("Body.", content)
+        self.assertTrue(any(n["kind"] == "block_formula" and "x=1" in n["content"] for n in result["elements"]))
+        self.assertEqual([b["citation_key"] for b in result["bibtex"]], ["k"])
+        validate_tables(result)
 
     def test_sentence_boundaries_protect_math_commands_urls_and_abbreviations(self):
         text = r"Smith et al. show i.e. examples in Fig. 1 at 3.14 with $x.y$ and \url{https://a.b/c}. Next sentence."
@@ -2941,6 +3343,17 @@ class M2Tests(unittest.TestCase):
         for quantity in [r"\SI{1}{\unknownunit}",r"\SI{\countvalue}{Hz}"]:
             with self.subTest(quantity=quantity),tempfile.TemporaryDirectory() as td:
                 p=Path(td);p.joinpath("main.tex").write_text(tex(quantity).replace(r"\begin{document}",r"\usepackage{siunitx}\begin{document}"),encoding="utf-8");self.assertEqual(parse_versions(AID,[(1,p)])["versions"][0]["status"],"parse_error")
+
+    def test_125_si_short_unit_alias_keeps_source_quantity(self):
+        source=tex(r"Sampled at \SI{500}{\Hz}, \SI{1.0}{\ms}, \SI{2}{\kHz} and \SI{3}{\uF}.").replace(r"\begin{document}",r"\usepackage{siunitx}\begin{document}")
+        r=self.parse({"main.tex":source});self.assertEqual(r["versions"][0]["status"],"success");c=" ".join(n["content"] for n in r["elements"])
+        for quantity in (r"\SI{500}{\Hz}",r"\SI{1.0}{\ms}",r"\SI{2}{\kHz}",r"\SI{3}{\uF}"):self.assertIn(quantity,c)
+
+    def test_125_textcomp_degree_symbol_is_normalized(self):
+        r=self.parse({"main.tex":tex(r"Angles from -70\textdegree{} to +70\textdegree.")})
+        self.assertEqual(r["versions"][0]["status"],"success")
+        c=" ".join(n["content"] for n in r["elements"])
+        self.assertIn("-70\u00b0",c);self.assertIn("+70\u00b0",c)
 
     def test_125_si_local_definition_takes_precedence(self):
         source=tex(r"\SI{Meaningful text.}{After.}").replace(r"\begin{document}",r"\usepackage{siunitx}\newcommand{\SI}[2]{#1 #2}\begin{document}")
