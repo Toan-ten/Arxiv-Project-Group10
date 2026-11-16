@@ -173,7 +173,12 @@ def bibliography(gatherer, body):
         gatherer.fallback_bbl()
     for path in gatherer.bbl_files:
         try:
-            rendered = parse_bbl(gatherer.read(path, comments=False))
+            rendered = parse_bbl(gatherer.read(path, comments=False), enriched=True)
+            scopes = {entry.get("biblatex_metadata", {}).get("refsection_id")
+                      for entry in rendered if entry["provider"] == "biblatex_bbl"}
+            if any(scope not in {None, "0"} for scope in scopes):
+                raise ParseError("BibLaTeX refsections require source-scoped citation mapping; "
+                                 "cannot merge into the M2 publication bibliography")
         except ParseError as exc:
             raise ParseError(f"{path.relative_to(gatherer.root).as_posix()}: {exc}") from exc
         relative = path.relative_to(gatherer.root).as_posix()
