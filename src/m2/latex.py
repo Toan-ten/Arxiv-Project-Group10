@@ -199,11 +199,12 @@ def safe_path(root, relative, parent=None):
 
 
 
-def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False, operand_end=None):
+def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False, operand_end=None, projection=None):
     """Select literal TeX true/false only; unknown predicates stay unsupported.
 
     No macro expansion or filesystem probing occurs while finding the boundary.
-    Declarations inside the conditional are deliberately outside this subset.
+    Active declarations need the explicitly supported declaration subset.
+    Inactive definitions are token-scanned without registering or executing them.
     """
     _, start = command(text, pos)
     start = start if operand_end is None else operand_end
@@ -216,7 +217,9 @@ def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False
             cursor += 1
             continue
         token, end = command(text, cursor)
-        if token in {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"} and declarations:
+        decision = (name == "iftrue") if name in {"iftrue", "iffalse"} else truth
+        inactive = (decision is False and split is None or decision is True and split is not None)
+        if token in {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"} and declarations and not inactive:
             # Skip a whole definition while locating conditional boundaries.
             # Only the selected branch will be interpreted by expand().
             after = skip_space(text, end)
@@ -231,6 +234,12 @@ def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False
             continue
         if token in {"def", "gdef", "edef", "xdef", "newcommand", "renewcommand",
                      "providecommand", "DeclareRobustCommand", "newif", "let"}:
+            # Inactive TeX branches scan tokens but never execute definitions.
+            # Do not skip replacement bodies: nested conditional tokens still
+            # participate in TeX's skipped-branch balancing.
+            if inactive:
+                cursor = end
+                continue
             raise ParseError("Declarations inside literal conditional require scoped TeX semantics")
         if token == "verb":
             raise ParseError("Verbatim inside literal conditional is unsupported")
@@ -253,7 +262,9 @@ def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False
                     truth = name == "iftrue"
                 if truth is None:
                     if true_branch.strip() != false_branch.strip():
-                        raise ParseError("Compiler-dependent conditional has different branches: " + name)
+                        if projection is None or projection(true_branch) != projection(false_branch):
+                            raise ParseError("Compiler-dependent conditional has different branches: " + name)
+                        return projection(true_branch), end
                     return true_branch, end
                 return (true_branch if truth else false_branch), end
         cursor = end
@@ -261,7 +272,34 @@ def constant_branch(text, pos, name, *, truth=None, known=(), declarations=False
 
 
 
-def supplement_evidence(probe):
+def preamble_rendering_projection(text):
+    """Canonical M2 evidence for rendering-only preamble branches, not truth."""
+    packages, pos = [],0
+    while (pos := skip_space(text,pos)) < len(text):
+        name,pos = command(text,pos)
+        if name == "DeclareGraphicsExtensions":
+            value,pos = group(text,pos)
+            if not re.fullmatch(r"\s*\.[A-Za-z0-9]+(?:\s*,\s*\.[A-Za-z0-9]+)*\s*",value):
+                raise ParseError("Unsupported graphics-extension conditional")
+        elif name == "usepackage":
+            raw_options = "";cursor = skip_space(text,pos)
+            if text[cursor:cursor+1] == "[":
+                raw_options,pos = group(text,cursor,"[","]")
+            value,pos = group(text,pos);names = [v.strip() for v in value.split(',')]
+            if not set(names) <= {"graphicx","hyperref","color","xcolor","epstopdf"}:
+                raise ParseError("Unsupported conditional preamble package")
+            for item in raw_options.split(','):
+                item=item.strip()
+                if not item:continue
+                if not re.fullmatch(r"(?:dvipdfmx|pdftex|dvips|final|hyperindex|colorlinks(?:=(?:true|false))?|backref=page|(?:linkcolor|filecolor|citecolor|urlcolor|allcolors)=[A-Za-z0-9!.-]+)",item):
+                    raise ParseError("Unsupported conditional package interpretation option")
+            packages.extend(n for n in names if n != "epstopdf")
+        else:
+            raise ParseError("Unsupported conditional preamble rendering command: " + name)
+    return ''.join(r'\usepackage{'+name+'}' for name in packages)
+
+
+def supplement_evidence(probe, *, title_pattern=None):
     """Recognize explicit document roles, never filenames or incidental prose.
 
     The probe has comments/literals masked. Balanced groups are skipped, so a
@@ -270,7 +308,27 @@ def supplement_evidence(probe):
     """
     evidence, pos, body, front = [], 0, False, False
     classes = begins = ends = 0
-    phrase = re.compile(r"\b(?:supplemental material|supplemental information|supplementary information|supporting information)\b", re.I)
+    phrase = re.compile(title_pattern or r"\b(?:supplemental material|supplemental information|supplementary material|supplementary document|supplementary information|supporting information)\b", re.I)
+    def explicit_role(label):
+        if title_pattern is not None:
+            return phrase.search(label)
+        # Normalization may leave a nested textbf wrapper, whose presentation
+        # semantics are known and whose redefinition is refused below. An
+        # arbitrary macro can discard its argument, so its text is not proof.
+        cursor = 0
+        while cursor < len(label):
+            if label[cursor] == "\\":
+                name,cursor = command(label,cursor)
+                if name not in {"textbf", "\\"}:
+                    return None
+            else:
+                cursor += 1
+        # A complete label, a label for a named main paper, or a label separated
+        # from the article title. Incidental topic phrases are not role evidence.
+        boundary = r"(?:^|[:\u2013\u2014]|\s-\s|\\\\)\s*"
+        ending = r"(?:[\s.{}]*$|\s+(?:for|to)\b|\s*[:\u2013\u2014])"
+        return re.search(boundary + "(?:" + phrase.pattern + ")" + ending, label, re.I)
+
     try:
         while pos < len(probe):
             pos = skip_space(probe, pos)
@@ -351,7 +409,8 @@ def supplement_evidence(probe):
                 label = normalize(value)
                 is_heading = name in {"section", "chapter"}
                 eligible = (body and front) if is_heading else (not body or front)
-                if eligible and phrase.search(label) and (not is_heading or re.fullmatch(phrase.pattern + r"[\s.:]*", label, re.I)):
+                role_match = explicit_role(label)
+                if eligible and role_match and (not is_heading or re.fullmatch(phrase.pattern + r"[\s.:]*", label, re.I)):
                     evidence.append(dict(kind=name, value=value))
                 if body:
                     front = False
@@ -359,7 +418,7 @@ def supplement_evidence(probe):
                 start = skip_space(probe, pos)
                 if probe[start:start + 1] == "{":
                     value, pos = group(probe, start)
-                    if phrase.search(normalize(value)):
+                    if explicit_role(normalize(value)):
                         evidence.append(dict(kind="opening_display_title", value=value))
                     front = False
             elif body and name not in {"centering", "noindent", "raggedright", "raggedleft"}:
@@ -559,7 +618,7 @@ def root_selection_probe(raw_probe):
         mask_root_inline_verbatim(mask_literals(mask_inactive_root_blocks(raw_probe))))
 
 
-def root_document_inputs(probe, *, packages=None, preamble_only=False, fragment=False, strict=False):
+def root_document_inputs(probe, *, packages=None, preamble_only=False, fragment=False, strict=False, preamble_inputs=False):
     """Find only explicit, unconditional document-body input/include edges.
 
     This is root-selection evidence, not conditional execution. Macro bodies,
@@ -618,7 +677,7 @@ def root_document_inputs(probe, *, packages=None, preamble_only=False, fragment=
                 break
             elif name in {"input", "include", "subfile"}:
                 target, pos = literal_input_filename(probe, pos, allow_unbraced=name == "input")
-                if body:
+                if body or preamble_inputs:
                     inputs.append((name, target))
     except ParseError:
         if packages is not None:
@@ -699,9 +758,9 @@ def auxiliary_document_evidence(probe):
     return []
 
 
-def listing_options(raw):
+def listing_options(raw, *, ordered=False):
     """Balanced listings key/value syntax; values stay source text."""
-    result, pos = {}, 0
+    result, pos = ([] if ordered else {}), 0
     while (pos := skip_space(raw, pos)) < len(raw):
         if raw[pos] == ",":
             pos += 1
@@ -714,39 +773,136 @@ def listing_options(raw):
         value = "true"
         if raw[pos:pos + 1] == "=":
             pos = skip_space(raw, pos + 1)
-            if raw[pos:pos + 1] == "{":
-                value, pos = group(raw, pos)
-            else:
-                start = pos
-                while pos < len(raw) and raw[pos] != ",":
-                    if raw[pos] == "{":
-                        _, pos = group(raw, pos)
-                    else:
-                        pos += 1
-                value = raw[start:pos].strip()
-        result[key] = value
+            start = pos
+            while pos < len(raw) and raw[pos] != ",":
+                if raw[pos] == "{":
+                    _, pos = group(raw, pos)
+                elif raw[pos] == "\\":
+                    _, pos = command(raw, pos)
+                elif raw[pos] == "}":
+                    raise ParseError("Unbalanced lstlisting option value")
+                else:
+                    pos += 1
+            value = raw[start:pos].strip()
+            if value.startswith("{"):
+                inner, stop = group(value, 0)
+                if stop == len(value):
+                    value = inner
+        if ordered:
+            result.append((key, value))
+        else:
+            result[key] = value
         pos = skip_space(raw, pos)
         if pos < len(raw) and raw[pos] != ",":
             raise ParseError("Malformed lstlisting option separator")
     return result
 
 
+def resolve_listing_options(raw, styles, chain=(), *, _budget=None):
+    """Apply named styles in source key order; unsafe keys remain for validation."""
+    if len(chain) >= 16:
+        raise ParseError("lstlisting style depth limit")
+    result = {}
+    budget = [0] if _budget is None else _budget
+    for key, value in listing_options(raw, ordered=True):
+        budget[0] += 1
+        if budget[0] > 1024:
+            raise ParseError("lstlisting style expansion limit")
+        if key == "style":
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", value) or value not in styles:
+                raise ParseError("Unknown/dynamic lstlisting style: " + value)
+            if value in chain:
+                raise ParseError("lstlisting style cycle: " + value)
+            result.update(resolve_listing_options(styles[value], styles, (*chain, value), _budget=budget))
+        else:
+            result[key] = value
+    return result
+
+
 def listing_preamble(preamble):
-    """Only explicit, unscoped lstset declarations; no style execution."""
-    result, pos, depth = {}, 0, 0
+    """Only explicit unscoped declarations; resolve styles without executing hooks."""
+    result, styles, languages, pos, depth = {}, {}, set(), 0, 0
     while pos < len(preamble):
         if preamble[pos] == "\\":
             name, end = command(preamble, pos)
-            if name == "lstset":
+            if name in {"lstset", "lstdefinestyle", "lstdefinelanguage"}:
                 if depth:
-                    raise ParseError("Unsupported scoped lstset configuration")
+                    raise ParseError("Unsupported scoped listings configuration")
                 raw, end = group(preamble, end)
-                result.update(listing_options(raw))
+                if name == "lstset":
+                    result.update(resolve_listing_options(raw, styles))
+                elif name == "lstdefinestyle":
+                    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", raw):
+                        raise ParseError("Unsupported dynamic listing style name")
+                    body, end = group(preamble, end)
+                    styles[raw] = body
+                else:
+                    languages.add(raw)
+                    # Its definition is not interpreted. The listing reader
+                    # refuses use of this language rather than miss substitutions.
             pos = end
         else:
             depth += int(preamble[pos] == "{") - int(preamble[pos] == "}")
             pos += 1
+    result["@styles"], result["@languages"] = styles, languages
     return result
+
+
+def box_options(raw):
+    """Balanced PGF key/value literals; interpretation stays with the box reader."""
+    values, pos = [], 0
+    while (pos := skip_space(raw, pos)) < len(raw):
+        if raw[pos] == ',':
+            pos += 1
+            continue
+        m = re.match(r'[A-Za-z][A-Za-z0-9_ /.:-]*', raw[pos:])
+        if not m:
+            raise ParseError('Unsupported tcolorbox option syntax')
+        key = m[0].strip();pos = skip_space(raw, pos + m.end());value = None
+        if raw[pos:pos + 1] == '=':
+            pos = skip_space(raw, pos + 1);start = pos
+            while pos < len(raw) and raw[pos] != ',':
+                if raw[pos] == '{':
+                    _, pos = group(raw, pos)
+                elif raw[pos] == '\\':
+                    _, pos = command(raw, pos)
+                elif raw[pos] == '}':
+                    raise ParseError('Unbalanced tcolorbox option value')
+                else:
+                    pos += 1
+            value = raw[start:pos].strip()
+            if value.startswith('{'):
+                inner, stop = group(value, 0)
+                if stop == len(value):value = inner
+        if pos < len(raw) and raw[pos] != ',':
+            raise ParseError('Malformed tcolorbox key separator')
+        values.append((key,value))
+    return values
+
+
+def box_styles(preamble):
+    """Read only top-level literal style declarations on the compilation path."""
+    styles, pos = {}, 0
+    while pos < len(preamble):
+        if preamble[pos] == '{':
+            _, pos = group(preamble, pos)
+        elif preamble[pos] == '\\':
+            name, pos = command(preamble, pos)
+            if name in {'begingroup', 'endgroup'}:
+                raise ParseError('Scoped tcolorbox style declarations require TeX semantics')
+            if name == 'tcbset':
+                raw, pos = group(preamble, pos)
+                for key,value in box_options(raw):
+                    if re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]*/\.style',key) and value is not None:
+                        styles[key[:-7]] = value
+                    elif '/' in key:
+                        raise ParseError('Unsupported tcolorbox global/dynamic style: '+key)
+                    else:
+                        # Ordinary global defaults use the SAME bounded option
+                        # validator as explicit boxes; never discard hooks.
+                        styles.setdefault('@global', []).append((key,value))
+        else:pos += 1
+    return styles
 
 
 class Gatherer:
@@ -764,11 +920,13 @@ class Gatherer:
         self.document_root = None
         self.document_class = None
         self.listing_options = {}
+        self.box_styles = {}
         self.local_environments = set()
         self.environment_definitions = {}
         self.encoding = {}
         self.macros = {}
         self.booleans = {}
+        self.condition_symbols = {}
         self.document_started = False
         self.document_ended = False
         self.document_terminator_redefined = False
@@ -885,6 +1043,8 @@ class Gatherer:
                 body, end = group(text, start)
                 if name != "providecommand" or macro not in self.macros:
                     self.macros[macro] = (argc, default, body)
+                    self.condition_symbols[macro] = (not scope_depth and not self.environment_depth
+                                                     and name != "providecommand")
                 out.append(" ")
             elif name == "usepackage" and not self.document_started and name not in self.macros:
                 after_options = options(text, end)
@@ -988,6 +1148,8 @@ class Gatherer:
                     self.macros[macro] = (0, None, body)
                 else:
                     self.macros[macro] = (None, None, body)
+                self.condition_symbols[macro] = (not scope_depth and not self.environment_depth
+                                                  and name in {"def", "gdef"})
                 out.append(" ")
             elif (name in self.macros and self.macros[name][:2] == (0, None)
                   and re.fullmatch(r"\\(?:begin|end)\s*\{(?:equation\*?|eqnarray\*?|align\*?|alignat\*?|gather\*?|multline\*?|displaymath)\}", self.macros[name][2].strip())):
@@ -1033,11 +1195,81 @@ class Gatherer:
                 self.math_aliases_used.add("Literal TeX character comparison from source: " + repr(chars))
                 text = splice_tokens(text, pos, selected, after)
                 continue
+            elif name == "ifdefined":
+                if name in self.macros:
+                    raise ParseError("Locally redefined conditional requires TeX semantics: " + name)
+                target, cursor = command(text, skip_space(text,end))
+                if not self.condition_symbols.get(target):
+                    raise ParseError("Unsupported conditional/dynamic compilation command: ifdefined")
+                selected, after = constant_branch(text,pos,name,truth=True,known=self.booleans,
+                                                  declarations=True,operand_end=cursor)
+                self.math_aliases_used.add("ifdefined verified by prior top-level source declaration: " + target)
+                text = splice_tokens(text,pos,selected,after)
+                continue
+            elif name == "ifnum":
+                if name in self.macros:
+                    raise ParseError("Locally redefined numeric conditional requires TeX semantics")
+                def integer_operand(cursor):
+                    cursor = skip_space(text,cursor)
+                    if text[cursor:cursor+1] == "\\":
+                        target,cursor = command(text,cursor)
+                        definition = self.macros.get(target)
+                        if (not self.condition_symbols.get(target) or not definition
+                                or definition[:2] != (0,None) or not re.fullmatch(r"[+-]?[0-9]{1,10}",definition[2].strip())
+                                or text[cursor:cursor+1].isdigit()):
+                            raise ParseError("Unsupported conditional/dynamic compilation command: ifnum")
+                        value = int(definition[2].strip())
+                        terminator = "macro_space" if definition[2][-1:].isspace() else "macro"
+                    else:
+                        match = re.match(r"[+-]?[0-9]{1,10}(?![0-9])",text[cursor:])
+                        if not match:
+                            raise ParseError("Unsupported conditional/dynamic compilation command: ifnum")
+                        cursor += match.end();value = int(match[0])
+                        terminator = "literal"
+                    if abs(value) > 2147483647:
+                        raise ParseError("TeX integer operand out of range")
+                    return value,cursor,terminator
+                left,cursor,_ = integer_operand(end);cursor = skip_space(text,cursor)
+                relation = text[cursor:cursor+1]
+                if relation not in {"<", "=", ">"}:
+                    raise ParseError("Unsupported conditional/dynamic compilation command: ifnum")
+                right,cursor,terminator = integer_operand(cursor+1)
+                if terminator == "macro":
+                    # Spaces delimiting a control word are not TeX space tokens.
+                    # Another digit/macro can therefore extend the same integer.
+                    cursor = skip_space(text,cursor)
+                    if text[cursor:cursor+1].isdigit():
+                        raise ParseError("Unterminated expandable ifnum operand")
+                if terminator != "macro_space" and text[cursor:cursor+1] == "\\":
+                    token,after = command(text,cursor)
+                    if token != "relax" or token in self.macros:
+                        raise ParseError("Unterminated expandable ifnum operand")
+                    cursor = after  # explicit nonexpandable number terminator
+                truth = {"<":left<right,"=":left==right,">":left>right}[relation]
+                selected,after = constant_branch(text,pos,name,truth=truth,known=self.booleans,operand_end=cursor)
+                self.math_aliases_used.add("ifnum verified literal/source integers: " + str(left)+relation+str(right))
+                text = splice_tokens(text,pos,selected,after)
+                continue
+            elif name == "ifx" and not self.document_started:
+                if name in self.macros:
+                    raise ParseError("Locally redefined identity conditional requires TeX semantics")
+                if self.macros.keys() & {"usepackage", "DeclareGraphicsExtensions"}:
+                    raise ParseError("Locally redefined preamble rendering command")
+                _,cursor = command(text,skip_space(text,end))
+                _,cursor = command(text,skip_space(text,cursor))
+                selected,after = constant_branch(text,pos,name,known=self.booleans,operand_end=cursor,
+                                                 projection=preamble_rendering_projection)
+                self.math_aliases_used.add("Engine-independent equivalent preamble package branches: ifx")
+                text = splice_tokens(text,pos,selected,after)
+                continue
             elif name in {"ifpdf", "ifPDFTeX"}:
                 if name in self.macros:
                     raise ParseError("Locally redefined engine predicate requires TeX semantics: " + name)
-                selected, after = constant_branch(text, pos, name, known=self.booleans)
-                self.math_aliases_used.add("Engine-independent identical conditional branches: " + name)
+                if not self.document_started and self.macros.keys() & {"usepackage", "DeclareGraphicsExtensions"}:
+                    raise ParseError("Locally redefined preamble rendering command")
+                selected, after = constant_branch(text, pos, name, known=self.booleans,
+                                                  projection=None if self.document_started else preamble_rendering_projection)
+                self.math_aliases_used.add("Engine-independent identical/projected preamble branches: " + name)
                 text = splice_tokens(text, pos, selected, after)
                 continue
             elif name in {"begingroup", "endgroup"}:
@@ -1045,6 +1277,7 @@ class Gatherer:
                 out.append(text[pos:end])
             elif name == "let":
                 target, _ = command(text, skip_space(text, end))
+                self.condition_symbols[target] = False
                 if target in self.booleans or target in {flag[2:] + state for flag in self.booleans for state in ("true", "false")}:
                     raise ParseError("Aliased newif state requires TeX semantics: " + target)
                 if target in {"ifCLASSOPTIONcompsoc", "ifCLASSOPTIONcaptionsoff", "ifCLASSINFOpdf"}:
@@ -1063,16 +1296,19 @@ class Gatherer:
                 option = name.removeprefix("ifCLASSOPTION")
                 if name == "ifCLASSOPTIONcompsoc" and self.class_options & {"comsoc", "transmag"}:
                     raise ParseError("Interacting IEEE society class options require class execution")
+                if name == "ifCLASSINFOpdf" and self.macros.keys() & {"usepackage", "DeclareGraphicsExtensions"}:
+                    raise ParseError("Locally redefined preamble rendering command")
                 truth = None if name == "ifCLASSINFOpdf" else option in self.class_options
                 selected, after = constant_branch(text, pos, name, truth=truth, known={
-                    "ifCLASSOPTIONcompsoc", "ifCLASSOPTIONcaptionsoff", "ifCLASSINFOpdf"})
+                    "ifCLASSOPTIONcompsoc", "ifCLASSOPTIONcaptionsoff", "ifCLASSINFOpdf"},
+                    projection=preamble_rendering_projection if name == "ifCLASSINFOpdf" and not self.document_started else None)
                 self.math_aliases_used.add("IEEE conditional from literal class options/equal branches: " + name)
                 text = splice_tokens(text, pos, selected, after)
                 continue
             elif name in {"iftrue", "iffalse"}:
                 if name in self.macros:
                     raise ParseError("Locally redefined literal conditional: " + name)
-                selected, after = constant_branch(text, pos, name)
+                selected, after = constant_branch(text, pos, name, known=self.booleans)
                 self.math_aliases_used.add("Literal conditional selected from source: " + name)
                 text = splice_tokens(text, pos, selected, after)
                 continue
@@ -1249,6 +1485,40 @@ class Gatherer:
             files[candidate.name] = hashlib.sha256(candidate.read_bytes()).hexdigest()
         return path.name, tuple(sorted(files.items()))
 
+    def root_preamble_packages(self, parent, probe, root_probes):
+        """Packages proven through literal preamble fragments, with all-or-nothing evidence."""
+        packages, visited, total = set(), set(), 0
+
+        def walk(path, source, chain):
+            nonlocal total
+            if path in chain or len(chain) >= 40 or len(visited) >= 128:
+                raise ParseError("Root preamble graph cycle/depth/file limit")
+            if path in visited:
+                return
+            visited.add(path)
+            edges = root_document_inputs(source, packages=packages, preamble_only=True,
+                                         strict=True, preamble_inputs=True)
+            for name, target in edges:
+                if name != "input":
+                    raise ParseError("Unsupported preamble include semantics")
+                child = self.resolve(target, path, ".tex").resolve()
+                if child in root_probes:
+                    raise ParseError("Independent document in preamble graph")
+                with child.open("rb") as stream:
+                    raw = stream.read(8 * 1024 * 1024 + 1)
+                total += len(raw)
+                if len(raw) > 8 * 1024 * 1024 or total > 16 * 1024 * 1024:
+                    raise ParseError("Root preamble graph size limit")
+                source = root_selection_probe(raw.decode("latin-1"))
+                if re.search(r"\\(?:documentclass|begin|end)\s*\{(?:document|[^{}]*)\}", source):
+                    raise ParseError("Unverified environment in root preamble fragment")
+                walk(child, source, (*chain, path))
+        try:
+            walk(parent, probe, ())
+        except (ParseError, OSError):
+            return set()
+        return packages
+
     def root_include_relations(self, parent, probe, root_probes):
         """Bounded literal edges through fragments, with no speculative execution.
 
@@ -1305,6 +1575,10 @@ class Gatherer:
                 roots.append(path)
                 probes[path] = probe
                 roles[path] = supplement_evidence(probe) or auxiliary_document_evidence(probe)
+                if not roles[path]:
+                    templates = supplement_evidence(probe, title_pattern=r"^(?:Instructions for \*ACL Proceedings|LuaLaTeX and XeLaTeX Template for \*ACL Style Files)$")
+                    if templates:
+                        roles[path] = [dict(kind="independent_auxiliary_role",value="explicit_template_documentation",source_evidence=templates)]
                 declaration = self.root_class(probe)
                 if not roles[path] and declaration and declaration[0] == "osa-supplemental-document":
                     roles[path] = [dict(kind="class_role", value="osa-supplemental-document")]
@@ -1335,8 +1609,7 @@ class Gatherer:
             for parent in roots:
                 if parent in fragments or roles[parent]:
                     continue
-                parent_packages = set()
-                root_document_inputs(probes[parent], packages=parent_packages, preamble_only=True)
+                parent_packages = self.root_preamble_packages(parent, probes[parent], probes)
                 for current, name, target, child, chain in self.root_include_relations(
                         parent, probes[parent], probes):
                     kind = "included_document_fragment" if child in fragments else None
@@ -1441,6 +1714,10 @@ class Gatherer:
             raise ParseError("Ambiguous/missing document environment")
         if "listings" in self.packages and re.search(r"\\begin\s*\{lstlisting\}", text):
             self.listing_options = listing_preamble(lexical[:starts[0].start()])
+        if "tcolorbox" in self.packages:
+            if "tcbset" in self.macros:
+                raise ParseError("Locally redefined tcbset requires TeX semantics")
+            self.box_styles = box_styles(preamble)
         return roots[0].relative_to(self.root).as_posix(), text[starts[0].end():ends[0].start()]
 
 

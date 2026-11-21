@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 
 from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify
-from .latex import Gatherer, ParseError, citation_keys, command, environment, group, mask_literals, normalize, options, listing_options, sentences, skip_space, splice_tokens
+from .latex import Gatherer, ParseError, citation_keys, command, environment, group, mask_literals, normalize, options, listing_options, resolve_listing_options, box_options, sentences, skip_space, splice_tokens
 
 
 LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
@@ -420,6 +420,21 @@ class Tree:
                 # LaTeX's sentence-space factor: no printable character and
                 # no argument. Keep whitespace and the next token intact.
                 self.layout_metadata.append(dict(command=name))
+            elif name in {"textmu", "lq", "rq", "textasciitilde"} and name not in self.gatherer.macros:
+                # Kernel/textcomp glyphs. Keep tilde as a command because the
+                # normalizer treats a literal ~ as a nonbreaking space.
+                buffer.append({"textmu": "\u00b5", "lq": "\u2018", "rq": "\u2019",
+                               "textasciitilde": r"\textasciitilde{}"}[name])
+                end = skip_space(text, end)
+            elif name in {"strut", "raggedbottom", "leavevmode", "sl"} and name not in self.gatherer.macros:
+                # Strut/mode/font/page-height declarations have no visible
+                # argument. Do not consume the following group or prose.
+                self.layout_metadata.append(dict(command=name))
+                end = skip_space(text, end)
+            elif (name == "nolinenumbers" and name not in self.gatherer.macros
+                  and (self.gatherer.packages & {"lineno", "linenoaa"}
+                       or (self.gatherer.document_class or "").startswith("aastex"))):
+                self.layout_metadata.append(dict(command=name))
             elif name == "textbackslash" and name not in self.gatherer.macros:
                 # Keep a literal glyph as canonical LaTeX, NOT as an active
                 # backslash that could turn the following word into a command.
@@ -624,16 +639,25 @@ class Tree:
                     if env in self.gatherer.local_environments:
                         raise ParseError("Locally redefined lstlisting requires environment semantics")
                     config = dict(self.gatherer.listing_options)
-                    config.update(listing_options(optional_title or ""))
+                    styles = config.pop("@styles", {})
+                    languages = config.pop("@languages", set())
+                    config.update(resolve_listing_options(optional_title or "", styles))
+                    language = config.get("language", "")
+                    # listings names are case insensitive; [dialect] is not part
+                    # of the base language identity. Neither form bypasses the
+                    # refusal to interpret a source-defined language.
+                    base_language = re.sub(r"^\[[^\]\\{}]*\]\s*", "", language).strip().casefold()
+                    if base_language in {value.strip().casefold() for value in languages}:
+                        raise ParseError("Source-defined listing language requires interpretation: " + language)
                     # Formatting is preserved as evidence. TeX escape modes,
                     # substitutions and selective line ranges require separate
                     # semantics and cannot be passed off as literal code.
-                    unsafe = {"mathescape", "texcl", "escapechar", "escapeinside", "literate", "style", "firstline", "lastline", "linerange", "firstnumber", "deletekeywords", "alsoletter", "alsodigit", "morecomment", "morestring", "moredelim"}
+                    unsafe = {"mathescape", "texcl", "escapechar", "escapeinside", "literate", "firstline", "lastline", "linerange", "firstnumber", "deletekeywords", "alsoletter", "alsodigit", "morecomment", "morestring", "moredelim"}
                     for key in unsafe & config.keys():
                         if key in {"mathescape", "texcl"} and config[key].strip().lower() == "false":
                             continue
                         raise ParseError("Unsupported lstlisting interpretation option: " + key)
-                    allowed = {"language", "frame", "aboveskip", "belowskip", "showstringspaces", "columns", "basicstyle", "numbers", "numberstyle", "keywordstyle", "commentstyle", "stringstyle", "breaklines", "breakatwhitespace", "tabsize", "xleftmargin", "breakindent", "caption", "label", "mathescape", "texcl"}
+                    allowed = {"language", "frame", "aboveskip", "belowskip", "showstringspaces", "columns", "basicstyle", "numbers", "numberstyle", "keywordstyle", "commentstyle", "stringstyle", "breaklines", "breakatwhitespace", "tabsize", "xleftmargin", "breakindent", "caption", "title", "label", "mathescape", "texcl", "backgroundcolor", "rulecolor", "framerule", "captionpos", "keepspaces"}
                     unknown = config.keys() - allowed
                     if unknown:
                         raise ParseError("Unsupported lstlisting option: " + sorted(unknown)[0])
@@ -643,53 +667,87 @@ class Tree:
                             if style[cursor] != "\\":
                                 raise ParseError("Unsupported visible text in lstlisting style: " + key)
                             token, cursor = command(style, cursor)
+                            if token in self.gatherer.macros:
+                                raise ParseError("Locally redefined lstlisting style command: " + token)
                             if token == "color":
                                 color, cursor = group(style, cursor)
                                 if not re.fullmatch(r"[A-Za-z0-9!._:-]+", color):
                                     raise ParseError("Unsupported dynamic lstlisting style color: " + key)
                             elif token not in {"small", "footnotesize", "tiny", "scriptsize", "ttfamily", "bfseries", "itshape", "normalfont", "normalsize"}:
                                 raise ParseError("Unsupported executable lstlisting style: " + key)
+                    if "keepspaces" in config and config["keepspaces"] not in {"true", "false"}:
+                        raise ParseError("Unsupported lstlisting keepspaces flag")
+                    if "captionpos" in config and config["captionpos"] not in {"t", "b"}:
+                        raise ParseError("Unsupported lstlisting caption position")
+                    if "framerule" in config and not re.fullmatch(r"[0-9.]+(?:pt|em|ex|mm|cm)", config["framerule"]):
+                        raise ParseError("Unsupported lstlisting frame dimension")
+                    for key in {"backgroundcolor", "rulecolor"} & config.keys():
+                        if not re.fullmatch(r"\\color\s*\{[A-Za-z0-9!._:-]+\}", config[key]) or "color" in self.gatherer.macros:
+                            raise ParseError("Unsupported executable listing color: " + key)
                     self.layout_metadata.append(dict(environment=env, options=config, raw_options=optional_title))
                     container = self.add("component", "code listing", current())
-                    if config.get("caption"):
-                        caption = self.add("component", "caption", container)
-                        self.parse(config["caption"], caption, depth + 1)
+                    for key in ("caption", "title"):
+                        if config.get(key):
+                            caption = self.add("component", key, container)
+                            self.parse(config[key], caption, depth + 1)
                     self.add("verbatim", r"\begin{lstlisting}" + raw + r"\end{lstlisting}", container, literal=True)
                 elif env == "tcolorbox" and "tcolorbox" in self.gatherer.packages:
                     # Only text title and explicit presentation keys. Hooks,
                     # overlays and arbitrary key execution remain unsupported.
-                    opts, cursor = optional_title or "", 0
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined tcolorbox requires environment semantics")
                     title = None
-                    while (cursor := skip_space(opts, cursor)) < len(opts):
-                        match = re.match(r"([A-Za-z]+)\s*=", opts[cursor:])
-                        if not match:
-                            raise ParseError("Unsupported tcolorbox option syntax")
-                        key = match[1]
-                        cursor = skip_space(opts, cursor + match.end())
-                        if opts[cursor:cursor + 1] == "{":
-                            value, cursor = group(opts, cursor)
-                        else:
-                            stop = opts.find(",", cursor)
-                            stop = len(opts) if stop < 0 else stop
-                            value, cursor = opts[cursor:stop], stop
-                        if key == "title":
+                    style_options_seen = 0
+                    def resolve_box(raw_options, chain=()):
+                        nonlocal style_options_seen
+                        if len(chain) > 12:
+                            raise ParseError("tcolorbox style recursion limit")
+                        for key,value in box_options(raw_options):
+                            style_options_seen += 1
+                            if style_options_seen > 1024:
+                                raise ParseError("tcolorbox style expansion limit")
+                            if value is None and key in self.gatherer.box_styles:
+                                if key in chain:
+                                    raise ParseError("tcolorbox style cycle: " + key)
+                                yield from resolve_box(self.gatherer.box_styles[key], (*chain,key))
+                            else:
+                                yield key,value
+                    global_options = self.gatherer.box_styles.get("@global", [])
+                    for key,value in [*global_options, *resolve_box(optional_title or "")]:
+                        if key == "title" and value is not None:
                             if title is not None:
                                 raise ParseError("Duplicate tcolorbox title")
                             title = value
-                        elif key not in {"colback", "colframe", "coltitle", "boxrule", "arc", "left", "right", "top", "bottom"} or re.search(r"[\\{}]", value):
+                        elif key in {"enhanced", "breakable", "center", "sharp corners"} and value is None:
+                            pass
+                        elif key in {"fonttitle", "fontupper", "fontlower"} and value is not None:
+                            if self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z]+)",value)):
+                                raise ParseError("Locally redefined tcolorbox font: " + key)
+                            if not re.fullmatch(r"\s*(?:\\(?:bfseries|ttfamily|itshape|small|footnotesize|scriptsize|normalfont)\s*)+",value):
+                                raise ParseError("Unsupported tcolorbox font: " + key)
+                        elif key == "width" and value is not None:
+                            if self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z]+)",value)):
+                                raise ParseError("Locally redefined tcolorbox width")
+                            if not re.fullmatch(r"[0-9.]*\\(?:textwidth|linewidth|columnwidth)|[0-9.]+(?:pt|cm|mm|em|ex)",value):
+                                raise ParseError("Unsupported tcolorbox width")
+                        elif key in {"colback", "colframe", "coltitle", "boxrule", "arc", "left", "right", "top", "bottom", "rounded corners"} and value is not None and re.fullmatch(r"[A-Za-z0-9!._ -]+",value):
+                            pass
+                        else:
                             raise ParseError("Unsupported tcolorbox key: " + key)
-                        cursor = skip_space(opts, cursor)
-                        if cursor < len(opts):
-                            if opts[cursor] != ",":
-                                raise ParseError("Malformed tcolorbox key separator")
-                            cursor += 1
                     self.layout_metadata.append(dict(environment=env, options=optional_title))
                     container = self.add("component", env, current())
                     if title is not None:
                         heading = self.add("component", "box title", container)
                         self.parse(title, heading, depth + 1)
                     self.parse(raw, container, depth + 1)
-                elif env == "IEEEbiography" and self.gatherer.document_class == "IEEEtran":
+                elif env == "AMS" and self.gatherer.document_class in {"siamltex", "siamart1116"}:
+                    if optional_title is not None or env in self.gatherer.local_environments:
+                        raise ParseError("Unsupported/local AMS classification environment")
+                    container = self.add("component", "AMS subject classification", current())
+                    self.parse(raw, container, depth + 1)
+                elif env in {"IEEEbiography", "IEEEbiographynophoto"} and self.gatherer.document_class == "IEEEtran":
+                    if env in self.gatherer.local_environments or env == "IEEEbiographynophoto" and optional_title is not None:
+                        raise ParseError("Unsupported/local IEEE biography semantics")
                     person, cursor = group(raw, 0)  # Never guess a missing mandatory name.
                     container = self.add("component", "biography: " + person, current())
                     self.layout_metadata.append(dict(environment=env, person=person, picture=optional_title))
@@ -746,6 +804,45 @@ class Tree:
                     if optional_title is not None:
                         raise ParseError("Unexpected option on layout environment: " + env)
                     self.parse(raw, current(), depth + 1)
+                elif env in {"spacing", "multicols", "multicols*", "strip"}:
+                    required = "setspace" if env == "spacing" else "cuted" if env == "strip" else "multicol"
+                    if required not in self.gatherer.packages or env in self.gatherer.local_environments:
+                        raise ParseError("Unverified/local layout environment: " + env)
+                    cursor, values = 0, []
+                    if env == "spacing":
+                        if optional_title is not None:
+                            raise ParseError("Unsupported spacing optional argument")
+                        factor, cursor = group(raw, cursor)
+                        if not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", factor.strip()) or not 0 < float(factor) <= 10:
+                            raise ParseError("Unsupported nonliteral spacing factor")
+                        values.append(factor)
+                    elif env.startswith("multicols"):
+                        if optional_title is not None:
+                            raise ParseError("Column count must precede multicols optional heading")
+                        count, cursor = group(raw, cursor)
+                        if not count.strip().isdigit() or not 2 <= int(count) <= 20:
+                            raise ParseError("Unsupported nonliteral multicols count")
+                        values.append(count)
+                        cursor = skip_space(raw, cursor)
+                        if raw[cursor:cursor + 1] == "[":
+                            heading, cursor = group(raw, cursor, "[", "]")
+                            self.parse(heading, current(), depth + 1)
+                            cursor = skip_space(raw, cursor)
+                            if raw[cursor:cursor + 1] == "[":
+                                prespace, cursor = group(raw, cursor, "[", "]")
+                                if not re.fullmatch(r"[+-]?[0-9.]+(?:pt|em|ex|mm|cm|in)", prespace.strip()):
+                                    raise ParseError("Unsupported multicols prespace")
+                                values.append(prespace)
+                    elif optional_title is not None:
+                        raise ParseError("Unsupported strip optional argument")
+                    self.layout_metadata.append(dict(environment=env, arguments=values))
+                    self.parse(raw[cursor:], current(), depth + 1)
+                elif env in {"flalign", "flalign*"}:
+                    if (not self.gatherer.packages & {"amsmath", "mathtools"}
+                            or env in self.gatherer.local_environments or optional_title is not None):
+                        raise ParseError("Unverified/local flalign environment")
+                    self.add("block_formula", r"\begin{equation}\begin{aligned}" + raw.strip()
+                             + r"\end{aligned}\end{equation}", current())
                 elif env == "minipage":
                     # Vertical alignment, optional height/inner alignment and
                     # width affect layout; every character of its body survives.
@@ -797,13 +894,13 @@ class Tree:
                 elif env == "frontmatter" and self.gatherer.document_class == "elsarticle":
                     self.parse(raw, current(), depth + 1)
                 elif (env in {"keyword", "keywords"} and (
-                      self.gatherer.document_class in {"elsarticle", "IEEEtran", "ceurart", "mnras", "cas-dc", "cas-sc", "interact", "l4dc2025", "autart", "imsart"}
+                      self.gatherer.document_class in {"elsarticle", "IEEEtran", "ceurart", "mnras", "cas-dc", "cas-sc", "interact", "l4dc2025", "autart", "imsart", "siamltex", "siamart1116", "JFM-FLM_Au"}
                       or env == "keywords" and "spconf" in self.gatherer.packages)):
                     if optional_title is not None or env in self.gatherer.local_environments:
                         raise ParseError("Unsupported/local keyword environment semantics: " + env)
                     container = self.add("component", "keywords", current())
                     self.parse(raw, container, depth + 1)
-                elif env == "algorithm" and "algorithm2e" in self.gatherer.packages and not re.search(r"\\begin\s*\{algorithmic\}", raw):
+                elif env in {"algorithm", "algorithm*"} and "algorithm2e" in self.gatherer.packages and not re.search(r"\\begin\s*\{algorithmic\}", raw):
                     container = self.add("component", env, current())
                     self.algorithm2e_depth += 1
                     try:
@@ -816,14 +913,16 @@ class Tree:
                     # Standard paragraph line-breaking tolerance, not a
                     # semantic component. Keep all text under its real parent.
                     self.parse(raw, current(), depth + 1)
-                elif env == "IEEEkeywords" and self.gatherer.document_class == "IEEEtran":
+                elif env == "IEEEkeywords" and self.gatherer.document_class in {"IEEEtran", "ieeetran", "IEEEtai", "ieeecolor"}:
                     if optional_title is not None:
                         raise ParseError("Unsupported optional argument on " + env)
                     if env in self.gatherer.local_environments:
                         raise ParseError("Locally redefined IEEEkeywords requires environment semantics")
                     container = self.add("component", "keywords", current())
                     self.parse(raw, container, depth + 1)
-                elif env == "subequations" and "amsmath" in self.gatherer.packages:
+                elif env == "subequations" and (self.gatherer.packages & {"amsmath", "mathtools"}
+                        or self.gatherer.document_class == "acmart"
+                        or (self.gatherer.document_class or "").startswith("revtex")):
                     if optional_title is not None:
                         raise ParseError("Unsupported optional argument on " + env)
                     if env in self.gatherer.local_environments:
@@ -882,6 +981,11 @@ class Tree:
                         self.parse(raw, current(), depth + 1)
                     finally:
                         self.credits_depth -= 1
+                elif env == "algorithm*" and self.gatherer.packages & {"algorithm", "algorithm2e"}:
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined algorithm* requires environment semantics")
+                    container = self.add("component", env, current())
+                    self.parse(raw, container, depth + 1)
                 elif env in CONTAINERS or env in self.gatherer.theorems:
                     if env in {"appendices", "appendix"} and depth == 0:
                         # An explicit appendix division is not a child of the
@@ -1078,6 +1182,14 @@ class Tree:
                 flush()
                 container = self.add("component", {"KwIn":"input", "KwOut":"output", "KwResult":"result", "KwRet":"return"}[name], current())
                 self.parse(raw, container, depth + 1)
+            elif self.algorithm2e_depth and name == "Repeat" and name not in self.gatherer.macros:
+                condition, start = group(text, end)
+                body, end = group(text, start)
+                flush()
+                container = self.add("component", "repeat", current())
+                self.parse(body, container, depth + 1)
+                until = self.add("component", "until", container)
+                self.parse(condition, until, depth + 1)
             elif self.algorithm2e_depth and name in {"For", "ForEach", "While", "If", "lIf", "ElseIf", "Else"} and name not in self.gatherer.macros:
                 condition = None
                 start = end
@@ -1125,6 +1237,70 @@ class Tree:
                     if level not in {"0", "1", "2", "3", "4"}:
                         raise ParseError("Invalid allowdisplaybreaks level")
                 self.layout_metadata.append(dict(command=name, level=level))
+            elif name in {"phantom", "hphantom", "vphantom"} and name not in self.gatherer.macros:
+                raw, end = group(text, end)
+                # Literal characters size an invisible box. Unknown commands
+                # could have side effects (including citations), so refuse them.
+                if re.search(r"[\\#${}]", raw):
+                    raise ParseError("Unsupported nonliteral phantom body")
+                self.layout_metadata.append(dict(command=name, hidden_body=raw))
+            elif name == "hypersetup" and name not in self.gatherer.macros and "hyperref" in self.gatherer.packages:
+                raw, end = group(text, end)
+                for key, value in box_options(raw):
+                    if key in {"colorlinks", "hidelinks", "bookmarks", "bookmarksopen", "bookmarksnumbered", "breaklinks"}:
+                        if value is not None and value not in {"true", "false"}:
+                            raise ParseError("Unsupported hyperref flag: " + key)
+                    elif key in {"linkcolor", "citecolor", "urlcolor", "filecolor", "anchorcolor", "allcolors"}:
+                        if value is None or not re.fullmatch(r"[A-Za-z0-9!._-]+", value):
+                            raise ParseError("Unsupported hyperref color: " + key)
+                    else:
+                        raise ParseError("Unsupported hyperref setup key: " + key)
+                self.layout_metadata.append(dict(command=name, options=raw))
+            elif (name == "ion" and name not in self.gatherer.macros
+                  and (self.gatherer.document_class == "aa" or (self.gatherer.document_class or "").startswith("aastex"))):
+                atom, start = group(text, end)
+                stage, end = group(text, start)
+                if (not re.fullmatch(r"[A-Z][a-z]?", atom.strip())
+                        or not re.fullmatch(r"[1-9][0-9]?|[ivxIVX]+", stage.strip())):
+                    raise ParseError("Unsupported nonliteral ion notation")
+                buffer.append(text[pos:end])  # Preserve stage, never infer an ionization value.
+            elif name == "parbox" and name not in self.gatherer.macros:
+                start, placement = skip_space(text, end), []
+                for _ in range(3):
+                    if text[start:start + 1] != "[":
+                        break
+                    option, start = group(text, start, "[", "]")
+                    placement.append(option)
+                    start = skip_space(text, start)
+                if (placement and placement[0].strip() not in {"t", "c", "b"}
+                        or len(placement) == 3 and placement[2].strip() not in {"t", "c", "b", "s"}):
+                    raise ParseError("Unsupported parbox alignment")
+                width, start = group(text, start)
+                for value in [width, *placement[1:2]]:
+                    if (not re.fullmatch(r"[+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp|\\(?:textwidth|linewidth|columnwidth))", value.strip())
+                            and not re.fullmatch(r"\\(?:textwidth|linewidth|columnwidth)", value.strip())):
+                        raise ParseError("Unsupported nonliteral parbox dimension: " + value)
+                    if self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z]+)", value)):
+                        raise ParseError("Locally redefined parbox dimension")
+                raw, end = group(text, start)
+                self.layout_metadata.append(dict(command=name, width=width, placement=placement))
+                flush()
+                self.parse(raw, current(), depth + 1)
+            elif name == "textcircled" and name not in self.gatherer.macros:
+                value, end = group(text, end)
+                # Preserve the circle, not just the letter/digit it encloses.
+                # Only literal glyphs or their literal raisebox form are proven.
+                if not (re.fullmatch(r"[A-Za-z0-9]", value.strip()) or re.fullmatch(
+                        r"\\raisebox\s*\{[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:pt|em|ex)\}\s*\{[A-Za-z0-9]\}", value.strip())
+                        and "raisebox" not in self.gatherer.macros):
+                    raise ParseError("Unsupported nonliteral circled text")
+                buffer.append(text[pos:end])
+            elif (name == "text" and name not in self.gatherer.macros
+                  and (self.gatherer.packages & {"amsmath", "amstext", "mathtools"}
+                       or self.gatherer.document_class in {"amsart", "amsproc", "amsbook"})):
+                raw, end = group(text, end)
+                text = splice_tokens(text, pos, raw, end)
+                continue
             elif name == "raisebox" and name not in self.gatherer.macros:
                 lift, start = group(text, end)
                 start = options(text, start)
@@ -1142,13 +1318,24 @@ class Tree:
             elif name in {"textquoteleft", "textquoteright", "textquotedblleft", "textquotedblright"} and name not in self.gatherer.macros:
                 buffer.append({"textquoteleft":"‘", "textquoteright":"’", "textquotedblleft":"“", "textquotedblright":"”"}[name])
                 end = skip_space(text, end)
-            elif self.pseudocode_depth and name == "Comment" and name not in self.gatherer.macros:
+            elif self.pseudocode_depth and name in {"Comment", "COMMENT"} and name not in self.gatherer.macros:
                 raw, end = group(text, end)
                 flush()
                 container = self.add("component", "comment", current())
                 self.parse(raw, container, depth + 1)
             elif name == "par":
                 flush()
+            elif (name == "captionof" and name not in self.gatherer.macros
+                  and self.gatherer.packages & {"caption", "capt-of"}):
+                kind, start = group(text, end)
+                if kind not in {"figure", "table"}:
+                    raise ParseError("Unsupported captionof type: " + kind)
+                start = options(text, start)
+                value, end = group(text, start)
+                flush()
+                if not reference_section:
+                    container = self.add("component", kind + " caption", current())
+                    self.parse(value, container, depth + 1)
             elif name == "caption":
                 front_matter = False
                 flush()
@@ -1214,7 +1401,7 @@ class Tree:
                 end = start
                 self.layout_metadata.append(dict(command=name, placement=placement, arguments=args))
             elif (name == "IEEEPARstart" and name not in self.gatherer.macros
-                  and self.gatherer.document_class == "IEEEtran"):
+                  and self.gatherer.document_class in {"IEEEtran", "ieeetran", "IEEEtai", "ieeecolor"}):
                 first, start = group(text, end)
                 rest, end = group(text, start)
                 if len(first) != 1 or not first.isalpha():
@@ -1633,6 +1820,8 @@ class Tree:
                     value, end = group(text, start)
                 else:
                     value, end = text[start:start + 1], start + 1
+                if value.strip() in {r"\i", r"\j"}:
+                    value = {r"\i": "i", r"\j": "j"}[value.strip()]
                 if len(value) != 1:
                     raise ParseError("Unsupported compound text accent")
                 mark = {"'": "\u0301", '"': "\u0308", chr(96): "\u0300", "^": "\u0302",
@@ -1677,7 +1866,9 @@ class Tree:
                      "ENDFOR": "ENDFOR", "EndFor": "ENDFOR", "ENDIF": "ENDIF", "EndIf": "ENDIF",
                      "ENDWHILE": "ENDWHILE", "EndWhile": "ENDWHILE",
                      "Function": "FUNCTION", "EndFunction": "ENDFUNCTION",
-                     "Procedure": "PROCEDURE", "EndProcedure": "ENDPROCEDURE"}
+                     "Procedure": "PROCEDURE", "EndProcedure": "ENDPROCEDURE",
+                     "RETURN": "RETURN", "Return": "RETURN",
+                     "Repeat": "REPEAT", "REPEAT": "REPEAT", "Until": "UNTIL", "UNTIL": "UNTIL"}
         positions, pos, braces, math = [], 0, 0, None
         while pos < len(text):
             if text[pos] == "\\":
@@ -1693,7 +1884,9 @@ class Tree:
                     math = ")"
                 elif name == math:
                     math = None
-                elif name in canonical and braces == 0 and not math:
+                elif name in {"Repeat", "REPEAT", "Until", "UNTIL"} and braces == 0 and not math and name in self.gatherer.macros:
+                    raise ParseError("Locally redefined algorithmic control: " + name)
+                elif name in canonical and braces == 0 and not math and not (name in {"Return", "RETURN"} and name in self.gatherer.macros):
                     positions.append((pos, end, canonical[name]))
                 pos = end
             else:
@@ -1702,16 +1895,43 @@ class Tree:
                 if not math:
                     braces += int(text[pos] == "{") - int(text[pos] == "}")
                 pos += 1
-        if not positions or text[:positions[0][0]].strip():
+        prefix = text[:positions[0][0]] if positions else text
+        harmless = r"\s*(?:(?:\\label\s*\{[^{}]*\}|\\(?:small|footnotesize|scriptsize|normalsize)\b)\s*)*"
+        if not positions or not re.fullmatch(harmless,prefix):
             raise ParseError("Unsupported text before first algorithmic statement")
+        if prefix.strip():
+            self.parse(prefix,parent,depth+1)
         stack, current = [], parent
         self.pseudocode_depth += 1
         try:
             for index, (_, start, name) in enumerate(positions):
                 stop = positions[index + 1][0] if index + 1 < len(positions) else len(text)
                 fragment = text[start:stop]
-                if name in {"STATE", "STATEX", "REQUIRE", "ENSURE"}:
+                if name == "RETURN":
+                    if not fragment.strip():
+                        raise ParseError("Empty algorithmic RETURN")
+                    self.parse(r"\Return " + fragment,current,depth+1)
+                elif name == "REPEAT":
+                    if fragment.strip():
+                        raise ParseError("Unsupported text after algorithmic Repeat")
+                    block = self.add("component", "repeat", current)
+                    stack.append(dict(kind="REPEAT", parent=current, block=block, has_else=False))
+                    if len(stack) > 60:
+                        raise ParseError("Algorithmic nesting exceeds 60")
+                    current = block
+                elif name == "UNTIL":
+                    if not stack or stack[-1]["kind"] != "REPEAT":
+                        raise ParseError("Unbalanced algorithmic UNTIL")
+                    condition, after = group(fragment, 0)
+                    if fragment[after:].strip():
+                        raise ParseError("Unsupported text after algorithmic Until")
+                    until = self.add("component", "until", current)
+                    self.parse(condition, until, depth + 1)
+                    current = stack.pop()["parent"]
+                elif name in {"STATE", "STATEX", "REQUIRE", "ENSURE"}:
                     if not fragment.strip() and name != "STATEX":
+                        if name == "STATE" and index + 1 < len(positions) and positions[index + 1][2] == "RETURN":
+                            continue  # State Return is one statement, not an empty State.
                         raise ParseError("Empty algorithmic " + name)
                     target = self.add("component", name.lower(), current) if name in {"REQUIRE", "ENSURE"} else current
                     self.parse(fragment, target, depth + 1)
@@ -1723,8 +1943,9 @@ class Tree:
                     tail = re.sub(r"\\label\s*\{[^{}]*\}", "", fragment[end:])
                     allowed_tail = re.sub(r"\\hfill\b|:\s*", "", tail)
                     allowed_tail = re.sub(r"\\\\(?:\s*\[[^\]]*\])?", "", allowed_tail)
-                    comment = re.match(r"\s*\\Comment\b", allowed_tail)
-                    if allowed_tail.strip() and not comment:
+                    comment = re.match(r"\s*\\(?:Comment|COMMENT)\b", allowed_tail)
+                    displayed = re.match(r"\s*\\begin\s*\{(?:equation\*?|align\*?|gather\*?)\}",allowed_tail)
+                    if allowed_tail.strip() and not comment and not displayed:
                         raise ParseError("Unsupported text after algorithmic condition")
                     if name == "ELSIF":
                         if not stack or stack[-1]["kind"] != "IF" or stack[-1]["has_else"]:
@@ -1750,10 +1971,11 @@ class Tree:
                 else:
                     tail = re.sub(r"\\label\s*\{[^{}]*\}", "", fragment)
                     spacing_only = bool(re.fullmatch(r"\s*(?:\\setstretch\s*\{(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\}\s*)+", tail))
-                    if (tail.strip() and not spacing_only) or not stack or stack[-1]["kind"] != name[3:]:
+                    linebreak_only = bool(re.fullmatch(r"\s*(?:\\\\(?:\s*\[[^\]]*\])?\s*)*",tail))
+                    if (tail.strip() and not spacing_only and not linebreak_only) or not stack or stack[-1]["kind"] != name[3:]:
                         raise ParseError("Unbalanced algorithmic " + name)
                     current = stack.pop()["parent"]
-                    if spacing_only:
+                    if spacing_only or linebreak_only and tail.strip():
                         self.parse(tail, current, depth + 1)
             if stack:
                 raise ParseError("Unclosed algorithmic control block")
