@@ -7,8 +7,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
 
-from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify
-from .latex import Gatherer, ParseError, citation_keys, command, environment, group, mask_literals, normalize, options, listing_options, resolve_listing_options, box_options, sentences, skip_space, splice_tokens
+from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify, _top_level_bibitems
+from .latex import Gatherer, ParseError, grouped_natbib_keys, literal_length_target, citation_keys, command, environment, group, mask_literals, mask_root_inline_verbatim, normalize, options, listing_options, resolve_listing_options, box_options, sentences, skip_space, splice_tokens
 
 
 LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
@@ -59,6 +59,13 @@ CVPR_ABBREVIATIONS = {"etc": "etc.", "ie": "i.e."}
 VISION_EXAMPLES = {"eg": "e.g.", "ie": "i.e.", "etal": "et al."}
 VISION_PACKAGES = {"cvpr", "iccv", "wacv", "eccvabbrv"}
 
+
+
+
+def literal_layout_glue(value):
+    """A finite dimension plus optional finite stretch/shrink; no TeX execution."""
+    dim = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)"
+    return bool(re.fullmatch(dim + r"(?:\s+plus\s+" + dim + r")?(?:\s+minus\s+" + dim + r")?", value.strip()))
 
 
 def roman_numeral(number):
@@ -123,6 +130,117 @@ def layout_column_spec(spec, argc, gatherer):
         raise ParseError("Custom column type has no alignment column")
 
 
+
+def bibliography_groups(raw, gatherer):
+    """Expose executed bibitems in literal groups and proved font/color wrappers.
+
+    Other command arguments remain opaque, especially unused macro bodies.
+    This projects structure only; source files are never modified.
+    """
+    # Existing BBL style guards own conditional setup and definitions. Do not
+    # change that path or project groups across an unproved conditional.
+    # Leave the established reader entirely unchanged when every literal
+    # marker is already top-level. In particular, harmless BBL declarations
+    # must not become new failures merely because this projection exists.
+    try:
+        markers = _top_level_bibitems(raw)
+    except ParseError:
+        markers = None  # Keep the explicit diagnostic from the projection.
+    if markers is not None and len(markers) == len(re.findall(r"\\bibitem\b", raw)):
+        return raw
+    prefix = ""
+    if re.search(r"\\(?:if[a-zA-Z]*|expandafter|else|fi)\b", raw):
+        markers = _top_level_bibitems(raw)
+        if not markers:
+            return raw
+        prefix, tail = raw[:markers[0][0]], raw[markers[0][0]:]
+        if re.search(r"\\(?:if[a-zA-Z]*|expandafter|else|fi)\b", tail):
+            return raw
+        # Keep the complete setup verbatim for parse_bbl's existing guard.
+        # Only unconditional item text following it is projected.
+        raw = tail
+    fonts = {"small", "footnotesize", "scriptsize", "normalsize", "tiny", "bf", "it", "em", "rm", "sc", "sf", "tt"}
+    wrappers = {"textbf", "textit", "emph", "textrm", "textnormal"}
+    def walk(text, depth=0):
+        if depth > 60:
+            raise ParseError("Bibliography grouping depth exceeds 60")
+        out, cursor = [], 0
+        while cursor < len(text):
+            if text[cursor] == "{":
+                value, end = group(text, cursor)
+                if r"\bibitem" in value:
+                    out.append(walk(value, depth+1))
+                    gatherer.math_aliases_used.add("Bibliography: literal formatting group projected")
+                else:
+                    out.append(text[cursor:end])
+                cursor = end
+                continue
+            if text[cursor] != "\\":
+                out.append(text[cursor]); cursor += 1; continue
+            name, end = command(text, cursor)
+            if name in {"def", "gdef", "edef", "xdef", "let", "newcommand", "renewcommand", "providecommand", "DeclareRobustCommand"}:
+                # Definitions are not reference invocations; do not interpret
+                # their parameter tokens or expose replacement-body bibitems.
+                raise ParseError("Local bibliography declaration requires scoped TeX semantics: " + name)
+            if name == "bibitem":
+                stop = skip_space(text, end)
+                if text[stop:stop+1] == "[":
+                    _, stop = group(text, stop, "[", "]")
+                _, stop = group(text, stop)
+                out.append(text[cursor:stop]); cursor = stop; continue
+            definition = gatherer.macros.get(name)
+            if name in fonts and definition is None:
+                out.append(text[cursor:end]); cursor = end; continue
+            transparent = name in wrappers and definition is None
+            color = name == "textcolor" and definition is None and bool(gatherer.packages & {"color", "xcolor"})
+            if definition and definition[:2] == (1, None):
+                replacement = definition[2].strip()
+                transparent = bool(re.fullmatch(r"\{?\s*\\color\{[A-Za-z]+\}\s*\{?#1\}?\s*\}?", replacement)) and "color" not in gatherer.macros and bool(gatherer.packages & {"color", "xcolor"})
+                color = bool(re.fullmatch(r"\\textcolor\{[A-Za-z]+\}\{#1\}", replacement)) and "textcolor" not in gatherer.macros and bool(gatherer.packages & {"color", "xcolor"})
+                # A common review wrapper appends literal horizontal spacing.
+                # Prove the exact zero-argument alias and literal dimension;
+                # unknown trailing macros or content are never discarded.
+                spacing = re.fullmatch(r"\\textcolor\{[A-Za-z]+\}\{#1\}\s*\\([A-Za-z]+)\{([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:pt|cm|mm|em|ex|in|bp|pc|sp))\}\s*", replacement)
+                if spacing and gatherer.macros.get(spacing[1]) in {
+                        (0, None, r"\hspace"), (0, None, r"\hspace*")}:
+                    color = ("textcolor" not in gatherer.macros and "hspace" not in gatherer.macros
+                             and bool(gatherer.packages & {"color", "xcolor"}))
+            start = skip_space(text, end)
+            if color and definition is None:
+                color_name, start = group(text, start)
+                if not re.fullmatch(r"[A-Za-z]+", color_name):
+                    raise ParseError("Dynamic bibliography color wrapper")
+            start = skip_space(text, start)
+            if (transparent or color) and text[start:start+1] == "{":
+                value, stop = group(text, start)
+                if r"\bibitem" in value:
+                    out.append(walk(value, depth+1))
+                    gatherer.math_aliases_used.add("Bibliography: proved content-preserving wrapper " + name)
+                    cursor = stop; continue
+            if name == "color" and definition is None and gatherer.packages & {"color", "xcolor"}:
+                _, stop = group(text, end)
+                out.append(text[cursor:stop]); cursor = stop; continue
+            if definition == (0, None, r"\color{black}") and "color" not in gatherer.macros and gatherer.packages & {"color", "xcolor"}:
+                out.append(text[cursor:end]); cursor = end; continue
+            # Unknown commands own their immediate balanced arguments. Never
+            # expose a bibitem hidden in a macro definition or an unknown call.
+            stop = end
+            arity = {"href": 2, "url": 1, "path": 1, "doi": 1,
+                     "textbf": 1, "textit": 1, "emph": 1, "textrm": 1, "textnormal": 1,
+                     "textcolor": 2, "bibinfo": 2, "bibfield": 2}.get(name)
+            consumed = 0
+            while arity is None or consumed < arity:
+                probe = skip_space(text, stop)
+                if text[probe:probe+1] not in {"{", "["}:
+                    break
+                opening = text[probe]
+                _, stop = group(text,probe,opening,"}" if opening=="{" else "]")
+                consumed += 1
+            out.append(text[cursor:stop]); cursor = stop
+        return "".join(out)
+    return prefix + walk(raw)
+
+
 def bibliography(gatherer, body):
     entries = []
     pattern = re.compile(r"\\begin\s*\{thebibliography\}")
@@ -155,11 +273,18 @@ def bibliography(gatherer, body):
                 rewritten.append(raw[cursor:stop])
                 cursor = stop
             raw = "".join(rewritten)
+        raw = bibliography_groups(raw, gatherer)
         if re.search(r"\\(?:if[a-zA-Z]*|expandafter|else|fi)\b", raw):
             entries.extend(parse_bbl(r"\begin{thebibliography}{99}" + raw + r"\end{thebibliography}"))
         else:
             entries.extend(parse_bibitems(raw))
         body = body[:match.start()] + "\n" + body[end:]
+    if ("natbib" in gatherer.packages or (gatherer.document_class or "").startswith("revtex")
+            or gatherer.document_class == "aa"):
+        normalized = grouped_natbib_keys(body)
+        if normalized != body:
+            gatherer.math_aliases_used.add("Redundant groups around literal natbib keys removed")
+        body = normalized
     citations = citation_keys(body)
     inline_keys = {e["key"] for e in entries}
     strings = {}
@@ -191,8 +316,10 @@ def bibliography(gatherer, body):
     if needs_bbl and gatherer.missing_bib_resources and not gatherer.bbl_files:
         raise ParseError(gatherer.missing_bib_resources[0]["error"] +
                          "; no .bbl associated with document root")
+    controls = {entry["key"] for entry in entries if entry["entry_type"].lower()=="ieeetranbstctl"}
+    gatherer.bst_control_keys = controls
     # Manually rendered bibitems are included even without a \cite invocation.
-    entries = [e for e in entries if e["provider"].startswith("bibitem") or "*" in citations or e["key"] in citations]
+    entries = [e for e in entries if e["entry_type"].lower()!="ieeetranbstctl" and (e["provider"].startswith("bibitem") or "*" in citations or e["key"] in citations)]
     missing = sorted(set(citations) - {"*"} - {e["key"] for e in entries})
     return body, entries, missing
 
@@ -420,12 +547,77 @@ class Tree:
                 # LaTeX's sentence-space factor: no printable character and
                 # no argument. Keep whitespace and the next token intact.
                 self.layout_metadata.append(dict(command=name))
-            elif name in {"textmu", "lq", "rq", "textasciitilde"} and name not in self.gatherer.macros:
+            elif name in {"textmu", "lq", "rq", "textasciitilde", "texttildelow"} and name not in self.gatherer.macros:
                 # Kernel/textcomp glyphs. Keep tilde as a command because the
                 # normalizer treats a literal ~ as a nonbreaking space.
                 buffer.append({"textmu": "\u00b5", "lq": "\u2018", "rq": "\u2019",
-                               "textasciitilde": r"\textasciitilde{}"}[name])
+                               "textasciitilde": r"\textasciitilde{}", "texttildelow": r"\textasciitilde{}"}[name])
                 end = skip_space(text, end)
+            elif name in {"o", "O", "ss", "i", "j"} and name not in self.gatherer.macros:
+                buffer.append({"o":"\u00f8", "O":"\u00d8", "ss":"\u00df", "i":"\u0131", "j":"\u0237"}[name])
+                end = skip_space(text, end)
+            elif name == "textregistered" and name not in self.gatherer.macros:
+                buffer.append("\u00ae")
+                end = skip_space(text, end)
+            elif name == "dotfill" and name not in self.gatherer.macros:
+                # Keep the leader token, not an invented number of dots/pages.
+                buffer.append(r"\dotfill{}")
+                end = skip_space(text, end)
+            elif name in {"textsmaller", "textlarger"} and "relsize" in self.gatherer.packages and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                steps = None
+                if text[start:start + 1] == "[":
+                    steps, start = group(text, start, "[", "]")
+                    if not re.fullmatch(r"[1-9]", steps):
+                        raise ParseError("Unsupported dynamic relative font size")
+                raw, end = group(text, start)
+                self.layout_metadata.append(dict(command=name, steps=steps))
+                text = splice_tokens(text, pos, raw, end)
+                continue
+            elif name == "space" and name not in self.gatherer.macros:
+                buffer.append(" ")
+                end = skip_space(text, end)
+            elif name == "degree" and "gensymb" in self.gatherer.packages and name not in self.gatherer.macros:
+                buffer.append("\u00b0")
+                end = skip_space(text, end)
+            elif name == "pageref" and name not in self.gatherer.macros:
+                start = end + int(text[end:end + 1] == "*" and "hyperref" in self.gatherer.packages)
+                label, end = group(text, start)
+                if not re.fullmatch(r"[^\\{}\s]+", label):
+                    raise ParseError("Unsupported dynamic page reference")
+                # Page numbers require TeX compilation. Preserve the source
+                # reference exactly, as for ref, rather than inventing a page.
+                buffer.append(text[pos:end])
+            elif name in {"hyperlink", "hypertarget"} and "hyperref" in self.gatherer.packages and name not in self.gatherer.macros:
+                target, start = group(text, end)
+                visible, end = group(text, start)
+                if not target or re.search(r"[\\{}\s]", target):
+                    raise ParseError("Unsupported dynamic hyperlink anchor")
+                self.layout_metadata.append(dict(command=name, anchor=target))
+                text = splice_tokens(text, pos, visible, end)
+                continue
+            elif name == "rotatebox" and self.gatherer.packages & {"graphicx", "graphics"} and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                settings = None
+                if text[start:start + 1] == "[":
+                    settings, start = group(text, start, "[", "]")
+                    if not re.fullmatch(r"\s*origin\s*=\s*[clrtbB]{1,2}\s*", settings):
+                        raise ParseError("Unsupported rotatebox origin/options")
+                angle, start = group(text, start)
+                if not re.fullmatch(r"[+-]?(?:[0-9]{1,4}(?:\.[0-9]+)?|\.[0-9]+)",angle.strip()) or abs(float(angle)) > 3600:
+                    raise ParseError("Unsupported nonliteral rotatebox angle")
+                raw, end = group(text, start)
+                self.layout_metadata.append(dict(command=name, angle=angle, options=settings))
+                text = splice_tokens(text, pos, raw, end)
+                continue
+            elif name == "enlargethispage" and name not in self.gatherer.macros:
+                start = end + int(text[end:end + 1] == "*")
+                length, end = group(text, start)
+                scaled = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\\baselineskip",length.strip())
+                literal = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)",length.strip())
+                if not literal and not (scaled and "baselineskip" not in self.gatherer.macros):
+                    raise ParseError("Unsupported nonliteral page enlargement")
+                self.layout_metadata.append(dict(command=name, length=length))
             elif name in {"strut", "raggedbottom", "leavevmode", "sl"} and name not in self.gatherer.macros:
                 # Strut/mode/font/page-height declarations have no visible
                 # argument. Do not consume the following group or prose.
@@ -435,6 +627,42 @@ class Tree:
                   and (self.gatherer.packages & {"lineno", "linenoaa"}
                        or (self.gatherer.document_class or "").startswith("aastex"))):
                 self.layout_metadata.append(dict(command=name))
+            elif (name == "dataset" and name not in self.gatherer.macros
+                  and (self.gatherer.document_class or "").startswith("aastex")):
+                start = skip_space(text, end)
+                target = None
+                if text[start:start + 1] == "[":
+                    target, start = group(text, start, "[", "]")
+                label, end = group(text, start)
+                original_target = target
+                if target is not None:
+                    if re.fullmatch(r"10\.[0-9]{4,9}/[^\s{}\\]+", target):
+                        target = "https://doi.org/" + target
+                    elif not re.fullmatch(r"https?://[^\s{}\\]+", target):
+                        raise ParseError("Unsupported dynamic AASTeX dataset target")
+                self.layout_metadata.append(dict(command=name, identifier=original_target, target=target, label=label))
+                if target is None:
+                    text = splice_tokens(text, pos, label, end)
+                else:
+                    text = splice_tokens(text, pos, r"\href{" + target + "}{" + label + "}", end)
+                continue
+            elif (name in {"crefname", "Crefname"} and "cleveref" in self.gatherer.packages
+                  and name not in self.gatherer.macros):
+                target, start = group(text, end)
+                singular, start = group(text, start)
+                plural, end = group(text, start)
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", target):
+                    raise ParseError("Unsupported dynamic cleveref name target")
+                if not all(re.fullmatch(r"[A-Za-z .-]+", v) for v in (singular, plural)):
+                    raise ParseError("Unsupported executable cleveref name")
+                self.layout_metadata.append(dict(command=name, target=target, singular=singular, plural=plural))
+            elif (name in {"farcs", "farcm", "fdg"} and name not in self.gatherer.macros
+                  and (self.gatherer.document_class or "").startswith("aastex")):
+                # Fractional angular-unit glyphs carry scientific notation.
+                # Retain the explicit token rather than inventing a number or
+                # replacing its decimal-position convention by an ordinary dot.
+                buffer.append("\\" + name + "{}")
+                end = skip_space(text, end)
             elif name == "textbackslash" and name not in self.gatherer.macros:
                 # Keep a literal glyph as canonical LaTeX, NOT as an active
                 # backslash that could turn the following word into a command.
@@ -503,7 +731,7 @@ class Tree:
                         raise ParseError("Unsupported nonliteral/out-of-range color specification: " + spec)
                 self.layout_metadata.append(dict(command=name, type=kind, color=color, model=model, specification=spec))
             elif (name == "altaffiliation" and name not in self.gatherer.macros
-                  and (self.gatherer.document_class or "").startswith("revtex")):
+                  and ((self.gatherer.document_class or "").startswith("revtex") or (self.gatherer.document_class or "").startswith("aastex"))):
                 if not front_matter or depth != 0 or "".join(buffer).strip():
                     raise ParseError("REVTeX altaffiliation outside front matter is unsupported")
                 start = skip_space(text, end)
@@ -607,6 +835,55 @@ class Tree:
                     raw, end = group(text, start, "[", "]")
                     self.parse(raw, current(), depth + 1)
                 self.layout_metadata.append(dict(command=name))
+            elif name == "firstsection" and self.gatherer.document_class == "vgtc" and name not in self.gatherer.macros:
+                # VGTC's first section is a section before maketitle, not an
+                # independent recursive parse (which would lose later children).
+                text = splice_tokens(text, pos, r"\section", end)
+                continue
+            elif name == "bsp" and self.gatherer.document_class == "mnras" and name not in self.gatherer.macros:
+                self.layout_metadata.append(dict(command=name, meaning="MNRAS typesetting marker"))
+            elif name == "appendixpage" and "appendix" in self.gatherer.packages and name not in self.gatherer.macros:
+                # A separate title page, not the end of the compilation path.
+                # Retain the marker; subsequent real appendix headings are parsed.
+                flush()
+                self.layout_metadata.append(dict(command=name, meaning="appendix title page"))
+            elif name == "nameref" and self.gatherer.packages & {"nameref", "hyperref"} and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                if text[start:start + 1] == "*":
+                    if "hyperref" not in self.gatherer.packages:
+                        raise ParseError("Unverified starred nameref provider")
+                    start += 1
+                label, end = group(text, start)
+                if not re.fullmatch(r"[A-Za-z0-9:_.+/-]+", label):
+                    raise ParseError("Unsupported dynamic name reference")
+                buffer.append(text[pos:end])  # Never invent a referenced title.
+            elif name == "uline" and "ulem" in self.gatherer.packages and name not in self.gatherer.macros:
+                raw, end = group(text, end)
+                text = splice_tokens(text, pos, raw, end)
+                continue
+            elif name == "LinesNumbered" and "algorithm2e" in self.gatherer.packages and name not in self.gatherer.macros:
+                self.layout_metadata.append(dict(command=name, meaning="algorithm line numbering"))
+            elif name == "credit" and self.gatherer.document_class in {"cas-dc", "cas-sc"} and name not in self.gatherer.macros:
+                raw, end = group(text, end)
+                # Like the adjacent CAS author declarations, keep the complete
+                # contribution value and its order in working metadata.
+                self.layout_metadata.append(dict(command=name, arguments=[raw]))
+            elif name == "hrule" and name not in self.gatherer.macros:
+                flush()
+                cursor, dimensions = end, []
+                while True:
+                    start = skip_space(text, cursor)
+                    keyword = re.match(r"(?:width|height|depth)\b", text[start:])
+                    if not keyword:
+                        break
+                    value_start = skip_space(text, start + len(keyword[0]))
+                    value = re.match(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)(?![A-Za-z])", text[value_start:])
+                    if not value:
+                        raise ParseError("Unsupported dynamic hrule dimension")
+                    cursor = value_start + len(value[0])
+                    dimensions.append((keyword[0], value[0]))
+                end = cursor
+                self.layout_metadata.append(dict(command=name, dimensions=dimensions))
             elif name == "backmatter" and name not in self.gatherer.macros:
                 # This phase marker has no text argument and does not end the
                 # document. Keep subsequent headings, notes and appendices.
@@ -657,7 +934,7 @@ class Tree:
                         if key in {"mathescape", "texcl"} and config[key].strip().lower() == "false":
                             continue
                         raise ParseError("Unsupported lstlisting interpretation option: " + key)
-                    allowed = {"language", "frame", "aboveskip", "belowskip", "showstringspaces", "columns", "basicstyle", "numbers", "numberstyle", "keywordstyle", "commentstyle", "stringstyle", "breaklines", "breakatwhitespace", "tabsize", "xleftmargin", "breakindent", "caption", "title", "label", "mathescape", "texcl", "backgroundcolor", "rulecolor", "framerule", "captionpos", "keepspaces"}
+                    allowed = {"language", "frame", "aboveskip", "belowskip", "showstringspaces", "columns", "basicstyle", "numbers", "numberstyle", "keywordstyle", "commentstyle", "stringstyle", "breaklines", "breakatwhitespace", "tabsize", "xleftmargin", "breakindent", "caption", "title", "label", "mathescape", "texcl", "backgroundcolor", "rulecolor", "framerule", "captionpos", "keepspaces", "upquote", "lineskip", "xrightmargin"}
                     unknown = config.keys() - allowed
                     if unknown:
                         raise ParseError("Unsupported lstlisting option: " + sorted(unknown)[0])
@@ -675,6 +952,11 @@ class Tree:
                                     raise ParseError("Unsupported dynamic lstlisting style color: " + key)
                             elif token not in {"small", "footnotesize", "tiny", "scriptsize", "ttfamily", "bfseries", "itshape", "normalfont", "normalsize"}:
                                 raise ParseError("Unsupported executable lstlisting style: " + key)
+                    if "upquote" in config and config["upquote"] not in {"true","false"}:
+                        raise ParseError("Unsupported lstlisting upquote flag")
+                    for padding in {"lineskip","xrightmargin"} & config.keys():
+                        if not literal_layout_glue(config[padding]):
+                            raise ParseError("Unsupported dynamic listing padding: " + padding)
                     if "keepspaces" in config and config["keepspaces"] not in {"true", "false"}:
                         raise ParseError("Unsupported lstlisting keepspaces flag")
                     if "captionpos" in config and config["captionpos"] not in {"t", "b"}:
@@ -691,6 +973,28 @@ class Tree:
                             caption = self.add("component", key, container)
                             self.parse(config[key], caption, depth + 1)
                     self.add("verbatim", r"\begin{lstlisting}" + raw + r"\end{lstlisting}", container, literal=True)
+                elif env == "quoting" and "quoting" in self.gatherer.packages:
+                    if env in self.gatherer.local_environments or optional_title is not None:
+                        raise ParseError("Unsupported/local quoting environment semantics")
+                    container = self.add("component", env, current())
+                    self.parse(raw, container, depth + 1)
+                elif env == "highlights" and self.gatherer.document_class in {"elsarticle", "cas-sc", "cas-dc"}:
+                    if env in self.gatherer.local_environments or optional_title is not None:
+                        raise ParseError("Unsupported/local highlights semantics")
+                    container = self.add("component", env, current())
+                    self.items(raw, container, depth + 1)
+                elif env == "graphicalabstract" and self.gatherer.document_class == "elsarticle":
+                    if env in self.gatherer.local_environments or optional_title is not None:
+                        raise ParseError("Unsupported/local graphical abstract semantics")
+                    container = self.add("component", env, current())
+                    self.parse(raw, container, depth + 1)  # Keep text and figure nodes.
+                elif env in {"sidewaystable", "sidewaystable*"} and ("rotating" in self.gatherer.packages or self.gatherer.document_class == "sn-jnl"):
+                    if env in self.gatherer.local_environments:
+                        raise ParseError("Locally redefined sideways table")
+                    if optional_title is not None and not re.fullmatch(r"[!htbpH ]*", optional_title):
+                        raise ParseError("Unsupported sideways table placement")
+                    self.layout_metadata.append(dict(environment=env, placement=optional_title))
+                    self.add("figure", raw, current())  # Same raw table semantics as table.
                 elif env == "tcolorbox" and "tcolorbox" in self.gatherer.packages:
                     # Only text title and explicit presentation keys. Hooks,
                     # overlays and arbitrary key execution remain unsupported.
@@ -723,14 +1027,25 @@ class Tree:
                         elif key in {"fonttitle", "fontupper", "fontlower"} and value is not None:
                             if self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z]+)",value)):
                                 raise ParseError("Locally redefined tcolorbox font: " + key)
-                            if not re.fullmatch(r"\s*(?:\\(?:bfseries|ttfamily|itshape|small|footnotesize|scriptsize|normalfont)\s*)+",value):
-                                raise ParseError("Unsupported tcolorbox font: " + key)
+                            cursor = 0
+                            while (cursor := skip_space(value, cursor)) < len(value):
+                                if value[cursor] != "\\":
+                                    raise ParseError("Unsupported tcolorbox font: " + key)
+                                token, cursor = command(value, cursor)
+                                if token == "color" and self.gatherer.packages & {"color", "xcolor"}:
+                                    color, cursor = group(value, cursor)
+                                    if not re.fullmatch(r"[A-Za-z0-9!._:-]+", color):
+                                        raise ParseError("Unsupported dynamic tcolorbox font color")
+                                elif token not in {"bfseries", "ttfamily", "itshape", "small", "footnotesize", "scriptsize", "normalfont"}:
+                                    raise ParseError("Unsupported tcolorbox font: " + key)
                         elif key == "width" and value is not None:
                             if self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z]+)",value)):
                                 raise ParseError("Locally redefined tcolorbox width")
                             if not re.fullmatch(r"[0-9.]*\\(?:textwidth|linewidth|columnwidth)|[0-9.]+(?:pt|cm|mm|em|ex)",value):
                                 raise ParseError("Unsupported tcolorbox width")
-                        elif key in {"colback", "colframe", "coltitle", "boxrule", "arc", "left", "right", "top", "bottom", "rounded corners"} and value is not None and re.fullmatch(r"[A-Za-z0-9!._ -]+",value):
+                        elif key == "boxsep" and value is not None and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:pt|cm|mm|em|ex|in|bp|pc|sp)", value):
+                            pass  # Literal interior padding, with no content hook.
+                        elif key in {"colback", "colframe", "coltitle", "colbacktitle", "boxrule", "arc", "left", "right", "top", "bottom", "rounded corners"} and value is not None and re.fullmatch(r"[A-Za-z0-9!._ -]+",value):
                             pass
                         else:
                             raise ParseError("Unsupported tcolorbox key: " + key)
@@ -986,6 +1301,29 @@ class Tree:
                         raise ParseError("Locally redefined algorithm* requires environment semantics")
                     container = self.add("component", env, current())
                     self.parse(raw, container, depth + 1)
+                elif (env == "nolinenumbers" and env not in self.gatherer.local_environments
+                      and (self.gatherer.packages & {"lineno", "linenoaa"}
+                           or (self.gatherer.document_class or "").startswith("aastex"))):
+                    # The scoped environment changes line numbering only.
+                    # Reparse all content, including abstract/math/citations.
+                    self.layout_metadata.append(dict(environment=env))
+                    self.parse(raw, current(), depth + 1)
+                elif (env == "landscape" and self.gatherer.packages & {"lscape", "pdflscape"}
+                      and env not in self.gatherer.local_environments):
+                    self.layout_metadata.append(dict(environment=env))
+                    self.parse(raw, current(), depth + 1)
+                elif (env == "IEEEproof" and self.gatherer.document_class in {"IEEEtran", "IEEEtai", "ieeecolor"}
+                      and env not in self.gatherer.local_environments):
+                    container = self.add("component", "proof", current())
+                    if optional_title is not None:
+                        self.parse(optional_title, container, depth + 1)
+                    self.parse(raw, container, depth + 1)
+                elif (env == "subequations" and self.gatherer.packages & {"amsmath", "mathtools"}
+                      and env not in self.gatherer.local_environments):
+                    if optional_title is not None:
+                        raise ParseError("Unsupported subequations options")
+                    container = self.add("component", env, current())
+                    self.parse(raw, container, depth + 1)
                 elif env in CONTAINERS or env in self.gatherer.theorems:
                     if env in {"appendices", "appendix"} and depth == 0:
                         # An explicit appendix division is not a child of the
@@ -1154,22 +1492,27 @@ class Tree:
                 if not re.fullmatch(r"[+\-0-9.eE]+", value.strip()):
                     raise ParseError("Unsupported nonliteral siunitx number")
                 buffer.append(text[pos:end])  # Preserve formatting rather than guess a locale.
-            elif name == "SI" and "siunitx" in self.gatherer.packages and name not in self.gatherer.macros:
+            elif name in {"SI", "qty"} and "siunitx" in self.gatherer.packages and name not in self.gatherer.macros and (name != "qty" or "physics" not in self.gatherer.packages):
                 # As with num, retain the source quantity rather than guess
                 # locale, unit spelling or package rendering options. Consume
                 # its balanced syntax as one token so unit macros are not
                 # mistaken for independent prose commands.
                 start = options(text, end)
+                if name == "qty" and text[skip_space(text, end):start].strip() not in {"", "[mode=text]", "[mode=math]"}:
+                    raise ParseError("Unsupported siunitx qty options")
                 value, start = group(text, start)
-                start = options(text, start)  # optional pre-unit (siunitx v2)
+                if name == "SI":
+                    start = options(text, start)  # optional pre-unit (siunitx v2)
                 unit, end = group(text, start)
                 if not re.fullmatch(r"[+\-0-9.eE()]+", value.strip()) or not re.search(r"[0-9]", value):
                     raise ParseError("Unsupported nonliteral siunitx quantity")
 
                 if any(token not in SI_UNIT_COMMANDS for token in re.findall(r"\\([A-Za-z@]+|.)", unit)):
                     raise ParseError("Unsupported siunitx unit; preserve source for interpretation: " + unit)
+                if name == "qty" and self.gatherer.macros.keys() & set(re.findall(r"\\([A-Za-z@]+)", unit)):
+                    raise ParseError("Locally redefined siunitx quantity unit")
                 buffer.append(text[pos:end])
-                self.layout_metadata.append(dict(command="SI", number=value, unit=unit, normalization="source_quantity_retained"))
+                self.layout_metadata.append(dict(command=name, number=value, unit=unit, normalization="source_quantity_retained"))
             elif name == "si" and "siunitx" in self.gatherer.packages and name not in self.gatherer.macros:
                 start = options(text, end)
                 unit, end = group(text, start)
@@ -1182,6 +1525,26 @@ class Tree:
                 flush()
                 container = self.add("component", {"KwIn":"input", "KwOut":"output", "KwResult":"result", "KwRet":"return"}[name], current())
                 self.parse(raw, container, depth + 1)
+            elif self.algorithm2e_depth and name in {"KwTo", "Return"} and name not in self.gatherer.macros:
+                buffer.append("to " if name == "KwTo" else "return ")
+                end = skip_space(text, end)
+            elif self.algorithm2e_depth and name in {"tcp", "tcc"} and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                star = text[start:start + 1] == "*"
+                start += int(star)
+                start = skip_space(text, start)
+                alignment = None
+                if text[start:start + 1] == "[":
+                    if not star:
+                        raise ParseError("Algorithm comment alignment requires starred form")
+                    alignment, start = group(text, start, "[", "]")
+                    if alignment not in {"h", "f", "r", "l"}:
+                        raise ParseError("Unsupported algorithm comment alignment")
+                raw, end = group(text, start)
+                flush()
+                container = self.add("component", "comment", current())
+                self.parse(raw, container, depth + 1)
+                self.layout_metadata.append(dict(command=name, starred=star, alignment=alignment))
             elif self.algorithm2e_depth and name == "Repeat" and name not in self.gatherer.macros:
                 condition, start = group(text, end)
                 body, end = group(text, start)
@@ -1192,12 +1555,28 @@ class Tree:
                 self.parse(condition, until, depth + 1)
             elif self.algorithm2e_depth and name in {"For", "ForEach", "While", "If", "lIf", "ElseIf", "Else"} and name not in self.gatherer.macros:
                 condition = None
-                start = end
+                start = skip_space(text, end)
+                attached = None
+                if text[start:start + 1] == "(":
+                    opening = start
+                    cursor = skip_space(text, start + 1)
+                    comment, cursor = command(text, cursor)
+                    if comment not in {"tcp", "tcc"} or comment in self.gatherer.macros:
+                        raise ParseError("Unsupported algorithm side comment")
+                    cursor += int(text[cursor:cursor + 1] == "*")
+                    cursor = options(text, cursor)
+                    _, cursor = group(text, cursor)
+                    closing = skip_space(text, cursor)
+                    if text[closing:closing + 1] != ")":
+                        raise ParseError("Unsupported algorithm side comment boundary")
+                    attached, start = text[opening + 1:closing], closing + 1
                 if name != "Else":
                     condition, start = group(text, start)
                 raw, end = group(text, start)
                 flush()
                 container = self.add("component", name.lower(), current())
+                if attached is not None:
+                    self.parse(attached, container, depth + 1)
                 if condition is not None:
                     self.parse(condition, container, depth + 1)
                 self.parse(raw, container, depth + 1)
@@ -1403,10 +1782,27 @@ class Tree:
             elif (name == "IEEEPARstart" and name not in self.gatherer.macros
                   and self.gatherer.document_class in {"IEEEtran", "ieeetran", "IEEEtai", "ieeecolor"}):
                 first, start = group(text, end)
-                rest, end = group(text, start)
-                if len(first) != 1 or not first.isalpha():
+                start = skip_space(text, start)
+                if text[start:start + 1] == "{":
+                    rest, end = group(text, start)
+                elif re.fullmatch(r"[A-Za-z0-9]", text[start:start + 1]):
+                    # A TeX undelimited argument can be one literal token.
+                    # Consume exactly that token, never the rest of the word.
+                    rest, end = text[start], start + 1
+                else:
+                    raise ParseError("Unsupported nonliteral IEEEPARstart continuation")
+                if not re.fullmatch(r"[A-Za-z0-9]", first):
                     raise ParseError("Unsupported nonliteral IEEEPARstart initial")
                 text = text[:pos] + first + rest + text[end:]
+                continue
+            elif (name == "IEEEraisesectionheading" and name not in self.gatherer.macros
+                  and self.gatherer.document_class == "IEEEtran"):
+                raw, end = group(text, end)
+                if not re.match(r"\s*\\(?:section|subsection|subsubsection)(?![A-Za-z])", raw):
+                    raise ParseError("IEEE raised heading requires an explicit section")
+                # Splice into the same parse context so following content uses
+                # that section as its parent, not a fresh recursive context.
+                text = splice_tokens(text, pos, raw, end)
                 continue
             elif (name == "ccsdesc" and name not in self.gatherer.macros
                   and self.gatherer.document_class == "acmart"):
@@ -1426,6 +1822,68 @@ class Tree:
                     if not re.fullmatch(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", value.strip()) or float(value) <= 0:
                         raise ParseError("Unsupported nonliteral line spacing: " + value)
                 self.layout_metadata.append(dict(command=name, value=value))
+            elif (name == "theoremstyle" and name not in self.gatherer.macros
+                  and ("amsthm" in self.gatherer.packages or self.gatherer.document_class in {"amsart","amsproc","amsbook"})):
+                style, end = group(text, end)
+                if style.strip() not in {"plain","definition","remark"}:
+                    raise ParseError("Unknown/dynamic theoremstyle: " + style)
+                self.layout_metadata.append(dict(command=name, style=style))
+            elif (name == "settopmatter" and self.gatherer.document_class == "acmart"
+                  and name not in self.gatherer.macros):
+                if depth != 0:
+                    raise ParseError("Nested ACM settopmatter needs scope semantics")
+                settings, end = group(text, end)
+                for key, value in listing_options(settings, ordered=True):
+                    valid = (key in {"printacmref","printccs","printfolios"} and value in {"true","false"}
+                             or key == "authorsperrow" and value is not None and re.fullmatch(r"[1-9][0-9]?",value))
+                    if not valid:
+                        raise ParseError("Unsupported ACM topmatter setting: " + key)
+                self.layout_metadata.append(dict(command=name, options=settings))
+            elif (name in {"IEEEpubid","IEEEpubidadjcol","IEEEdisplaynontitleabstractindextext"}
+                  and self.gatherer.document_class == "IEEEtran" and name not in self.gatherer.macros):
+                if name == "IEEEpubid":
+                    raw, end = group(text, end)
+                    if "copyright" in self.gatherer.macros:
+                        raise ParseError("Local IEEE publication notice glyph")
+                    flush()
+                    notice = self.add("component","publication notice",current())
+                    # Replace the exact kernel glyph token only, preserving
+                    # longer commands, escaped backslashes and literal text.
+                    probe = mask_root_inline_verbatim(mask_literals(raw))
+                    edits, cursor = [], 0
+                    while cursor < len(probe):
+                        if probe[cursor] != "\\":
+                            cursor += 1
+                            continue
+                        token, stop = command(probe, cursor)
+                        if token == "copyright":
+                            edits.append((cursor, stop))
+                        cursor = stop
+                    display = raw
+                    for start, stop in reversed(edits):
+                        display = display[:start] + "\u00a9" + display[stop:]
+                    self.parse(display,notice,depth+1)
+                    self.layout_metadata.append(dict(command=name, arguments=[raw]))
+                elif name == "IEEEdisplaynontitleabstractindextext":
+                    # The existing IEEEtitleabstractindextext handler emits the
+                    # stored abstract once. Moving its display is layout only.
+                    if getattr(self, "_ieee_display_seen", False):
+                        raise ParseError("Repeated IEEE abstract display needs placement semantics")
+                    self._ieee_display_seen = True
+                    self.layout_metadata.append(dict(command=name, stored_abstract_emitted_once=True))
+                else:
+                    self.layout_metadata.append(dict(command=name))
+            elif (name == "say" and "dirtytalk" in self.gatherer.packages
+                  and name not in self.gatherer.macros):
+                raw, end = group(text, end)
+                if re.search(r"\\say\b",raw):
+                    raise ParseError("Nested dirtytalk quotes need quote-depth semantics")
+                text = splice_tokens(text,pos,"\u201c"+raw+"\u201d",end)
+                continue
+            elif (name in {"DontPrintSemicolon","PrintSemicolon","SetNoFillComment","SetAlgoNoLine"}
+                  and self.algorithm2e_depth and "algorithm2e" in self.gatherer.packages
+                  and name not in self.gatherer.macros):
+                self.layout_metadata.append(dict(command=name))
             elif (name == "SetAlgoLined" and name not in self.gatherer.macros
                   and "algorithm2e" in self.gatherer.packages):
                 self.layout_metadata.append(dict(command=name))
@@ -1460,11 +1918,11 @@ class Tree:
                   and (self.gatherer.document_class or "").startswith("aastex")):
                 value, end = group(text, end)
                 self.layout_metadata.append(dict(command=name, arguments=[value]))
-            elif name in {"acknowledgments", "acks"} and name not in self.gatherer.macros:
+            elif (name in {"acknowledgments", "acks"} or name == "acknowledgements" and (self.gatherer.document_class or "").startswith("revtex")) and name not in self.gatherer.macros:
                 flush()
                 start = skip_space(text, end)
-                declaration = (name == "acknowledgments" and text[start:start + 1] != "{"
-                               and (self.gatherer.document_class or "").startswith("revtex"))
+                declaration = (name in {"acknowledgments", "acknowledgements"} and text[start:start + 1] != "{"
+                               and ((self.gatherer.document_class or "").startswith("revtex") or (self.gatherer.document_class or "").startswith("aastex")))
                 if not declaration:
                     raw, end = group(text, end)
                 if depth == 0:
@@ -1496,12 +1954,19 @@ class Tree:
                 if counter not in {"equation", "figure", "table"} or within not in LEVELS:
                     raise ParseError("Unsupported counter dependency: " + counter + "/" + within)
                 self.layout_metadata.append(dict(command=name, counter=counter, within=within))
+            elif (name == "bstctlcite" and self.gatherer.document_class in {"IEEEtran","IEEEtai","ieeecolor"}
+                  and name not in self.gatherer.macros):
+                keys,end = group(text,end)
+                requested = citation_keys(r"\cite{"+keys+"}")
+                if set(requested) - getattr(self.gatherer,"bst_control_keys",set()):
+                    raise ParseError("IEEE bibliography control entries unavailable: " + keys)
+                self.layout_metadata.append(dict(command=name, control_keys=requested))
             elif name == "setlength" and name not in self.gatherer.macros:
-                target, start = group(text, end)
+                target, start = literal_length_target(text, end)
                 value, end = group(text, start)
                 known = {r"\parskip", r"\parindent", r"\tabcolsep", r"\columnsep",
-                         r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep",
-                         r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep", r"\baselineskip"}
+                         r"\abovedisplayskip", r"\belowdisplayskip", r"\abovedisplayshortskip", r"\belowdisplayshortskip", r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep",
+                         r"\spaceskip", r"\intextsep", r"\topsep", r"\partopsep", r"\abovecaptionskip", r"\belowcaptionskip", r"\headheight", r"\footskip", r"\jot", r"\bibsep", r"\itemsep", r"\leftskip", r"\parsep", r"\baselineskip"}
                 if target.strip().removeprefix("\\") in self.layout_lengths:
                     literal = re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip())
                     scaled = re.fullmatch(r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))\s*\\(textwidth|linewidth|columnwidth)", value.strip())
@@ -1510,9 +1975,11 @@ class Tree:
                     self.layout_metadata.append(dict(command=name, target=target, value=value))
                     pos = end
                     continue
+                if target.strip().lstrip("\\") in self.gatherer.macros:
+                    raise ParseError("Locally redefined layout register: " + target)
                 scaled_baseline = (target.strip() == r"\baselineskip" and re.fullmatch(
                     r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*\\baselineskip", value.strip()))
-                if not scaled_baseline and (target.strip() not in known or not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip())):
+                if not scaled_baseline and (target.strip() not in known or not literal_layout_glue(value)):
                     raise ParseError("Unsupported nonliteral layout length assignment: " + target + "=" + value)
                 self.layout_metadata.append(dict(command=name, target=target, value=value))
             elif name in {"newline", "indent"} and name not in self.gatherer.macros:
@@ -1613,7 +2080,7 @@ class Tree:
                 value, end = group(text, start)
                 known = {r"\linewidth", r"\textwidth", r"\columnwidth", r"\tabcolsep",
                          r"\parskip", r"\parindent", r"\itemsep", r"\parsep", r"\columnsep",
-                         r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep", r"\bibsep"}
+                         r"\textheight", r"\topmargin", r"\baselineskip", r"\textfloatsep", r"\floatsep", r"\dbltextfloatsep", r"\bibsep"}
                 if (target.strip().removeprefix("\\") in self.gatherer.macros
                         or target.strip() not in known or not re.fullmatch(
                         r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip())):
@@ -1818,10 +2285,21 @@ class Tree:
                 start = skip_space(text, end)
                 if text[start:start + 1] == "{":
                     value, end = group(text, start)
+                elif text[start:start + 1] == "\\":
+                    base, end = command(text, start)
+                    if base not in {"i", "j"} or base in self.gatherer.macros:
+                        raise ParseError("Unsupported control-word text accent")
+                    value = "\\" + base
                 else:
                     value, end = text[start:start + 1], start + 1
                 if value.strip() in {r"\i", r"\j"}:
+                    if value.strip()[1:] in self.gatherer.macros:
+                        raise ParseError("Locally redefined dotless accent base")
                     value = {r"\i": "i", r"\j": "j"}[value.strip()]
+                if value == "" and name == "^":
+                    buffer.append(r"\textasciicircum{}")
+                    pos = end
+                    continue
                 if len(value) != 1:
                     raise ParseError("Unsupported compound text accent")
                 mark = {"'": "\u0301", '"': "\u0308", chr(96): "\u0300", "^": "\u0302",
@@ -1845,7 +2323,7 @@ class Tree:
                 end = start
             elif name in {"%", "&", "_", "#", "$", "{", "}"}:
                 buffer.append("\\" + name)
-            elif name in {" ", ",", ";", ":", "!", "\\", "\n", "/"}:
+            elif name in {" ", "\t", "\r", ",", ";", ":", "!", "\\", "\n", "/"}:
                 if name == "\\":
                     end += int(text[end:end + 1] == "*")
                     end = options(text, end)
@@ -1896,7 +2374,7 @@ class Tree:
                     braces += int(text[pos] == "{") - int(text[pos] == "}")
                 pos += 1
         prefix = text[:positions[0][0]] if positions else text
-        harmless = r"\s*(?:(?:\\label\s*\{[^{}]*\}|\\(?:small|footnotesize|scriptsize|normalsize)\b)\s*)*"
+        harmless = r"\s*(?:(?:\\label\s*\{[^{}]*\}|\\(?:small|footnotesize|scriptsize|normalsize|medskip|smallskip|bigskip)\b)\s*)*"
         if not positions or not re.fullmatch(harmless,prefix):
             raise ParseError("Unsupported text before first algorithmic statement")
         if prefix.strip():
@@ -1909,8 +2387,9 @@ class Tree:
                 fragment = text[start:stop]
                 if name == "RETURN":
                     if not fragment.strip():
-                        raise ParseError("Empty algorithmic RETURN")
-                    self.parse(r"\Return " + fragment,current,depth+1)
+                        self.add("sentence", "return", current)
+                    else:
+                        self.parse(r"\Return " + fragment,current,depth+1)
                 elif name == "REPEAT":
                     if fragment.strip():
                         raise ParseError("Unsupported text after algorithmic Repeat")
@@ -1932,6 +2411,14 @@ class Tree:
                     if not fragment.strip() and name != "STATEX":
                         if name == "STATE" and index + 1 < len(positions) and positions[index + 1][2] == "RETURN":
                             continue  # State Return is one statement, not an empty State.
+                        if name == "STATE" and any(
+                                other in {"STATE", "RETURN"} and text[after:(positions[j + 1][0] if j + 1 < len(positions) else len(text))].strip()
+                                for j, (_, after, other) in enumerate(positions)):
+                            # A blank item within a substantive algorithm is a
+                            # numbered spacer. An entirely empty algorithm remains
+                            # invalid, preserving the earlier rejection policy.
+                            self.layout_metadata.append(dict(environment="algorithmic", command=name, blank_line=True))
+                            continue
                         raise ParseError("Empty algorithmic " + name)
                     target = self.add("component", name.lower(), current) if name in {"REQUIRE", "ENSURE"} else current
                     self.parse(fragment, target, depth + 1)
@@ -2088,8 +2575,8 @@ class Tree:
                     if not re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)", value.strip()):
                         raise ParseError("Unsupported text before first list item: nonliteral vertical spacing")
                 elif name == "setlength":
-                    target, cursor = group(prefix, cursor)
-                    if target.strip() not in {r"\itemsep", r"\leftskip", r"\parskip", r"\parsep"}:
+                    target, cursor = literal_length_target(prefix, cursor)
+                    if target.strip() not in {r"\itemsep", r"\leftskip", r"\parskip", r"\parsep", r"\partopsep", r"\topsep"}:
                         raise ParseError("Unsupported text before first list item: layout target " + target)
                     _, cursor = group(prefix, cursor)
                 elif name in {"itemsep", "leftskip"}:

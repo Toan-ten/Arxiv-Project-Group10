@@ -281,6 +281,13 @@ def _bbl_setup(text):
             continue
         if name == "def":
             target, pos = command(text, skip_space(text, pos))
+            if target == "cprime":
+                replacement, pos = group(text, pos)
+                if replacement.strip() != "$'$":
+                    raise ParseError("Unsupported .bbl cprime definition")
+                # Static prime glyph only. Keep source occurrences in entry
+                # raw/fields; no item boundaries or author/title are discarded.
+                continue
             if target.startswith("mn@"):
                 brace = text.find("{", pos)
                 if brace < 0 or len(text[pos:brace]) > 120:

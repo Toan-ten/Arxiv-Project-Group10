@@ -19,6 +19,18 @@ def group(text, pos, opening="{", closing="}"):
     pos += 1
     while pos < len(text):
         if text[pos] == "\\":
+            literal = re.match(r"\\verb(?![A-Za-z])", text[pos:])
+            if literal:
+                cursor = pos + literal.end()
+                cursor += int(text[cursor:cursor + 1] == "*")
+                delimiter = text[cursor:cursor + 1]
+                if not delimiter or delimiter.isspace() or delimiter.isalpha() or not 33 <= ord(delimiter) <= 126:
+                    raise ParseError("Malformed inline literal in balanced argument")
+                stop = text.find(delimiter, cursor + 1)
+                if stop < 0 or "\n" in text[cursor + 1:stop] or "\r" in text[cursor + 1:stop]:
+                    raise ParseError("Unclosed inline literal in balanced argument")
+                pos = stop + 1
+                continue
             pos += 2
             continue
         if text[pos] == opening:
@@ -45,6 +57,44 @@ def options(text, pos):
         _, pos = group(text, pos, "[", "]")
     return pos
 
+
+
+
+def literal_length_target(text, pos):
+    """Kernel setlength's first argument: one literal register token or group."""
+    start = skip_space(text,pos)
+    if text[start:start+1] == "{":
+        return group(text,start)
+    if text[start:start+1] == "\\":
+        name,end = command(text,start)
+        if re.fullmatch(r"[A-Za-z]+",name):
+            return "\\"+name,end
+    raise ParseError("Expected literal layout register")
+
+def grouped_natbib_keys(text):
+    """Remove only redundant groups around individual literal natbib keys."""
+    probe = mask_root_inline_verbatim(mask_literals(text));edits=[];cursor=0
+    while cursor < len(probe):
+        if probe[cursor] != "\\":
+            cursor += 1;continue
+        name,end = command(probe,cursor);cursor=end
+        if not re.fullmatch(r"(?:[cC]ite(?:p|t|alp|alt|author|year|yearpar|num|s)?|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)",name):
+            continue
+        end += int(text[end:end+1]=="*")
+        start=options(text,options(text,end))
+        raw,stop=group(text,start);keys=[];changed=False
+        for token in raw.split(","):
+            key=token.strip()
+            if key.startswith("{"):
+                inner,tail=group(key,0)
+                if tail!=len(key) or not re.fullmatch(r"[^{}\s\\,*]+(?: [^{}\s\\,*]+)*",inner):
+                    raise ParseError("Unsupported grouped citation key: "+repr(key))
+                key=inner;changed=True
+            keys.append(key)
+        if changed:edits.append((start,stop,"{"+",".join(keys)+"}"))
+        cursor=stop
+    for start,stop,value in reversed(edits):text=text[:start]+value+text[stop:]
+    return text
 
 
 def citation_keys(text):
@@ -312,22 +362,33 @@ def supplement_evidence(probe, *, title_pattern=None):
     def explicit_role(label):
         if title_pattern is not None:
             return phrase.search(label)
-        # Normalization may leave a nested textbf wrapper, whose presentation
-        # semantics are known and whose redefinition is refused below. An
-        # arbitrary macro can discard its argument, so its text is not proof.
-        cursor = 0
+
+        # Prove the role label itself, not the scientific title that follows.
+        # Unknown commands before the role can swallow it and remain unsafe.
+        pieces, cursor = [], 0
         while cursor < len(label):
             if label[cursor] == "\\":
-                name,cursor = command(label,cursor)
-                if name not in {"textbf", "\\"}:
+                name, end = command(label, cursor)
+                pieces.append(" " if name == " " else label[cursor:end])
+                cursor = end
+            else:
+                pieces.append(label[cursor]); cursor += 1
+        visible = "".join(pieces).replace("{", " ").replace("}", " ")
+        boundary = r"(?:^|[:\u2013\u2014]|\s-\s|\\\\)\s*(?:[-(]\s*)?"
+        ending = r"(?:[\s.})]*$|\s+(?:for|to|supporting\s+the\s+article)\b|\s*[:\u2013\u2014)]|\s*-\s*$|\s*\\\\)"
+        match = re.search(boundary + "(?:" + phrase.pattern + ")" + ending, visible, re.I)
+        if not match:
+            return None
+        cursor = 0
+        while cursor < match.end():
+            if visible[cursor] == "\\":
+                name, cursor = command(visible, cursor)
+                if name not in {"textbf", "\\", " ", "protect"}:
                     return None
             else:
                 cursor += 1
-        # A complete label, a label for a named main paper, or a label separated
-        # from the article title. Incidental topic phrases are not role evidence.
-        boundary = r"(?:^|[:\u2013\u2014]|\s-\s|\\\\)\s*"
-        ending = r"(?:[\s.{}]*$|\s+(?:for|to)\b|\s*[:\u2013\u2014])"
-        return re.search(boundary + "(?:" + phrase.pattern + ")" + ending, label, re.I)
+        return match
+
 
     try:
         while pos < len(probe):
@@ -349,7 +410,7 @@ def supplement_evidence(probe, *, title_pattern=None):
                 if probe[pos:pos + 1] == "=":
                     pos = skip_space(probe, pos + 1)
                 source, pos = command(probe, pos)
-                role_commands = {"title", "subtitle", "section", "chapter", "Large", "LARGE", "huge", "Huge", "textbf", "documentclass", "begin", "end", "let"}
+                role_commands = {"title", "subtitle", "section", "chapter", "Large", "LARGE", "huge", "Huge", "textbf", "protect", "documentclass", "begin", "end", "let"}
                 if target in role_commands or source in {"csname", "expandafter"}:
                     return []
                 continue
@@ -360,7 +421,7 @@ def supplement_evidence(probe, *, title_pattern=None):
                     return []  # Parameterized definitions need TeX semantics.
                 value, pos = group(probe, pos)
                 if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE",
-                              "huge", "Huge", "textbf", "documentclass", "begin", "end"} or "\\" in value:
+                              "huge", "Huge", "textbf", "protect", "documentclass", "begin", "end"} or "\\" in value:
                     return []
                 continue  # Literal metadata, e.g. CTeXPreproc, cannot change roles.
             if name.startswith("if") or name in {"else", "fi", "edef", "xdef", "catcode"}:
@@ -374,7 +435,7 @@ def supplement_evidence(probe, *, title_pattern=None):
                     target = target.strip().lstrip("\\")
                 else:
                     target, pos = command(probe, pos)
-                if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE", "huge", "Huge", "textbf"}:
+                if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE", "huge", "Huge", "textbf", "protect"}:
                     return []
                 pos = options(probe, options(probe, pos))
                 _, pos = group(probe, pos)
@@ -951,9 +1012,9 @@ class Gatherer:
             encoding = "utf-8"
         except UnicodeDecodeError:
             lexical = mask_literals(strip_comments(raw.decode("latin-1")))
-            declared = re.search(r"\\usepackage\[(?:latin1|ansinew)\]\{inputenc\}", lexical)
+            declared = re.search(r"\\usepackage\s*\[\s*(?:latin1|ansinew)\s*\]\s*\{\s*inputenc\s*\}", lexical)
             if declared:
-                encoding = "cp1252" if "[ansinew]" in declared[0] else "latin-1"
+                encoding = "cp1252" if "ansinew" in declared[0] else "latin-1"
                 text = raw.decode(encoding)
             elif comments:
                 # Latin-1 is only a reversible byte-to-character mapping for
@@ -1151,6 +1212,18 @@ class Gatherer:
                 self.condition_symbols[macro] = (not scope_depth and not self.environment_depth
                                                   and name in {"def", "gdef"})
                 out.append(" ")
+            elif (name in self.macros and self.macros[name][:2] == (0, None)
+                  and not scope_depth and self.condition_symbols.get(name) is True
+                  and re.fullmatch(r"\\(?:begin|end)\s*\{(?:subequations|enumerate|proof)\}(?:\\medskip)?",
+                                   self.macros[name][2].strip())):
+                # Project an already-defined, unscoped, zero-argument boundary
+                # at its actual invocation. Never scan ahead using a later
+                # definition, expand arbitrary payload, or drop a spacing tail.
+                replacement = self.macros[name][2].strip()
+                boundary = re.match(r"\\(begin|end)", replacement)[1]
+                self.environment_depth += 1 if boundary == "begin" else -1
+                out.append(replacement)
+                self.math_aliases_used.add("Literal environment boundary alias: " + name + " -> " + replacement)
             elif (name in self.macros and self.macros[name][:2] == (0, None)
                   and re.fullmatch(r"\\(?:begin|end)\s*\{(?:equation\*?|eqnarray\*?|align\*?|alignat\*?|gather\*?|multline\*?|displaymath)\}", self.macros[name][2].strip())):
                 # Resolve only explicit zero-argument aliases of math delimiters
@@ -1698,12 +1771,14 @@ class Gatherer:
                 theorem, cursor = group(preamble, cursor)
                 if not re.fullmatch(r"[A-Za-z]+", theorem):
                     raise ParseError("Unsupported dynamic declaretheorem name")
-                for setting in (settings or "").split(","):
-                    if not setting.strip():
-                        continue
-                    pair = re.fullmatch(r"\s*(name|style|numberwithin|sibling|numbered|sharenumber|parent)\s*=\s*([A-Za-z][A-Za-z0-9 -]*)\s*", setting)
-                    if not pair:
-                        raise ParseError("Unsupported declaretheorem option/hook: " + setting)
+
+                for key, value in listing_options(settings or "", ordered=True):
+                    if key in {"refname", "Refname"}:
+                        if value is None or not re.fullmatch(r"\s*[A-Za-z][A-Za-z -]*\s*,\s*[A-Za-z][A-Za-z -]*\s*", value):
+                            raise ParseError("Unsupported declaretheorem option/hook: " + key)
+                    elif (key not in {"name", "style", "numberwithin", "sibling", "numbered", "sharenumber", "parent", "numberlike"}
+                          or value is None or not re.fullmatch(r"[A-Za-z][A-Za-z0-9 -]*", value)):
+                        raise ParseError("Unsupported declaretheorem option/hook: " + key)
                 self.theorems.add(theorem)
                 scan = cursor
         self.local_environments |= set(re.findall(
@@ -1756,7 +1831,17 @@ def normalize(text, aliases=None, *, inline=True):
             keys = [aliases.get(k.strip(), k.strip()) for k in m[2].split(",")]
             return m[1] + "{" + ",".join(dict.fromkeys(keys)) + "}"
         text = re.sub(r"(\\(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)\*?(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}", cite, text)
-    text = text.replace("~", " ")
+    pieces, cursor = [], 0
+    while cursor < len(text):
+        if text[cursor] == "\\" and cursor + 1 < len(text):
+            if text[cursor + 1].isspace() and not text[cursor + 2:].strip():
+                pieces.append(" ")
+            else:
+                pieces.append(text[cursor:cursor+2])
+            cursor += 2
+        else:
+            pieces.append(text[cursor]); cursor += 1
+    text = "".join(pieces).replace("~", " ")
     return re.sub(r"\s+", " ", text).strip()
 
 
