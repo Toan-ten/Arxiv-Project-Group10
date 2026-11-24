@@ -34,6 +34,7 @@ DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering
         "bf", "it", "tt", "sf", "onecolumn", "makeatletter", "makeatother",
         "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily"}
 DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagestyle", "index",
+                 "refstepcounter",
                  "vspace", "hspace", "addcontentsline", "setcounter", "addtocounter",
                  "title", "author", "affiliation", "institute", "address", "email",
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize"}
@@ -832,6 +833,46 @@ class Tree:
                 buffer.append({"textmu": "\u00b5", "lq": "\u2018", "rq": "\u2019",
                                "textasciitilde": r"\textasciitilde{}", "texttildelow": r"\textasciitilde{}"}[name])
                 end = skip_space(text, end)
+            elif name == "o" and name not in self.gatherer.macros:
+                buffer.append("ø")
+                end = skip_space(text, end)
+            elif name == "O" and name not in self.gatherer.macros:
+                buffer.append("Ø")
+                end = skip_space(text, end)
+            elif name == "futurelet":
+                pos2 = end
+                for _ in range(3):
+                    pos2 = skip_space(text, pos2)
+                    if pos2 >= len(text):
+                        break
+                    if text[pos2:pos2+1] == "\\":
+                        import re as _re
+                        m = _re.match(r"\\([A-Za-z]+|.)", text[pos2:])
+                        if m:
+                            pos2 += m.end()
+                        else:
+                            pos2 += 1
+                    else:
+                        pos2 += 1
+                end = pos2
+                buffer.append(" ")
+            elif name == "futurelet":
+                pos2 = end
+                for _ in range(3):
+                    pos2 = skip_space(text, pos2)
+                    if pos2 >= len(text):
+                        break
+                    if text[pos2:pos2+1] == "\\":
+                        import re as _re
+                        m = _re.match(r"\\([A-Za-z]+|.)", text[pos2:])
+                        if m:
+                            pos2 += m.end()
+                        else:
+                            pos2 += 1
+                    else:
+                        pos2 += 1
+                end = pos2
+                buffer.append(" ")
             elif name in {"o", "O", "ss", "i", "j"} and name not in self.gatherer.macros:
                 buffer.append({"o":"\u00f8", "O":"\u00d8", "ss":"\u00df", "i":"\u0131", "j":"\u0237"}[name])
                 end = skip_space(text, end)
@@ -1691,9 +1732,7 @@ class Tree:
                         raise ParseError("Locally redefined IEEEkeywords requires environment semantics")
                     container = self.add("component", "keywords", current())
                     self.parse(raw, container, depth + 1)
-                elif env == "subequations" and (self.gatherer.packages & {"amsmath", "mathtools"}
-                        or self.gatherer.document_class in {"acmart", "amsart", "amsproc", "amsbook"}
-                        or (self.gatherer.document_class or "").startswith("revtex")):
+                elif env == "subequations":
                     if optional_title is not None:
                         raise ParseError("Unsupported optional argument on " + env)
                     if env in self.gatherer.local_environments:
@@ -1795,8 +1834,7 @@ class Tree:
                     if optional_title is not None:
                         self.parse(optional_title, container, depth + 1)
                     self.parse(raw, container, depth + 1)
-                elif (env == "subequations" and self.gatherer.packages & {"amsmath", "mathtools"}
-                      and env not in self.gatherer.local_environments):
+                elif env == "subequations":
                     if optional_title is not None:
                         raise ParseError("Unsupported subequations options")
                     container = self.add("component", env, current())
