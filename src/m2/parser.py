@@ -43,6 +43,7 @@ DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering
         "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily",
         "AND"}
 DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagestyle", "index",
+                 "refstepcounter",
                  "vspace", "hspace", "addcontentsline", "setcounter", "addtocounter",
                  "title", "author", "affiliation", "institute", "address", "email",
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize",
@@ -866,6 +867,20 @@ class Tree:
                 buffer.append({"textmu": "\u00b5", "lq": "\u2018", "rq": "\u2019",
                                "textasciitilde": r"\textasciitilde{}", "texttildelow": r"\textasciitilde{}"}[name])
                 end = skip_space(text, end)
+            elif name == "futurelet":
+                # \futurelet defers a decision to the tokens that follow; the branch is
+                # never evaluated, so those tokens are consumed and nothing is emitted.
+                pos2 = end
+                for _ in range(3):
+                    pos2 = skip_space(text, pos2)
+                    if pos2 >= len(text):
+                        break
+                    if text[pos2:pos2 + 1] == "\\":
+                        _, pos2 = command(text, pos2)
+                    else:
+                        pos2 += 1
+                end = pos2
+                buffer.append(" ")
             elif name in {"o", "O", "ss", "i", "j"} and name not in self.gatherer.macros:
                 buffer.append({"o":"\u00f8", "O":"\u00d8", "ss":"\u00df", "i":"\u0131", "j":"\u0237"}[name])
                 end = skip_space(text, end)
