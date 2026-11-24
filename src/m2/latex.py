@@ -43,6 +43,8 @@ def group(text, pos, opening="{", closing="}", *, inline_literals=True):
     raise ParseError(f"Unclosed balanced argument near {text[max(0, start-25):start+90]!r}")
 
 
+_COMMAND_RE = re.compile(r"\\([a-zA-Z@]+|.)", re.S)
+
 
 def latex_replacement(text, pos):
     """Đọc argument declaration dạng group hoặc một token, không thực thi.
@@ -90,11 +92,12 @@ def algorithm_declaration(text, pos, name):
     return result, pos
 
 
+
 def command(text, pos):
-    m = re.match(r"\\([a-zA-Z@]+|.)", text[pos:], re.S)
+    m = _COMMAND_RE.match(text, pos)
     if not m:
         raise ParseError("Trailing backslash")
-    return m[1], pos + len(m[0])
+    return m.group(1), m.end()
 
 
 def options(text, pos):
