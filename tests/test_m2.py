@@ -5252,3 +5252,778 @@ class M2Tests(unittest.TestCase):
             ("cas-sc", r"\newcommand{\credit}[1]{Custom #1.}", r"\credit{Role}")]:
             with self.subTest(body=body):
                 self.assertIn("Custom", self._batch07_content(self._batch01_parse(body, document_class=cls, preamble=preamble)))
+
+
+    def test_batch08_unused_macro_ending_in_verb_is_tokenized_not_executed(self):
+        preamble = (r"\newcommand\fverb{\setbox\mybox=\hbox\bgroup\verb}"
+                    r"\newcommand\fverbdo{\egroup\medskip\noindent\fbox{\unhbox\mybox}\ }")
+        r = self._batch01_parse(r"\section{Intro}Keep $x$ \cite{k}.\bibliography{refs}",
+            preamble=preamble, files={"refs.bib":"@article{k,title={Evidence},year={2020}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        text = " ".join(n["content"] for n in r["elements"])
+        self.assertIn("Keep $x$",text);self.assertIn(r"\cite{k}",text)
+        self.assertNotIn("setbox",text)
+        called = self._batch01_parse(r"\fverb|Keep|",preamble=preamble)
+        self.assertEqual(called["versions"][0]["status"],"parse_error")
+        self.assertIn("setbox",called["versions"][0]["error"])
+
+    def test_batch08_executed_verbatim_and_malformed_literals_keep_strict_reader(self):
+        for definition in (r"\newcommand{\later}{\verb}",r"\def\later{\verb}"):
+            r = self._batch01_parse(r"{\verb|{|} After.",preamble=definition)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertIn(r"\verb|{|"," ".join(n["content"] for n in r["elements"]))
+        from src.m2.latex import group, ParseError
+        for literal in ("{"+r"\verb|unclosed}", "{"+r"\verb|line"+"\n"+r"next|}"):
+            with self.assertRaises(ParseError): group(literal,0)
+        with self.assertRaises(ParseError):
+            group(r"{\verb|{|}",0,inline_literals=False)
+
+
+    def test_batch08_cjk_utf8_wrapper_preserves_inline_text_and_top_level_abstract(self):
+        r=self._batch01_parse(r"Before \begin{CJK*}{UTF8}{gbsn}Chinese \textbf{content} $x$\end{CJK*} after.",
+            preamble=r"\usepackage{CJKutf8}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Before Chinese content $x$ after."," ".join(n["content"] for n in r["elements"]))
+        r=self._batch01_parse(r"\begin{CJK}{UTF8}{mj}\begin{abstract}Keep abstract.\end{abstract}"
+            r"\section{Intro}Keep body.\end{CJK}",preamble=r"\usepackage{CJK}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for token in ("Keep abstract.","Intro","Keep body."):self.assertIn(token," ".join(n["content"] for n in r["elements"]))
+        for body,pre in [(r"\begin{CJK}{GBK}{gbsn}Keep.\end{CJK}",r"\usepackage{CJK}"),
+                         (r"\begin{CJK}{UTF8}{\dynamic}Keep.\end{CJK}",r"\usepackage{CJK}"),
+                         (r"\begin{CJK}{UTF8}{mj}\unknown{Keep}\end{CJK}",r"\usepackage{CJK}")]:
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch08_mdframed_defaults_keep_list_equation_and_citation(self):
+        r=self._batch01_parse(r"\begin{mdframed}Keep.\begin{itemize}\item Evidence \cite{k}.\end{itemize}\[x=y\]\end{mdframed}After.\bibliography{r}",
+            preamble=r"\usepackage{mdframed}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for token in ("Keep.","After.",r"\cite{k}","x=y"):self.assertIn(token," ".join(n["content"] for n in r["elements"]))
+        for pre in (r"\usepackage{mdframed}\mdfsetup{before={Lost.}}",r"\usepackage[unknown]{mdframed}"):
+            self.assertEqual(self._batch01_parse(r"\begin{mdframed}Keep.\end{mdframed}",preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch08_inline_enumitem_keeps_all_items_and_rejects_setup_hooks(self):
+        body=r"\begin{enumerate*}[label=(\roman*)]\item First $x$.\item Second.\end{enumerate*}After."
+        r=self._batch01_parse(body,preamble=r"\usepackage[inline]{enumitem}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertEqual(len([n for n in r["elements"] if n["kind"]=="item"]),2)
+        for pre in (r"\usepackage{enumitem}",r"\usepackage[inline]{enumitem}\setlist{after={Lost.}}"):
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch08_twocolumn_title_wrapper_keeps_abstract_and_requires_context(self):
+        body=r"\twocolumn[\begin{@twocolumnfalse}\section*{Title}\begin{abstract}Keep abstract.\end{abstract}\end{@twocolumnfalse}]After."
+        r=self._batch01_parse(body)
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for text in ("Title","Keep abstract.","After."):self.assertIn(text," ".join(n["content"] for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\begin{@twocolumnfalse}Keep.\end{@twocolumnfalse}")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_resizebox_keeps_math_prose_citation_and_local_override(self):
+        r=self._batch01_parse(r"Before \resizebox{.98\linewidth}{!}{$x=y$ \cite{k}} after.\bibliography{r}",
+            preamble=r"\usepackage{graphicx}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn(r"Before $x=y$ \cite{k} after."," ".join(n["content"] for n in r["elements"]))
+        for dims in (r"{\dynamic}{!}",r"{!}{!}",r"{2cm}{\dynamic}"):
+            self.assertEqual(self._batch01_parse(r"\resizebox"+dims+r"{Keep.}",preamble=r"\usepackage{graphicx}")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\resizebox{a}{b}{Science.}",preamble=r"\usepackage{graphicx}\newcommand{\resizebox}[3]{Local #3}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Local Science."," ".join(n["content"] for n in r["elements"]))
+
+    def test_batch08_font_and_line_spread_keep_words_and_reject_dynamic_values(self):
+        r=self._batch01_parse(r"{\fontfamily{cmss}\selectfont Switcher}--{\fontfamily{qcr}\selectfont Adversary}.\linespread{1.2}After.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for text in ("Switcher","Adversary","After."):self.assertIn(text," ".join(n["content"] for n in r["elements"]))
+        for body in (r"\fontfamily{\dynamic}Keep.",r"\linespread{\dynamic}Keep.",r"\linespread{0}Keep."):
+            self.assertEqual(self._batch01_parse(body)["versions"][0]["status"],"parse_error")
+
+    def test_batch08_page_break_and_figure_name_are_retained_safely(self):
+        r=self._batch01_parse(r"See \figurename~\ref{fig:x}.\nopagebreak[4]After.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        text=" ".join(n["content"] for n in r["elements"])
+        self.assertIn(r"\figurename{}",text);self.assertIn("After.",text)
+        for option in ("5",r"\dynamic"):
+            self.assertEqual(self._batch01_parse(r"\nopagebreak["+option+r"]Keep.")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_ams_url_and_agu_authors_preserve_raw_metadata(self):
+        for cls,body,command in [
+            ("amsart",r"\urladdr{\url{https://example.org/person}}\begin{abstract}Science.\end{abstract}After.","urladdr"),
+            ("agujournal2019",r"\authors{Alice\affil{1}, Bob}\begin{abstract}Science.\end{abstract}After.","authors")]:
+            r=self._batch01_parse(body,document_class=cls)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertTrue(any(m.get("command")==command and m.get("arguments") for m in r["versions"][0]["layout_metadata"]))
+            self.assertIn("Science."," ".join(n["content"] for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\authors{Unknown.}")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_title_note_keeps_funding_text_citation_and_body(self):
+        r=self._batch01_parse(r"\tnotetext[funding]{Funding \textbf{support} \cite{k}.}\begin{abstract}Science.\end{abstract}After.\bibliography{r}",
+            document_class="elsarticle",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for text in ("Funding support",r"\cite{k}","Science.","After."):self.assertIn(text," ".join(n["content"] for n in r["elements"]))
+        bad=self._batch01_parse(r"\tnotetext[x]{\unknown{Lost.}}",document_class="cas-sc")
+        self.assertEqual(bad["versions"][0]["status"],"parse_error")
+
+    def test_batch08_classification_fields_keep_codes_and_edition_without_guessing(self):
+        r=self._batch01_parse(r"\pacs[MSC Classification]{28A75, 49Q15}\begin{abstract}Keep.\end{abstract}",document_class="sn-jnl")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertTrue(any(m.get("arguments")==["28A75, 49Q15"] for m in r["versions"][0]["layout_metadata"]))
+        self.assertIn("28A75, 49Q15", " ".join(n["content"] for n in r["elements"]))
+        r=self._batch01_parse(r"\begin{keyword}Geometry \MSC[2008] 57K30 \sep 57K16\end{keyword}After.",document_class="elsarticle")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for text in ("57K30","57K16","After."):self.assertIn(text," ".join(n["content"] for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\MSC 57K30",document_class="elsarticle")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_html_color_is_bounded_xcolor_only(self):
+        r=self._batch01_parse(r"\definecolor{shade}{HTML}{00aAFF}Keep.",preamble=r"\usepackage{xcolor}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for spec,pre in [("GG0000",r"\usepackage{xcolor}"),("000",r"\usepackage{xcolor}"),("000000",r"\usepackage{color}")]:
+            self.assertEqual(self._batch01_parse(r"\definecolor{x}{HTML}{"+spec+r"}Keep.",preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_batch08_listing_numbersep_preserves_literal_code_and_rejects_dynamic(self):
+        r=self._batch01_parse("\\begin{lstlisting}[numbersep=4pt]\n  x = 1 % literal\n\\end{lstlisting}After.",preamble=r"\usepackage{listings}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertTrue(any("  x = 1 % literal" in n["content"] for n in r["elements"] if n["kind"]=="verbatim"))
+        self.assertEqual(self._batch01_parse(r"\begin{lstlisting}[numbersep=\dynamic]Keep.\end{lstlisting}",preamble=r"\usepackage{listings}")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_eif_keeps_both_branches_and_return_boundaries(self):
+        r=self._batch01_parse(r"\begin{algorithm}\eIf{$x>0$}{Positive \cite{k}.\Return $x$}{Negative.\Return $y$}\end{algorithm}After.\bibliography{r}",
+            preamble=r"\usepackage{algorithm2e}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        nodes={n["element_id"]:n for n in r["elements"]}
+        branches=[n for n in r["elements"] if n["kind"]=="component" and n["content"] in {"then","else"}]
+        self.assertEqual(len(branches),2)
+        for branch in branches:
+            text=" ".join(nodes[e["element_id"]]["content"] for e in r["hierarchy"] if e["parent_id"]==branch["element_id"])
+            self.assertIn("return",text)
+        self.assertEqual(self._batch01_parse(r"\eIf{$x$}{A}{B}",preamble=r"\usepackage{algorithm2e}")["versions"][0]["status"],"parse_error")
+
+    def test_batch08_listing_display_options_preserve_all_code_lines(self):
+        body = "\\begin{lstlisting}[numbersep=5pt,showspaces=false,showtabs=true,stepnumber=2]\nfirst()\nsecond()\nthird()\n\\end{lstlisting}After."
+        r = self._batch01_parse(body, preamble=r"\usepackage{listings}")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        text = " ".join(n["content"] for n in r["elements"])
+        self.assertIn("first()\nsecond()\nthird()", text.replace("\r\n", "\n"))
+        self.assertIn("After.", text)
+        for option in (r"showtabs=\hook", "showspaces=maybe", "stepnumber=0", r"stepnumber=\hook", "firstline=2"):
+            r = self._batch01_parse("\\begin{lstlisting}["+option+"]\nKeep\n\\end{lstlisting}", preamble=r"\usepackage{listings}")
+            self.assertEqual(r["versions"][0]["status"], "parse_error")
+
+    def test_batch08_table_name_preserves_token_and_local_definition(self):
+        r = self._batch01_parse(r"See \tablename~\ref{tab:x}. After.")
+        self.assertEqual(r["versions"][0]["status"], "success", r["versions"])
+        self.assertIn(r"\tablename{}", " ".join(n["content"] for n in r["elements"]))
+        r = self._batch01_parse(r"See \tablename.", preamble=r"\renewcommand{\tablename}{Tableau}")
+        self.assertIn("Tableau", " ".join(n["content"] for n in r["elements"]))
+
+
+    def test_exhaustive_requirepackage_is_real_provider_not_commented_evidence(self):
+        r=self._batch01_parse(r"\text{Kept} \resizebox{2cm}{!}{$x$}.",
+            preamble=r"\RequirePackage{amsmath,graphicx}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Kept $x$.",self._batch07_content(r))
+        r=self._batch01_parse(r"\text{Keep}",preamble="%"+r"\RequirePackage{amsmath}"+"\n")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\text{Keep}",preamble=r"\iffalse\RequirePackage{amsmath}\fi")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_acmart_text_wrapper_keeps_nested_content(self):
+        r=self._batch01_parse(r"A \text{\textbf{mention} $x$} after.",document_class="acmart")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("A mention $x$ after.",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(r"\text{\unknown{Lost}}",document_class="acmart")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_kernel_font_spacing_declarations_do_not_consume_words(self):
+        body=r"\ttfamily Alpha \sffamily Beta \scshape Gamma \Huge Delta \frenchspacing Epsilon \null Zeta \thinspace Eta \medbreak Theta \smallbreak Iota \bigbreak Kappa \goodbreak Lambda."
+        r=self._batch01_parse(body)
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        text=self._batch07_content(r)
+        words=["Alpha","Beta","Gamma","Delta","Epsilon","Zeta","Eta","Theta","Iota","Kappa","Lambda"]
+        self.assertEqual(sorted(words,key=text.index),words)
+        r=self._batch01_parse(r"\scshape Next.",preamble=r"\renewcommand{\scshape}{Local.}")
+        self.assertIn("Local.",self._batch07_content(r))
+
+    def test_exhaustive_text_glyphs_keep_visible_values(self):
+        r=self._batch01_parse(r"\ae{} \AE{} \textquotesingle{} \texttrademark{} \textsection{} \textsterling{} \textperiodcentered{} \textemdash{} \textendash{}.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for glyph in ("æ","Æ","'","™","§","£","·","—","–"):
+            self.assertIn(glyph,self._batch07_content(r))
+
+    def test_exhaustive_linebreak_strength_is_bounded(self):
+        r=self._batch01_parse(r"Before\nolinebreak[4] after.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Before after.",self._batch07_content(r))
+        for strength in ("5",r"\dynamic"):
+            self.assertEqual(self._batch01_parse(r"\nolinebreak["+strength+r"]Keep.")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_ulem_normalem_needs_provider(self):
+        r=self._batch01_parse(r"\normalem Before \emph{science}.",preamble=r"\usepackage{ulem}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Before science.",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(r"\normalem Keep.")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_lineno_commands_and_display_breaks_validate_arguments(self):
+        for pre,body in [(r"\usepackage{lineno}",r"\nolinenumbers Keep."),
+                         (r"\usepackage{amsmath}",r"\allowdisplaybreaks[2]Keep.")]:
+            r=self._batch01_parse(body,preamble=pre)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertIn("Keep.",self._batch07_content(r))
+        for pre,body in [("",r"\nolinenumbers Keep."),("",r"\allowdisplaybreaks Keep."),
+                         (r"\usepackage{amsmath}",r"\allowdisplaybreaks[7]Keep.")]:
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_footref_keeps_label_without_guessing_number(self):
+        r=self._batch01_parse(r"Reuse\footref{fn:a}. After.",preamble=r"\usepackage{footmisc}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn(r"\footref{fn:a}",self._batch07_content(r))
+        for pre,body in [("",r"\footref{fn:a}"),(r"\usepackage{footmisc}",r"\footref{\dynamic}")]:
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_class_metadata_preserves_raw_values(self):
+        for cls,pre,body,cmd in [
+            ("acmart","",r"\copyrightyear{2025}\begin{abstract}Keep.\end{abstract}After.","copyrightyear"),
+            ("article",r"\usepackage{jheppub}",r"\emailAdd{a@example.org}\begin{abstract}Keep.\end{abstract}After.","emailAdd"),
+            ("amsart","",r"\curraddr[Author]{Institute}\begin{abstract}Keep.\end{abstract}After.","curraddr"),
+            ("IEEEtran","",r"\IEEEoverridecommandlockouts\begin{abstract}Keep.\end{abstract}After.","IEEEoverridecommandlockouts")]:
+            r=self._batch01_parse(body,document_class=cls,preamble=pre)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertIn("Keep.",self._batch07_content(r));self.assertIn("After.",self._batch07_content(r))
+            self.assertTrue(any(m.get("command")==cmd for m in r["versions"][0]["layout_metadata"]))
+
+    def test_exhaustive_framed_keeps_science_and_rejects_custom_hooks(self):
+        body=r"\begin{framed}Before.\begin{itemize}\item Keep $x$ \cite{k}.\end{itemize}\[x=y\]\end{framed}After.\bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{framed}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for x in ("Before.","After.",r"\cite{k}","x=y"):self.assertIn(x,self._batch07_content(r))
+        for pre in ("",r"\usepackage{framed}\renewcommand{\FrameCommand}[1]{Lost #1}"):
+            self.assertEqual(self._batch01_parse(body,preamble=pre,files={"r.bib":"@article{k,title={Evidence}}"})["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_compact_lists_keep_all_items_and_reject_options(self):
+        for env in ("compactitem","compactenum"):
+            body=r"\begin{"+env+r"}\item First $x$.\item Second.\end{"+env+r"}After."
+            r=self._batch01_parse(body,preamble=r"\usepackage{paralist}")
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertEqual(len([n for n in r["elements"] if n["kind"]=="item"]),2)
+            self.assertIn("After.",self._batch07_content(r))
+            self.assertEqual(self._batch01_parse(body)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_tabularx_preserves_width_columns_cells_and_citation(self):
+        body=r"\begin{tabularx}{.9\textwidth}{lX}A & $x$ \cite{k}\\B & C\end{tabularx}After.\bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{tabularx}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        text=self._batch07_content(r)
+        for token in (r"{.9\textwidth}{lX}",r"$x$ \cite{k}",r"B & C","After."):self.assertIn(token,text)
+        self.assertEqual(self._batch01_parse(body,files={"r.bib":"@article{k,title={Evidence}}"})["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_ieeeeqnarray_keeps_formula_and_provider_guard(self):
+        body=r"\begin{IEEEeqnarray}{rCl}a&=&b+c\\d&=&e\label{eq:a}\end{IEEEeqnarray}After."
+        r=self._batch01_parse(body,document_class="IEEEtran")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        formulas=[n["content"] for n in r["elements"] if n["kind"]=="block_formula"]
+        self.assertEqual(len(formulas),1);self.assertIn(r"a&=&b+c\\d&=&e",formulas[0])
+        self.assertIn("After.",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(body)["versions"][0]["status"],"parse_error")
+        self.assertEqual(self._batch01_parse(body.replace("{rCl}",r"{\dynamic}"),document_class="IEEEtran")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_algorithm_input_declarations_and_data_keep_labels(self):
+        body=r"\begin{algorithm}\SetKwInput{KwInput}{Evidence}\KwInput{Sample \cite{k}}\KwData{Data $x$}\Return{$x$}\end{algorithm}\bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{algorithm2e}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for x in ("Evidence","Sample",r"\cite{k}","data","Data $x$","return"):self.assertIn(x,self._batch07_content(r))
+
+
+    def test_exhaustive_unbraced_latex_replacement_is_exactly_one_token(self):
+        from src.m2.latex import latex_replacement
+        self.assertEqual(latex_replacement(r"\rightarrowtail Tail",0),(r"\rightarrowtail",15))
+        for definition in (r"\newcommand\cofib\rightarrowtail",r"\newcommand{\cofib}\rightarrowtail",
+                           r"\DeclareRobustCommand{\cofib}\rightarrowtail"):
+            r=self._batch01_parse(r"\section{Intro}Keep $\cofib$ after.",preamble=definition)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertIn(r"$\cofib$",self._batch07_content(r))
+            self.assertIn("after.",self._batch07_content(r))
+        r=self._batch01_parse(r"\single Next.",preamble=r"\newcommand\single X")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("XNext.",self._batch07_content(r).replace(" ",""))
+        r=self._batch01_parse(r"\newcommand\single XRemain. \single")
+        self.assertIn("Remain.",self._batch07_content(r))
+        for definition in (r"\newcommand\x",r"\newcommand\x#1",r"\def\x\rightarrowtail"):
+            self.assertEqual(self._batch01_parse("Keep.",preamble=definition)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_unbraced_replacement_does_not_invent_root(self):
+        r=self._batch01_parse(r"\section{Intro}Keep.",files={"notes.tex":r"\newcommand\template\documentclass"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertEqual(r["versions"][0]["root"],"main.tex")
+
+
+    def test_exhaustive_shortcite_uses_existing_validation_and_preserves_key(self):
+        body=r"Evidence \shortcite[Ch. 2]{k}. \bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{natbib}",files={"r.bib":"@article{k,title={Evidence},year={2020}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn(r"\citeyear[Ch. 2]{k}",self._batch07_content(r))
+        self.assertTrue(any("shortcite" in n for n in r["versions"][0]["normalization_notes"]))
+        missing=self._batch01_parse(r"Evidence \shortcite{absent}.",preamble=r"\usepackage{natbib}")
+        self.assertEqual(missing["versions"][0]["status"],"parse_error")
+        self.assertIn("absent",missing["versions"][0]["error"])
+
+    def test_exhaustive_shortcite_local_macro_and_verbatim_are_not_projected(self):
+        r=self._batch01_parse(r"\shortcite{plain} \verb|\shortcite{not_a_cite}|",
+            preamble=r"\usepackage{natbib}\newcommand{\shortcite}[1]{Word #1}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Word plain",self._batch07_content(r))
+        self.assertIn(r"\verb|\shortcite{not_a_cite}|",self._batch07_content(r))
+        r=self._batch01_parse(r"\shortcite{k}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_math_environment_stays_inline_and_keeps_surrounding_words(self):
+        r=self._batch01_parse(r"A \begin{math}x+y\end{math} after.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("A $x+y$ after.",self._batch07_content(r))
+        self.assertFalse(any(n["kind"]=="block_formula" for n in r["elements"]))
+        self.assertEqual(self._batch01_parse(r"\begin{math}x $y$\end{math}")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_adjustwidth_preserves_all_body_and_rejects_dynamic_margins(self):
+        body=r"\begin{adjustwidth}{2cm}{-1em}\section{Inside}Keep $x$ \cite{k}.\end{adjustwidth}After.\bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{changepage}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for x in ("Inside","Keep $x$",r"\cite{k}","After."):self.assertIn(x,self._batch07_content(r))
+        heading=next(n["element_id"] for n in r["elements"] if n["kind"]=="heading" and n["content"]=="Inside")
+        after=next(n["element_id"] for n in r["elements"] if n["content"]=="After.")
+        self.assertTrue(any(e["element_id"]==after and e["parent_id"]==heading for e in r["hierarchy"]))
+        self.assertEqual(self._batch01_parse(body.replace("{2cm}",r"{\dynamic}"),preamble=r"\usepackage{changepage}",files={"r.bib":"@article{k,title={Evidence}}"})["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_displayquote_preserves_quote_and_citation(self):
+        body=r"\begin{displayquote}Scientific quotation \cite{k}.\end{displayquote}After.\bibliography{r}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{csquotes}",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Scientific quotation",self._batch07_content(r));self.assertIn(r"\cite{k}",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(body.replace("{displayquote}","{displayquote}[citation]",1),preamble=r"\usepackage{csquotes}",files={"r.bib":"@article{k,title={Evidence}}"})["versions"][0]["status"],"parse_error")
+
+
+    def test_exhaustive_algorithm_preamble_bindings_keep_input_and_program_bodies(self):
+        pre=r"\usepackage{algorithm2e}\SetKwInput{KwInput}{Evidence}\SetKwFunction{FMain}{Solve}\SetKwProg{Fn}{Function}{:}{end}"
+        body=r"\begin{algorithm}\KwInput{Data \cite{k}}\Fn{\FMain{$x$}}{Keep $y$.\Return{$y$}}\end{algorithm}After.\bibliography{r}"
+        r=self._batch01_parse(body,preamble=pre,files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for token in ("Evidence",r"\cite{k}","Function","Solve($x$)","Keep $y$","return","end","After."):
+            self.assertIn(token,self._batch07_content(r))
+
+    def test_exhaustive_algorithm_function_declaration_validates_and_is_scoped(self):
+        body=r"\begin{algorithm}\SetKwFunction{FMain}{Solve}\FMain{$x$}\end{algorithm}\begin{algorithm}\FMain{$y$}\end{algorithm}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{algorithm2e}")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertIn("FMain",r["versions"][0]["error"])
+        for definition in (r"\SetKwFunction{section}{Lost}",r"\SetKwFunction{F}{\dynamic}",r"\SetKwProg{Fn}{Function}{\dynamic}{}"):
+            r=self._batch01_parse(r"\begin{algorithm}"+definition+r"Keep.\end{algorithm}",preamble=r"\usepackage{algorithm2e}")
+            self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_algorithm_function_local_override_keeps_priority(self):
+        pre=r"\usepackage{algorithm2e}\newcommand{\FMain}[1]{Local #1}"
+        r=self._batch01_parse(r"\begin{algorithm}\FMain{$x$}\end{algorithm}",preamble=pre)
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Local $x$",self._batch07_content(r))
+        r=self._batch01_parse(r"\begin{algorithm}\FMain{$x$}\end{algorithm}",
+            preamble=pre+r"\SetKwFunction{FMain}{Other}")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertIn("order semantics",r["versions"][0]["error"])
+
+    def test_exhaustive_algorithm_declarations_cannot_shadow_builtin_commands(self):
+        for definition in (r"\SetKwFunction{Huge}{Lost}",r"\SetKwProg{subsubsection}{Lost}{:}{}",r"\SetKwInput{title}{Lost}"):
+            r=self._batch01_parse(r"\begin{algorithm}"+definition+r"Keep.\end{algorithm}",preamble=r"\usepackage{algorithm2e}")
+            self.assertEqual(r["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_algorithm_alias_requires_algo2e_option(self):
+        body=r"\begin{algorithm2e}\KwData{Data $x$}\Return{$x$}\end{algorithm2e}After."
+        r=self._batch01_parse(body,preamble=r"\usepackage[algo2e]{algorithm2e}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Data $x$",self._batch07_content(r));self.assertIn("After.",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(body,preamble=r"\usepackage{algorithm2e}")["versions"][0]["status"],"parse_error")
+
+
+    def test_exhaustive_algorithm_declaration_does_not_leak_from_if_argument(self):
+        pre=r"\usepackage{algorithm2e}"
+        body=r"\begin{algorithm}\eIf{$x$}{\SetKwFunction{FMain}{Solve}\FMain{$x$}}{\FMain{$y$}}\end{algorithm}"
+        r=self._batch01_parse(body,preamble=pre)
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertIn(r"\FMain",r["versions"][0]["error"])
+
+
+    def test_exhaustive_existing_displaybreak_metadata_remains_compatible(self):
+        r=self._batch01_parse(r"\allowdisplaybreaks[2]Keep.",preamble=r"\usepackage{amsmath}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        m=next(m for m in r["versions"][0]["layout_metadata"] if m.get("command")=="allowdisplaybreaks")
+        self.assertEqual(m,{"command":"allowdisplaybreaks","level":"2"})
+
+    def test_exhaustive_existing_dash_normalization_is_not_shadowed(self):
+        r=self._batch01_parse(r"Before\textemdash after\textendash next.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Before\u2014 after\u2013 next.",self._batch07_content(r))
+
+
+    def test_exhaustive_relative_font_and_justification_keep_following_content(self):
+        r=self._batch01_parse(r"\smaller[1]Small $x$.\larger More.\justifying After.",
+            preamble=r"\usepackage{relsize,ragged2e}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for phrase in ("Small $x$","More.","After."):self.assertIn(phrase,self._batch07_content(r))
+        for pre,body in [("",r"\justifying Keep."),("",r"\smaller Keep."),
+                         (r"\usepackage{relsize}",r"\smaller[\dynamic]Keep.")]:
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_dot_below_accent_braced_and_single_token(self):
+        r=self._batch01_parse(r"Ng\d{o}c and Ng\d oc.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Ng\u1ecdc and Ng\u1ecdc.",self._batch07_content(r))
+        self.assertEqual(self._batch01_parse(r"\d{word}")["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_safe_layout_registers_and_provider_checks(self):
+        r=self._batch01_parse(r"\setlength{\arraycolsep}{3pt}\setlength{\fboxsep}{1pt}\setlength{\algomargin}{2em}\parindent=0pt Keep $x$.",
+            preamble=r"\usepackage{algorithm2e}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Keep $x$.",self._batch07_content(r))
+        for body,pre in [(r"\setlength{\algomargin}{2em}Keep.",""),
+                         (r"\setlength{\arraycolsep}{\dynamic}Keep.",""),
+                         (r"\parindent=\dynamic Keep.","")]:
+            self.assertEqual(self._batch01_parse(body,preamble=pre)["versions"][0]["status"],"parse_error")
+
+    def test_exhaustive_textbar_and_arxiv_metadata_are_preserved(self):
+        r=self._batch01_parse(r"A\textbar{}B.\arxivnumber{2501.01234}\begin{abstract}Keep.\end{abstract}After.",
+            preamble=r"\usepackage{jheppub}")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("A|B.",self._batch07_content(r))
+        self.assertTrue(any(m.get("command")=="arxivnumber" and m.get("arguments")==["2501.01234"] for m in r["versions"][0]["layout_metadata"]))
+
+
+    def test_exhaustive_acknowledgments_declaration_keeps_backmatter_and_appendix(self):
+        for cls,pre in [("spie",""),("ametsocV61",""),("article",r"\usepackage{jheppub}"),
+                        ("article",r"\usepackage{jcappub}")]:
+            body=r"\section{Results}Science.\acknowledgments Funding \cite{k}.\section*{Appendix}Extra.\bibliography{r}"
+            r=self._batch01_parse(body,document_class=cls,preamble=pre,files={"r.bib":"@article{k,title={Evidence}}"})
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            for token in ("Science.","Funding",r"\cite{k}","Appendix","Extra."):self.assertIn(token,self._batch07_content(r))
+            ack=next(n["element_id"] for n in r["elements"] if n["content"]=="acknowledgments")
+            appendix=next(n["element_id"] for n in r["elements"] if n["kind"]=="heading" and n["content"]=="Appendix")
+            root=next(n["element_id"] for n in r["elements"] if n["kind"]=="document")
+            for node in (ack,appendix):self.assertTrue(any(e["element_id"]==node and e["parent_id"]==root for e in r["hierarchy"]))
+        self.assertEqual(self._batch01_parse(r"\acknowledgments Unknown.")["versions"][0]["status"],"parse_error")
+        r=self._batch01_parse(r"\acknowledgments{Evidence}.",preamble=r"\usepackage{jheppub}\newcommand{\acknowledgments}[1]{Local #1}")
+        self.assertIn("Local Evidence",self._batch07_content(r))
+
+
+    def test_exhaustive_rare_glyphs_preserve_names_quotes_and_visible_spaces(self):
+        r=self._batch01_parse(r"M{\aa}nsson, M\oe{}glin \textquotedbl quoted\textquotedbl. A\textdagger{}B. the\textvisiblespace\textvisiblespace dog.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for value in ("M\u00e5nsson", "M\u0153glin", '"quoted"', "A\u2020B", "the\u2423\u2423dog"):
+            self.assertIn(value,self._batch07_content(r))
+
+    def test_exhaustive_kernel_spaces_and_fussy_do_not_add_scientific_tokens(self):
+        r=self._batch01_parse(r"A\enspace B\enskip C\negthinspace D.\fussy After.")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("A B CD.",self._batch07_content(r))
+        self.assertIn("After.",self._batch07_content(r))
+
+    def test_exhaustive_wiley_metadata_and_optional_abstract_preserve_science(self):
+        body=r"\authormark{A \textsc{et al.}}\titlemark{Short}\corres{A \email{a@example.org}}\presentaddress{Institute}\abstract[Abstract]{Scientific $x$ \cite{k}.}\section{Intro}After.\bibliography{r}"
+        r=self._batch01_parse(body,document_class="WileyNJDv5",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for value in ("Scientific $x$",r"\cite{k}","Intro","After."):self.assertIn(value,self._batch07_content(r))
+        self.assertTrue(any(m.get("command")=="authormark" and m.get("arguments")==[r"A \textsc{et al.}"] for m in r["versions"][0]["layout_metadata"]))
+        self.assertEqual(self._batch01_parse(r"\authormark{Unknown}")["versions"][0]["status"],"parse_error")
+        self.assertEqual(self._batch01_parse(r"\abstract[\dynamic]{Keep}",document_class="WileyNJDv5")["versions"][0]["status"],"parse_error")
+
+
+    def test_exhaustive_ametsoc_data_statement_and_appendix_are_peer_divisions(self):
+        body=r"\section{Results}Science.\acknowledgments Funding.\datastatement Data \cite{k}.\appendix[A]\appendixtitle{Methodology}\subsection{Model}Extra $x$.\bibliography{r}"
+        r=self._batch01_parse(body,document_class="ametsocV61",files={"r.bib":"@article{k,title={Evidence}}"})
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        for value in ("Science.","Funding.","Data",r"\cite{k}","Methodology","Model","Extra $x$"):
+            self.assertIn(value,self._batch07_content(r))
+        nodes={n["content"]:n["element_id"] for n in r["elements"]}
+        root=next(n["element_id"] for n in r["elements"] if n["kind"]=="document")
+        for content in ("acknowledgments","data availability statement","appendix A"):
+            self.assertTrue(any(e["element_id"]==nodes[content] and e["parent_id"]==root for e in r["hierarchy"]))
+        self.assertTrue(any(e["element_id"]==nodes["Methodology"] and e["parent_id"]==nodes["appendix A"] for e in r["hierarchy"]))
+        for body in (r"\appendixtitle{Orphan}",r"\appendix[\dynamic]\appendixtitle{Bad}"):
+            self.assertEqual(self._batch01_parse(body,document_class="ametsocV61")["versions"][0]["status"],"parse_error")
+
+
+    def test_exhaustive_ametsoc_appendix_after_references_retains_body(self):
+        r=self._batch01_parse(r"\section*{References}\appendix[A]\appendixtitle{Method}Keep $x$.",
+            document_class="ametsocV61")
+        self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+        self.assertIn("Keep $x$.",self._batch07_content(r))
+
+
+    def test_exhaustive_algorithm_literal_group_declarations_fail_safely(self):
+        body=r"\begin{algorithm}\SetKwFunction{FMain}{Outer}{\SetKwFunction{FMain}{Inner}\FMain{$x$}}\FMain{$y$}\end{algorithm}"
+        r=self._batch01_parse(body,preamble=r"\usepackage{algorithm2e}")
+        self.assertEqual(r["versions"][0]["status"],"parse_error")
+        self.assertIn("scoped TeX semantics",r["versions"][0]["error"])
+
+
+    def test_exhaustive_default_algorithm_labels_keep_existing_canonical_form(self):
+        for label,expected in (("Input","input"),("Evidence","Evidence")):
+            pre=r"\usepackage{algorithm2e}\SetKwInput{KwIn}{"+label+"}"
+            r=self._batch01_parse(r"\begin{algorithm}\KwIn{Science $x$}\end{algorithm}",preamble=pre)
+            self.assertEqual(r["versions"][0]["status"],"success",r["versions"])
+            self.assertTrue(any(n["kind"]=="component" and n["content"]==expected for n in r["elements"]))
+            self.assertIn("Science $x$",self._batch07_content(r))
+
+    def test_cont03_macro_citations_recover_only_exact_invoked_bib_entries(self):
+        result = self.parse({"main.tex": r"\documentclass{article}\newcommand{\late}[1]{\cite{#1}}\newcommand{\unused}{\cite{Absent}}\begin{document}Before. \late{ExactKey} After.\bibliography{refs}\end{document}",
+            "refs.bib": "@article{ExactKey,title={Verified source title},author={Alice},year={2025}}\n@article{Unused,title={Unused title}}"})
+        self.assertEqual(result['versions'][0]['status'], 'success')
+        self.assertEqual([b['citation_key'] for b in result['bibtex']], ['ExactKey'])
+        self.assertTrue(any(r'\cite{ExactKey}' in n['content'] for n in result['elements']))
+        self.assertTrue(any('After.' in n['content'] for n in result['elements']))
+        validate_tables(result)
+
+    def test_cont03_late_citation_missing_case_and_version_are_not_invented(self):
+        for index, key in enumerate(['Missing', 'exactkey']):
+            d=self.paper({1:{'main.tex':r'\documentclass{article}\newcommand{\late}[1]{\cite{#1}}\begin{document}\late{'+key+r'}\bibliography{refs}\end{document}',
+                              'refs.bib':'@article{ExactKey,title={Evidence}}'},
+                          2:{'main.tex':tex(r'Valid \cite{'+key+r'}.\bibliography{refs}'),
+                              'refs.bib':'@article{'+key+',title={Other version evidence}}'}},aid=f'2508.0{index+1:04d}')
+            result=parse_versions(f'2508.0{index+1:04d}',[(1,d/'v1'),(2,d/'v2')])
+            self.assertEqual([v['status'] for v in result['versions']], ['parse_error','success'])
+            self.assertIn('after expansion', result['versions'][0]['error'])
+
+    def test_cont03_late_citation_conflicting_duplicate_is_still_rejected(self):
+        result=self.parse({'main.tex':r'\documentclass{article}\newcommand{\late}{\cite{key}}\begin{document}\late\bibliography{refs}\end{document}',
+                           'refs.bib':'@article{key,title={One}}\n@article{key,title={Different}}'})
+        self.assertEqual(result['versions'][0]['status'],'parse_error')
+        self.assertIn('Ambiguous',result['versions'][0]['error'])
+
+    def test_cont03_template_ack_environments_keep_body_and_following_section(self):
+        for index, (cls, package, env) in enumerate([('article',r'\usepackage[preprint]{neurips_2025}','ack'),('ecai','','ack'),('achemso','','acknowledgement'),('cup-journal','','acknowledgement')]):
+            result=self.parse({'main.tex':r'\documentclass{'+cls+'}'+package+r'\begin{document}\section{Main}First.\begin{'+env+r'}Funding retained. See \cite{ref}. $E=mc^2$.\end{'+env+r'}\section{After}After retained.\bibliography{refs}\end{document}',
+                               'refs.bib':'@article{ref,title={Acknowledged source}}'},aid=f'2508.1{index:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            self.assertTrue(any(n['content']=='acknowledgments' for n in result['elements']))
+            self.assertTrue(any('Funding retained.' in n['content'] for n in result['elements']))
+            self.assertTrue(any(n['content']=='After' for n in result['elements']))
+            self.assertEqual(result['bibtex'][0]['citation_key'],'ref')
+            validate_tables(result)
+
+    def test_cont03_ack_custom_definition_options_unknown_provider_stay_blocked(self):
+        for i,(decl,start) in enumerate([('',r'\begin{ack}'),(r'\usepackage{neurips_2025}\renewenvironment{ack}{Injected}{End}',r'\begin{ack}'),(r'\usepackage{neurips_2025}',r'\begin{ack}[Unknown]')]):
+            result=self.parse({'main.tex':r'\documentclass{article}'+decl+r'\begin{document}'+start+r'Body.\end{ack}\end{document}'},aid=f'2508.2{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont03_ifac_frontmatter_preserves_metadata_abstract_and_body(self):
+        result=self.parse({'main.tex':r'\documentclass{ifacconf}\begin{document}\begin{frontmatter}\title{A title\thanksref{fund}}\thanks[fund]{Grant text}\author[one]{A. Author}\address[one]{An institute}\begin{abstract}Abstract retained.\end{abstract}\end{frontmatter}\section{Intro}Scientific content.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        content=' '.join(n['content'] for n in result['elements'])
+        self.assertIn('Abstract retained.',content);self.assertIn('Scientific content.',content)
+        self.assertNotIn('Grant text',content)
+        self.assertTrue(any(x.get('command')=='thanks' and x.get('optional')=='fund' for x in result['versions'][0]['layout_metadata']))
+
+    def test_cont03_ams_class_subequations_keeps_equations_and_version(self):
+        result=self.parse({'main.tex':r'\documentclass{amsart}\begin{document}Before.\begin{subequations}\label{group}\begin{align}a&=b\\c&=d\end{align}\end{subequations}After.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        formula=next(n for n in result['elements'] if n['kind']=='block_formula')
+        self.assertIn(r'a&=b\\c&=d',formula['content'])
+        self.assertTrue(all(e['version']==1 for e in result['hierarchy']))
+
+    def test_cont03_empheq_keeps_math_decorations_and_citations(self):
+        for i,(option,inner) in enumerate([('','equation'),(r'[box=\fbox]','equation'),(r'[left=\empheqlbrace]','align')]):
+            result=self.parse({'main.tex':r'\documentclass{article}\usepackage{empheq}\begin{document}Before.\begin{empheq}'+option+'{'+inner+r'}E=mc^2\label{mass}\text{See }\cite{ref}.\end{empheq}After.\bibliography{refs}\end{document}',
+                               'refs.bib':'@article{ref,title={Equation source}}'},aid=f'2508.3{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            formula=next(n for n in result['elements'] if n['kind']=='block_formula')
+            self.assertIn('E=mc^2',formula['content']);self.assertIn(r'\cite{ref}',formula['content'])
+            if 'left=' in option:self.assertIn(r'\left\{',formula['content'])
+            self.assertTrue(any('After.' in n['content'] for n in result['elements']))
+            validate_tables(result)
+
+    def test_cont03_empheq_unknown_options_provider_or_local_definition_stay_blocked(self):
+        for i, (package, option) in enumerate([('', ''),(r'\usepackage{empheq}', '[left=Dynamic]'),(r'\usepackage{empheq}\renewenvironment{empheq}{Changed}{End}','')]):
+            result=self.parse({'main.tex':r'\documentclass{article}'+package+r'\begin{document}\begin{empheq}'+option+r'{equation}x=y\end{empheq}\end{document}'},aid=f'2508.4{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont03_acmart_captionof_keeps_caption_and_body(self):
+        result=self.parse({'main.tex':r'\documentclass{acmart}\begin{document}\captionof{table}{Visible $x$ and \cite{ref}}After.\bibliography{refs}\end{document}','refs.bib':'@article{ref,title={Caption source}}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertTrue(any('Visible $x$' in n['content'] for n in result['elements']))
+        self.assertTrue(any('After.' in n['content'] for n in result['elements']))
+
+    def test_cont03_literal_newenvironment_overrides_are_expanded_not_discarded(self):
+        for i,env in enumerate(['ack','empheq']):
+            result=self.parse({'main.tex':r'\documentclass{article}\newenvironment{'+env+r'}{Injected prefix.}{Injected suffix.}\begin{document}\begin{'+env+r'}Scientific body.\end{'+env+r'}After.\end{document}'},aid=f'2508.5{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            content=' '.join(n['content'] for n in result['elements'])
+            for phrase in ['Injected prefix.','Injected suffix.','Scientific body.','After.']:self.assertIn(phrase,content)
+
+    def test_cont03_body_lstset_uses_validation_and_keeps_all_code(self):
+        result=self.parse({'main.tex':r'\documentclass{article}\usepackage{listings}\begin{document}\lstset{basicstyle=\small\ttfamily,columns=flexible,breaklines=true}\begin{lstlisting}[language=Python]'+'\nprint("first")\n'+r'\end{lstlisting}\lstset{numbers=left}\begin{lstlisting}'+'\nprint("second")\n'+r'\end{lstlisting}After.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        code=[n['content'] for n in result['elements'] if n['kind']=='verbatim']
+        self.assertIn('print("first")',code[0]);self.assertIn('print("second")',code[1])
+        configs=[x['options'] for x in result['versions'][0]['layout_metadata'] if x.get('environment')=='lstlisting']
+        self.assertNotIn('numbers',configs[0]);self.assertEqual(configs[1]['numbers'],'left')
+
+    def test_cont03_body_lstset_rejects_escapes_scope_and_does_not_leak_across_trees(self):
+        for i,body in enumerate([r'\lstset{escapeinside={(*}{*)}}',r'{\lstset{numbers=left}}',r'\begingroup\lstset{numbers=left}\endgroup',r'\lstset{firstline=2}',r'\begin{quote}\lstset{numbers=left}\end{quote}']):
+            result=self.parse({'main.tex':r'\documentclass{article}\usepackage{listings}\begin{document}'+body+r'\begin{lstlisting}'+'\nKEEP ALL\n'+r'\end{lstlisting}\end{document}'},aid=f'2508.6{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error',body)
+
+    def test_cont03_babel_english_records_activation_preserves_content_and_rejects_other_languages(self):
+        result=self.parse({'main.tex':r'\documentclass{article}\usepackage[english]{babel}\begin{document}\selectlanguage{english}Text retained. $x=y$.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertTrue(any('Text retained.' in n['content'] for n in result['elements']))
+        for i,decl in enumerate(['',r'\usepackage[english,french]{babel}']):
+            language='english' if not decl else 'french'
+            r=self.parse({'main.tex':r'\documentclass{article}'+decl+r'\begin{document}\selectlanguage{'+language+r'}Body.\end{document}'},aid=f'2508.7{i:04d}')
+            self.assertEqual(r['versions'][0]['status'],'parse_error')
+
+    def test_cont03_template_followup_containers_and_ifac_keywords_keep_all_text(self):
+        for i,(cls,env,body) in enumerate([('achemso','suppinfo','Supporting data retained.'),('wiley-article','Practitionernotes',r'Known facts.\begin{itemize}\item First fact.\item Second fact.\end{itemize}'),('ifacconf','keyword',r'control\sep learning')]):
+            result=self.parse({'main.tex':r'\documentclass{'+cls+r'}\begin{document}\begin{'+env+'}'+body+r'\end{'+env+r'}\section{After}Science retained.\end{document}'},aid=f'2508.8{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            self.assertTrue(any('Science retained.' in n['content'] for n in result['elements']))
+            if env=='Practitionernotes':self.assertEqual(sum(n['kind']=='item' for n in result['elements']),2)
+
+    def test_cont03_proof_command_preserves_heading_math_citation_and_following_text(self):
+        result=self.parse({'main.tex':r'\documentclass{article}\usepackage{amsthm,amsmath}\begin{document}\section{Claim}\proof[Proof of claim]We prove \cite{ref}.\begin{equation}x=y\end{equation}\endproof\section{After}Following text.\bibliography{refs}\end{document}','refs.bib':'@article{ref,title={Proof source}}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertTrue(any(n['content']=='proof' for n in result['elements']))
+        self.assertTrue(any('Proof of claim' in n['content'] for n in result['elements']))
+        self.assertTrue(any(n['kind']=='block_formula' and 'x=y' in n['content'] for n in result['elements']))
+        self.assertTrue(any('Following text.' in n['content'] for n in result['elements']))
+        validate_tables(result)
+
+    def test_cont03_proof_malformed_local_or_nested_remains_blocked(self):
+        for i,(decl,body) in enumerate([(r'\usepackage{amsthm}',r'\proof Unclosed.'),(r'\usepackage{amsthm}',r'\proof One.\proof Two.\endproof\endproof'),(r'\usepackage{amsthm}\renewenvironment{proof}{Changed}{End}',r'\proof Body.\endproof'),('',r'\proof No provider.\endproof')]):
+            result=self.parse({'main.tex':r'\documentclass{article}'+decl+r'\begin{document}'+body+r'\end{document}'},aid=f'2508.9{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont03_list_color_groups_and_literal_color_macro_keep_all_items(self):
+        for i,part in enumerate([r'{\color{blue}\item Second \cite{ref}.\item Third.}',r'\mycolor{\item Second \cite{ref}.\item Third.}']):
+            result=self.parse({'main.tex':r'\documentclass{article}\usepackage{xcolor}\newcommand{\mycolor}[1]{{\color{black}#1}}\begin{document}\section{List}\begin{itemize}\item First.'+part+r'\item Fourth.\end{itemize}After.\bibliography{refs}\end{document}','refs.bib':'@article{ref,title={List source}}'},aid=f'2508.01{i:03d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            self.assertEqual(sum(n['kind']=='item' for n in result['elements']),4)
+            text=' '.join(n['content'] for n in result['elements'])
+            for term in ['First.','Second','Third.','Fourth.','After.']:self.assertIn(term,text)
+            self.assertEqual(result['bibtex'][0]['citation_key'],'ref')
+            validate_tables(result)
+
+    def test_cont03_list_projection_does_not_expose_opaque_arguments_nested_lists_or_verbatim(self):
+        result=self.parse({'main.tex':tex(r'\begin{itemize}\item First \footnote{Example \verb|\item|}.\begin{itemize}\item Nested.\end{itemize}\item Second.\end{itemize}')})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertEqual(sum(n['kind']=='item' for n in result['elements']),3)
+
+    def test_cont03_list_item_group_with_state_changes_remains_blocked(self):
+        result=self.parse({'main.tex':tex(r'\begin{enumerate}\item First.{\setcounter{enumi}{9}\item Tenth.}\end{enumerate}')})
+        self.assertEqual(result['versions'][0]['status'],'parse_error')
+        self.assertIn('scoped TeX semantics',result['versions'][0]['error'])
+
+    def test_cont03_ifac_definition_keeps_optional_title_equation_and_following_text(self):
+        result=self.parse({'main.tex':r'\documentclass{ifacconf}\usepackage{amsmath}\begin{document}\begin{defn}[Distance]A metric.\begin{equation}d(x,y)=0\end{equation}\end{defn}After.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertTrue(any(n['content']=='definition' for n in result['elements']))
+        self.assertTrue(any('Distance' in n['content'] for n in result['elements']))
+        self.assertTrue(any(n['kind']=='block_formula' and 'd(x,y)=0' in n['content'] for n in result['elements']))
+
+    def test_cont03_ifac_theorem_lemma_proof_aliases_keep_nested_science(self):
+        result=self.parse({'main.tex':r'\documentclass{ifacconf}\usepackage{amsmath}\begin{document}\begin{thm}[Claim]Theorem text.\end{thm}\begin{lem}Lemma text.\end{lem}\begin{pf}Proof text.\begin{equation}a=b\end{equation}\end{pf}Following.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        labels={n['content'] for n in result['elements'] if n['kind']=='component'}
+        self.assertTrue({'theorem','lemma','proof'} <= labels)
+        self.assertTrue(any('Following.' in n['content'] for n in result['elements']))
+        self.assertTrue(any(n['kind']=='block_formula' and 'a=b' in n['content'] for n in result['elements']))
+        validate_tables(result)
+
+    def test_cont03_ifac_remark_and_ack_complete_template_chain(self):
+        result=self.parse({'main.tex':r'\documentclass{ifacconf}\begin{document}\begin{rem}[Observation]Remark science. $x=y$.\end{rem}\begin{ack}Funding retained.\end{ack}After.\end{document}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertTrue(any(n['content']=='remark' for n in result['elements']))
+        content=' '.join(n['content'] for n in result['elements'])
+        for term in ['Observation','Remark science.','Funding retained.','After.']:self.assertIn(term,content)
+
+    def test_cont04_cite_prefixed_local_macro_locator_is_not_a_bib_key(self):
+        result = self.parse({"main.tex": r"\documentclass{article}\newcommand{\citeSP}[1]{\cite[Locator #1]{stacks}}\begin{document}Before. \citeSP{0AU3} After.\bibliography{refs}\end{document}",
+                             "refs.bib": "@article{stacks,title={Verified reference}}"})
+        self.assertEqual(result['versions'][0]['status'], 'success', result['versions'])
+        self.assertEqual([b['citation_key'] for b in result['bibtex']], ['stacks'])
+        text = ' '.join(n['content'] for n in result['elements'])
+        self.assertIn(r'\cite[Locator 0AU3]{stacks}', text)
+        self.assertIn('Before.', text); self.assertIn('After.', text)
+        validate_tables(result)
+
+    def test_cont04_cite_prefixed_local_crossref_is_not_a_bibliographic_reference(self):
+        result = self.parse({"main.tex": r"\documentclass{article}\newcommand{\citeSI}[1]{(\ref{#1})}\begin{document}\section{Evidence}\label{sec:evidence}Read \citeSI{sec:evidence}.\end{document}"})
+        self.assertEqual(result['versions'][0]['status'], 'success', result['versions'])
+        self.assertEqual(result['bibtex'], [])
+        self.assertIn(r'\ref{sec:evidence}', ' '.join(n['content'] for n in result['elements']))
+
+    def test_cont04_deferred_citation_optional_argument_and_missing_entry_stay_checked(self):
+        for i, invocation in enumerate([r'\citeLocator{7}', r'\citeLocator[Other]{8}']):
+            result = self.parse({'main.tex': r'\documentclass{article}\newcommand{\citeLocator}[2][Default]{\cite[#1 #2]{Missing}}\begin{document}'+invocation+r'\bibliography{refs}\end{document}',
+                                 'refs.bib': '@article{Other,title={Unrelated}}'}, aid=f'2508.2{i:04d}')
+            self.assertEqual(result['versions'][0]['status'], 'parse_error')
+            self.assertIn('after expansion: Missing', result['versions'][0]['error'])
+
+    def test_cont04_local_citation_missing_argument_dynamic_or_cycle_remains_error(self):
+        cases = [(r'\newcommand{\citeWrap}[1]{\cite{#1}}',r'\citeWrap'),
+                 (r'\newcommand{\citeWrap}[1]{\citeWrap{#1}}',r'\citeWrap{k}'),
+                 (r'\def\citeWrap#1;{\cite{#1}}',r'\citeWrap k;')]
+        for i,(definition,body) in enumerate(cases):
+            result=self.parse({'main.tex':r'\documentclass{article}'+definition+r'\begin{document}'+body+r'\bibliography{refs}\end{document}','refs.bib':'@article{k,title={Evidence}}'},aid=f'2508.3{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont04_local_cite_builtin_redefinition_and_nocite_wildcard(self):
+        for i, (decl, body, expected) in enumerate([
+                (r'\renewcommand{\cite}[1]{\ref{#1}}',r'See \cite{sec:x}.',set()),
+                (r'\newcommand{\citeAll}{\nocite{*}}',r'\citeAll',{'a','b'})]):
+            result=self.parse({'main.tex':r'\documentclass{article}'+decl+r'\begin{document}\section{Main}\label{sec:x}'+body+r'\bibliography{refs}\end{document}','refs.bib':'@article{a,title={One}}\n@article{b,title={Two}}'},aid=f'2508.4{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            self.assertEqual({b['citation_key'] for b in result['bibtex']},expected)
+
+    def test_cont04_acmart_citestyle_records_style_without_inventing_reference(self):
+        for i,style in enumerate(['acmnumeric','acmauthoryear']):
+            result=self.parse({'main.tex':r'\documentclass{acmart}\begin{document}Before \cite{k}.\citestyle{'+style+r'}After.\bibliography{refs}\end{document}','refs.bib':'@article{k,title={Evidence}}'},aid=f'2508.5{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+            self.assertEqual([b['citation_key'] for b in result['bibtex']],['k'])
+            self.assertIn({'command':'citestyle','arguments':[style]},result['versions'][0]['layout_metadata'])
+            self.assertIn('After.', ' '.join(n['content'] for n in result['elements']))
+
+    def test_cont04_citestyle_unknown_provider_style_and_local_override_are_not_ignored(self):
+        for i,(cls,pre,body) in enumerate([('article','',r'\citestyle{acmnumeric}'),('acmart','',r'\citestyle{unknown}'),('acmart',r'\newcommand{\citestyle}[1]{Local #1}',r'\citestyle{Evidence}')]):
+            result=self.parse({'main.tex':r'\documentclass{'+cls+'}'+pre+r'\begin{document}'+body+r'\end{document}'},aid=f'2508.6{i:04d}')
+            if pre:
+                self.assertEqual(result['versions'][0]['status'],'success')
+                self.assertIn('Local Evidence',' '.join(n['content'] for n in result['elements']))
+            else:self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont04_associated_bbl_grouped_bibitem_preserves_key_fields_and_citation(self):
+        bbl = r"\begin{thebibliography}{9}\providecommand{\newblock}{\relax}\bibitem{first}Alice.\newblock First reference.\newblock 2020.{\bibitem{grouped}Bob.\newblock Grouped evidence.\newblock 2025.}\end{thebibliography}"
+        result=self.parse({'main.tex':tex(r'See \cite{grouped}. After.\bibliography{missing}'),'main.bbl':bbl})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        row=next(b for b in result['bibtex'] if b['citation_key']=='grouped')
+        self.assertEqual(row['title'],'Grouped evidence');self.assertEqual(row['year'],2025)
+        self.assertTrue(any(r'\cite{grouped}' in n['content'] for n in result['elements']))
+        self.assertFalse(any('Grouped evidence' in n['content'] for n in result['elements']))
+        validate_tables(result)
+
+    def test_cont04_bbl_group_cannot_cross_version_or_unrelated_jobname(self):
+        bbl=r'\begin{thebibliography}{9}\bibitem{first}First.{\bibitem{k}Evidence.}\end{thebibliography}'
+        d=self.paper({1:{'main.tex':tex(r'See \cite{k}.\bibliography{missing}'),'unrelated.bbl':bbl},
+                      2:{'main.tex':tex(r'See \cite{k}.\bibliography{missing}'),'main.bbl':bbl}})
+        result=parse_versions(AID,[(1,d/'v1'),(2,d/'v2')])
+        self.assertEqual([v['status'] for v in result['versions']],['parse_error','success'])
+        self.assertTrue(all(e['version']==2 for e in result['hierarchy']))
+
+    def test_cont04_bbl_group_declarations_conditionals_and_unclosed_stay_rejected(self):
+        tails=[r'{\newcommand{\hidden}{\bibitem{k}Fake.}\hidden}',
+               r'\iffalse{\bibitem{k}Inactive.}\fi',r'{\bibitem{k}Unclosed.']
+        for i,tail in enumerate(tails):
+            result=self.parse({'main.tex':tex(r'\cite{k}\bibliography{missing}'),
+                               'main.bbl':r'\begin{thebibliography}{9}\bibitem{first}Real.'+tail+r'\end{thebibliography}'},aid=f'2508.7{i:04d}')
+            self.assertEqual(result['versions'][0]['status'],'parse_error')
+
+    def test_cont04_bbl_group_conflicting_key_is_not_silently_merged(self):
+        result=self.parse({'main.tex':tex(r'\cite{k}\bibliography{missing}'),
+                           'main.bbl':r'\begin{thebibliography}{9}\bibitem{k}Alice.\newblock One. {\bibitem{k}Bob.\newblock Different.}\end{thebibliography}'})
+        self.assertEqual(result['versions'][0]['status'],'parse_error')
+        self.assertIn('Ambiguous',result['versions'][0]['error'])
+
+    def test_cont04_nocite_wildcard_revealed_by_non_cite_macro_keeps_all_entries(self):
+        result=self.parse({'main.tex':r'\documentclass{article}\newcommand{\allReferences}{\nocite{*}}\begin{document}Before.\allReferences After.\bibliography{refs}\end{document}',
+                           'refs.bib':'@article{a,title={One}}\n@article{b,title={Two}}'})
+        self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
+        self.assertEqual({b['citation_key'] for b in result['bibtex']},{'a','b'})
+        self.assertIn('After.',' '.join(n['content'] for n in result['elements']))

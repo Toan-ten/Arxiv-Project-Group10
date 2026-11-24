@@ -10,7 +10,7 @@ class ParseError(ValueError):
     """Input cannot be interpreted safely by this parser."""
 
 
-def group(text, pos, opening="{", closing="}"):
+def group(text, pos, opening="{", closing="}", *, inline_literals=True):
     while pos < len(text) and text[pos].isspace():
         pos += 1
     if pos >= len(text) or text[pos] != opening:
@@ -19,7 +19,7 @@ def group(text, pos, opening="{", closing="}"):
     pos += 1
     while pos < len(text):
         if text[pos] == "\\":
-            literal = re.match(r"\\verb(?![A-Za-z])", text[pos:])
+            literal = re.match(r"\\verb(?![A-Za-z])", text[pos:]) if inline_literals else None
             if literal:
                 cursor = pos + literal.end()
                 cursor += int(text[cursor:cursor + 1] == "*")
@@ -41,6 +41,53 @@ def group(text, pos, opening="{", closing="}"):
                 return text[start:pos], pos + 1
         pos += 1
     raise ParseError(f"Unclosed balanced argument near {text[max(0, start-25):start+90]!r}")
+
+
+
+def latex_replacement(text, pos):
+    """Đọc argument declaration dạng group hoặc một token, không thực thi.
+
+    Replacement của primitive def vẫn bắt buộc dùng group(), không đi qua đây.
+    """
+    pos = skip_space(text, pos)
+    if text[pos:pos+1] == "{":
+        return group(text, pos, inline_literals=False)
+    if text[pos:pos+1] == "\\":
+        token, end = command(text, pos)
+        if token.isspace():
+            raise ParseError("Unsupported whitespace replacement token")
+        return text[pos:end], end
+    if pos < len(text) and re.fullmatch(r"[A-Za-z0-9.,;:+*/=-]", text[pos]):
+        return text[pos], pos + 1
+    raise ParseError("Unsupported/missing LaTeX replacement token")
+
+
+
+def algorithm_declaration(text, pos, name):
+    """Đọc declaration algorithm2e literal; không thực thi macro hoặc hook."""
+    target, pos = group(text, pos)
+    label, pos = group(text, pos)
+    if (not re.fullmatch(r"[A-Za-z]+", target)
+            or target in {"begin", "end", "input", "include", "section", "subsection",
+                          "If", "Else", "For", "While", "Return", "caption", "label"}):
+        raise ParseError("Unsafe algorithm declaration target")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9 _./:-]*", label):
+        raise ParseError("Unsupported dynamic algorithm declaration label")
+    if name == "SetKwFunction" and not re.fullmatch(r"F[A-Z][A-Za-z]*", target):
+        raise ParseError("Unsupported/colliding algorithm function target")
+    if name == "SetKwProg" and target not in {"Fn", "Try", "Catch", "Proc", "Procedure", "Function", "Def"}:
+        raise ParseError("Unsupported/colliding algorithm program target")
+    if name in {"SetKwInput", "SetKwInOut"} and not (
+            re.fullmatch(r"Kw[A-Z][A-Za-z]*", target) or target in {"Input", "Output", "Data", "Require", "Ensure"}):
+        raise ParseError("Unsupported/colliding algorithm input target")
+    result = dict(command=name, target=target, label=label)
+    if name == "SetKwProg":
+        separator, pos = group(text, pos)
+        ending, pos = group(text, pos)
+        if separator not in {"", ":"} or not re.fullmatch(r"[A-Za-z ]*", ending):
+            raise ParseError("Unsupported algorithm program separator/ending")
+        result.update(separator=separator, ending=ending)
+    return result, pos
 
 
 def command(text, pos):
@@ -419,7 +466,7 @@ def supplement_evidence(probe, *, title_pattern=None):
                 pos = skip_space(probe, pos)
                 if probe[pos:pos + 1] != "{":
                     return []  # Parameterized definitions need TeX semantics.
-                value, pos = group(probe, pos)
+                value, pos = group(probe, pos, inline_literals=False)
                 if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE",
                               "huge", "Huge", "textbf", "protect", "documentclass", "begin", "end"} or "\\" in value:
                     return []
@@ -438,7 +485,7 @@ def supplement_evidence(probe, *, title_pattern=None):
                 if target in {"title", "subtitle", "section", "chapter", "Large", "LARGE", "huge", "Huge", "textbf", "protect"}:
                     return []
                 pos = options(probe, options(probe, pos))
-                _, pos = group(probe, pos)
+                _, pos = latex_replacement(probe, pos)
                 continue
             if name == "documentclass":
                 classes += 1
@@ -663,7 +710,7 @@ def mask_uncalled_root_macro_definitions(probe):
                 if parameters != "".join(f"#{i}" for i in range(1, len(parameters) // 2 + 1)):
                     return probe
                 pos = brace
-            _, pos = group(probe, pos)
+            _, pos = latex_replacement(probe, pos)
             spans.append((start, pos))
     except ParseError:
         return probe
@@ -723,8 +770,8 @@ def root_document_inputs(probe, *, packages=None, preamble_only=False, fragment=
                     return []
                 if name not in {"def", "gdef"}:
                     pos = options(probe, options(probe, pos))
-                _, pos = group(probe, pos)
-            elif name == "usepackage" and not body:
+                _, pos = (group(probe, pos, inline_literals=False) if name in {"def", "gdef"} else latex_replacement(probe, pos))
+            elif name in {"usepackage", "RequirePackage"} and not body:
                 value, pos = group(probe, options(probe, pos))
                 if packages is not None and not re.search(r"[\\#{}]", value):
                     packages.update(v.strip() for v in value.split(","))
@@ -768,7 +815,7 @@ def auxiliary_document_evidence(probe):
                 brace = probe.find("{", after)
                 if brace < 0:
                     return []
-                replacement, pos = group(probe, brace)
+                replacement, pos = group(probe, brace, inline_literals=False)
                 if target in {"documentclass","title","author","usepackage","makelettertitle","begin","end"} or re.search(r"\\(?:documentclass|title|author|usepackage|makelettertitle|begin|end)\b", replacement):
                     return []
                 continue
@@ -786,7 +833,7 @@ def auxiliary_document_evidence(probe):
                 if target in {"documentclass","author","usepackage","makelettertitle","begin","end"}:
                     return []
                 pos = options(probe, options(probe, pos))
-                _, pos = group(probe, pos)
+                _, pos = latex_replacement(probe, pos)
             elif name in {"documentclass","usepackage"}:
                 pos = skip_space(probe, pos)
                 opts = ""
@@ -1012,7 +1059,7 @@ class Gatherer:
             encoding = "utf-8"
         except UnicodeDecodeError:
             lexical = mask_literals(strip_comments(raw.decode("latin-1")))
-            declared = re.search(r"\\usepackage\s*\[\s*(?:latin1|ansinew)\s*\]\s*\{\s*inputenc\s*\}", lexical)
+            declared = re.search(r"\\(?:usepackage|RequirePackage)\s*\[\s*(?:latin1|ansinew)\s*\]\s*\{\s*inputenc\s*\}", lexical)
             if declared:
                 encoding = "cp1252" if "ansinew" in declared[0] else "latin-1"
                 text = raw.decode(encoding)
@@ -1101,13 +1148,13 @@ class Gatherer:
                     start = skip_space(text, start)
                     if text[start:start + 1] == "[":
                         default, start = group(text, start, "[", "]")
-                body, end = group(text, start)
+                body, end = latex_replacement(text, start)
                 if name != "providecommand" or macro not in self.macros:
                     self.macros[macro] = (argc, default, body)
                     self.condition_symbols[macro] = (not scope_depth and not self.environment_depth
                                                      and name != "providecommand")
                 out.append(" ")
-            elif name == "usepackage" and not self.document_started and name not in self.macros:
+            elif name in {"usepackage", "RequirePackage"} and not self.document_started and name not in self.macros:
                 after_options = options(text, end)
                 value, after = group(text, after_options)
                 if not re.search(r"[\\#{}]", value):
@@ -1171,8 +1218,8 @@ class Gatherer:
                     start = skip_space(text, start)
                     if text[start:start + 1] == "[":
                         default, start = group(text, start, "[", "]")
-                before, start = group(text, start)
-                after, end = group(text, start)
+                before, start = group(text, start, inline_literals=False)
+                after, end = group(text, start, inline_literals=False)
                 if name == "newenvironment" and env not in self.local_environments:
                     self.environment_definitions[env] = (argc, default, before, after)
                 else:
@@ -1204,7 +1251,7 @@ class Gatherer:
                 brace = text.find("{", start)
                 if brace < 0:
                     raise ParseError("Malformed TeX macro definition")
-                body, end = group(text, brace)
+                body, end = group(text, brace, inline_literals=False)
                 if not text[start:brace].strip():
                     self.macros[macro] = (0, None, body)
                 else:
@@ -1741,7 +1788,7 @@ class Gatherer:
         class_match = re.search(r"\\documentclass(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
         self.document_class = class_match[1].strip() if class_match else None
         self.packages = {name.strip() for packages in re.findall(
-            r"\\usepackage(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
+            r"\\(?:usepackage|RequirePackage)(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
             for name in packages.split(",")}
         self.theorems = set(re.findall(r"\\newtheorem\*?\s*\{([^}]+)\}", lexical))
         # thm-restate may name a theorem declared through thmtools rather
@@ -1789,6 +1836,41 @@ class Gatherer:
             raise ParseError("Ambiguous/missing document environment")
         if "listings" in self.packages and re.search(r"\\begin\s*\{lstlisting\}", text):
             self.listing_options = listing_preamble(lexical[:starts[0].start()])
+        self.algorithm_initial = []
+        self.algorithm_unresolved = []
+        self.algorithm2e_alias = False
+        if "algorithm2e" in self.packages:
+            self.algorithm2e_alias = bool(re.search(
+                r"\\(?:usepackage|RequirePackage)\s*\[[^\]]*\balgo2e\b[^\]]*\]\s*\{algorithm2e\}", preamble))
+            # Chỉ lấy declaration ở top-level đã qua gathering. Không đưa các
+            # định nghĩa trong argument/hook hoặc scope chưa hiểu thành global.
+            scoped = bool(re.search(r"\\(?:begingroup|endgroup|bgroup|egroup)\b", preamble))
+            cursor = 0
+            while not scoped and (cursor := skip_space(preamble, cursor)) < len(preamble):
+                if preamble[cursor] == "{":
+                    _, cursor = group(preamble, cursor)
+                    continue
+                if preamble[cursor] != "\\":
+                    cursor += 1
+                    continue
+                token, cursor = command(preamble, cursor)
+                if token not in {"SetKwInput", "SetKwInOut", "SetKwFunction", "SetKwProg"} or token in self.macros:
+                    continue
+                try:
+                    declaration, cursor = algorithm_declaration(preamble, cursor, token)
+                except ParseError as exc:
+                    self.algorithm_unresolved.append(str(exc))
+                    self.algorithm_initial.clear()
+                    break  # Không sử dụng binding cũ sau declaration chưa hiểu.
+                self.algorithm_initial.append(declaration)
+        # Defaults-only mdframed is transparent to scientific content.
+        # Any setup/style/hook needs a separate option interpreter.
+        self.mdframed_default_setup = not (
+            re.search(r"\\(?:mdfsetup|mdfdefinestyle|newmdenv)\b", preamble)
+            or re.search(r"\\(?:usepackage|RequirePackage)\s*\[[^\]]*\]\s*\{[^}]*\bmdframed\b", preamble))
+        self.enumitem_inline = bool(re.search(
+            r"\\(?:usepackage|RequirePackage)\s*\[([^\]]*\binline\b[^\]]*)\]\s*\{[^}]*\benumitem\b", preamble)) and not re.search(
+                r"\\(?:setlist|newlist|setlistdepth|SetEnumitemKey)\b", preamble)
         if "tcolorbox" in self.packages:
             if "tcbset" in self.macros:
                 raise ParseError("Locally redefined tcbset requires TeX semantics")
