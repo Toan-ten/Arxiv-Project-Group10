@@ -6027,3 +6027,35 @@ class M2Tests(unittest.TestCase):
         self.assertEqual(result['versions'][0]['status'],'success',result['versions'])
         self.assertEqual({b['citation_key'] for b in result['bibtex']},{'a','b'})
         self.assertIn('After.',' '.join(n['content'] for n in result['elements']))
+
+
+def test_runner_attempt_records_benchmark_metrics(tmp_path):
+    """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
+    corpus = tmp_path / "corpus"
+    paper = corpus / "2508-00001"
+    (paper / "v1").mkdir(parents=True)
+    source = r"\documentclass{article}\begin{document}First sentence. Second sentence.\end{document}"
+    (paper / "v1" / "main.tex").write_text(source, encoding="utf8")
+    identity = {"contract_version": 2, "arxiv_id": "2508.00001", "mssv": "24120010"}
+    manifest = {**identity, "versions": {"v1": {
+        "status": "success", "files": ["main.tex"],
+        "file_checksums": {"main.tex": hashlib.sha256((paper / "v1" / "main.tex").read_bytes()).hexdigest()}}}}
+    (paper / "manifest.json").write_text(json.dumps(manifest), encoding="utf8")
+    (paper / "metadata.json").write_text(json.dumps(identity), encoding="utf8")
+
+    result = run(corpus, tmp_path / "output")
+    attempt = json.loads(next((Path(result["run_root"]) / "attempts").glob("*.json")).read_text(encoding="utf8"))
+
+    assert attempt["papers"] == 1
+    assert attempt["wall_seconds"] > 0
+    assert attempt["avg_seconds_per_publication"] == pytest.approx(attempt["wall_seconds"])
+    assert attempt["peak_rss_kib_linux"] is None or attempt["peak_rss_kib_linux"] > 0
+    assert attempt["output_bytes"] > 0
+    dedup = attempt["dedup"]
+    assert dedup["elements_after_dedup"] == attempt["tables"]["elements"] > 0
+    # A single version contributes nothing to merge, so nothing is removed.
+    assert dedup["elements_before_dedup"] == dedup["elements_after_dedup"]
+    assert dedup["elements_removed"] == 0
+    assert attempt["provenance"]["measurement_environment"] in {"local", "colab-cpu", "colab-gpu", "colab-tpu"}
+    # attempts/ is bookkeeping: it must not inflate the published output size.
+    assert attempt["output_bytes"] < sum(p.stat().st_size for p in Path(result["run_root"]).rglob("*") if p.is_file())
