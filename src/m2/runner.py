@@ -8,6 +8,7 @@ from pathlib import Path
 import platform
 import re
 import subprocess
+import sys
 import time
 import uuid
 from collections import Counter
@@ -30,6 +31,33 @@ def encoded(value):
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
+
+
+def measurement_environment():
+    """Name the testbed instead of hardcoding it; the course benchmark is Colab CPU-only."""
+    try:
+        import google.colab  # noqa: F401
+    except ImportError:
+        return "local"
+    if os.environ.get("COLAB_GPU") == "1":
+        return "colab-gpu"
+    if os.environ.get("COLAB_TPU_ADDR"):
+        return "colab-tpu"
+    return "colab-cpu"
+
+
+def peak_rss_kib_linux():
+    """ru_maxrss is KiB on Linux; elsewhere the platform does not expose it this way."""
+    if sys.platform != "linux":
+        return None
+    import resource
+    return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+
+
+def output_bytes(root):
+    """Size of the published output, excluding per-attempt bookkeeping."""
+    return sum(path.stat().st_size for path in root.rglob("*")
+               if path.is_file() and "attempts" not in path.relative_to(root).parts)
 
 
 def write_new(path, data):
@@ -288,7 +316,8 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         if after != before:
             raise ParseError("Input changed during M2 run; results must not be certified")
         provenance = dict(python=platform.python_version(), platform=platform.platform(),
-                          measurement_environment="local", corpus_root=str(corpus), input_files=file_count,
+                          measurement_environment=measurement_environment(),
+                          corpus_root=str(corpus), input_files=file_count,
                           input_fingerprint=before, parser_fingerprint=code_hash)
         try:
             git = ["git", "-c", "safe.directory=" + code_root.as_posix(), "-C", str(code_root)]
@@ -297,11 +326,24 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         except (OSError, subprocess.SubprocessError):
             provenance.update(git_commit=None, git_dirty=None)
         statuses = Counter(r["status"] for r in version_records)
+        wall_seconds = time.perf_counter() - started
+        # parse_versions records element_count per successful version, so the
+        # before/after deduplication figures come from evidence, not estimation.
+        elements_before = sum(r.get("element_count") or 0 for r in version_records)
+        elements_after = len(all_tables["elements"])
         attempt = dict(started_at=started_at, ended_at=datetime.now(timezone.utc).isoformat(),
-                       wall_seconds=time.perf_counter() - started,
+                       wall_seconds=wall_seconds,
+                       avg_seconds_per_publication=wall_seconds / len(grouped),
                        timing_scope="read/fingerprint input, parse, validate, write and reread Parquet; cached reruns recorded separately",
                        papers=len(grouped), versions=len(version_records), statuses=dict(statuses),
                        cached_papers=cached, tables={n: len(rows) for n, rows in all_tables.items()},
+                       dedup=dict(elements_before_dedup=elements_before,
+                                  elements_after_dedup=elements_after,
+                                  elements_removed=elements_before - elements_after,
+                                  element_removal_ratio=((elements_before - elements_after) / elements_before
+                                                         if elements_before else None)),
+                       peak_rss_kib_linux=peak_rss_kib_linux(),
+                       output_bytes=output_bytes(run_root),
                        all_versions_processed=all(r["status"] in {"success", "empty_no_tex"} for r in version_records),
                        versions_detail=version_records, provenance=provenance, run_root=str(run_root))
         write_new(run_root / "attempts" / (uuid.uuid4().hex + ".json"), encoded(attempt))
