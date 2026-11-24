@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import subprocess
 import time
 import uuid
@@ -230,7 +231,11 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
     if limit_versions is not None and (type(limit_versions) is not int or limit_versions <= 0):
         raise ParseError("--limit-versions must be positive")
     cohort = selection(corpus, paper, version, limit_versions, selected_versions)
-    before, file_count = source_fingerprint(corpus)
+    dev_run = paper is not None or limit_versions is not None or selected_versions is not None
+    if dev_run:
+        before, file_count = "dev-skip", 0
+    else:
+        before, file_count = source_fingerprint(corpus)
     code_hash = digest(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py"))))
     definition = dict(input_fingerprint=before, parser_fingerprint=code_hash,
                       selection=[(a, owner, v) for a, owner, v, _, _ in cohort])
@@ -269,7 +274,17 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                     except (ParseError, OSError) as exc:
                         record.update(status="input_error", error=str(exc))
                     records.append(record)
-                result = parse_versions(aid, ready)
+                def _timeout_handler(signum, frame):
+                    raise TimeoutError("parse timeout")
+                signal.signal(signal.SIGALRM, _timeout_handler)
+                signal.alarm(30)
+                try:
+                    result = parse_versions(aid, ready)
+                except TimeoutError:
+                    result = {"versions": [{"version": ver, "status": "parse_error", "error": "Parse timeout (>30s)"} for ver, _ in ready],
+                              "elements": [], "hierarchy": [], "bibtex": []}
+                finally:
+                    signal.alarm(0)
                 by_version = {r["version"]: r for r in result.pop("versions")}
                 for rec in records:
                     if rec["version"] in by_version:
@@ -284,9 +299,10 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         validate_tables(all_tables)
         checksums = export_parquet(run_root, all_tables)
         write_new(run_root / "output_checksums.json", encoded(checksums))
-        after, _ = source_fingerprint(corpus)
-        if after != before:
-            raise ParseError("Input changed during M2 run; results must not be certified")
+        if not dev_run:
+            after, _ = source_fingerprint(corpus)
+            if after != before:
+                raise ParseError("Input changed during M2 run; results must not be certified")
         provenance = dict(python=platform.python_version(), platform=platform.platform(),
                           measurement_environment="local", corpus_root=str(corpus), input_files=file_count,
                           input_fingerprint=before, parser_fingerprint=code_hash)
