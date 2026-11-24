@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -10,6 +11,9 @@ from collections import Counter
 from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify, _top_level_bibitems, _bbl_comments
 from .latex import Gatherer, ParseError, grouped_natbib_keys, literal_length_target, algorithm_declaration, citation_keys, command, environment, group, mask_literals, mask_root_inline_verbatim, normalize, options, listing_options, resolve_listing_options, box_options, sentences, skip_space, splice_tokens
 
+
+_CITATION_RE = re.compile(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)")
+_COUNTER_PRINT_RE = re.compile(r"the[A-Za-z]+")
 
 LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
           "subsubsection": 4, "paragraph": 5, "subparagraph": 6}
@@ -2881,7 +2885,7 @@ class Tree:
                 if style.strip() not in {"acmnumeric", "acmauthoryear"}:
                     raise ParseError("Unsupported ACM citation style: " + style)
                 self.layout_metadata.append(dict(command=name, arguments=[style]))
-            elif (re.fullmatch(r"the[A-Za-z]+", name) and name not in self.gatherer.macros
+            elif (bool(_COUNTER_PRINT_RE.fullmatch(name)) and name not in self.gatherer.macros
                   and (name[3:] in self.gatherer.counters or name in KERNEL_COUNTER_MARKERS)):
                 # A counter print renders a value decided by \the<counter>'s own
                 # definition, which 22% of sources override and this parser does not
@@ -2889,8 +2893,8 @@ class Tree:
                 # policy already keeps \ref and \cite literal. See ADR-001.
                 buffer.append("\\" + name)
                 self.layout_metadata.append(dict(command=name, counter_marker=True))
-            elif name in KEEP_COMMANDS or re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name) or name == "nocite":
-                is_citation = bool(re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name))
+            elif name in KEEP_COMMANDS or _CITATION_RE.fullmatch(name) or name == "nocite":
+                is_citation = bool(_CITATION_RE.fullmatch(name))
                 if (is_citation or name == "ref" and "hyperref" in self.gatherer.packages) and text[end:end + 1] == "*":
                     end += 1
                 start = options(text, end)
