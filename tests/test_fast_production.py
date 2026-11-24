@@ -72,7 +72,7 @@ def scan_credential_text(text: str, rel_path: str = "") -> list[tuple[str, str, 
         for match in pat.finditer(text):
             key = match.group(1)
             val = match.group(2)
-            if (rel_path, key, val) in ALLOWED_TEST_FIXTURE_ASSIGNMENTS:
+            if (Path(rel_path).as_posix(), key, val) in ALLOWED_TEST_FIXTURE_ASSIGNMENTS:
                 continue
             violations.append((ptype, key, val))
     return violations
@@ -1068,6 +1068,17 @@ class TestFastProduction(unittest.TestCase):
                 rel_path = str(py_path.relative_to(repo_root))
                 hits = scan_credential_text(content, rel_path=rel_path)
                 self.assertEqual(hits, [], f"Hardcoded credential found in {rel_path}: {hits}")
+
+    def test_credential_scanner_exempts_allowlisted_fixture_on_any_separator(self):
+        """The allowlist is keyed by path; Windows emits backslashes, POSIX slashes."""
+        ss_key = "SEMANTIC_SCHOLAR" + "_API_KEY"
+        val = "offline" + "-response-secret-key"
+        text = f'cfg = {{"{ss_key}": "{val}"}}'
+        for rel_path in ("tests/test_s2_integration.py", r"tests\test_s2_integration.py"):
+            with self.subTest(rel_path=rel_path):
+                self.assertEqual(scan_credential_text(text, rel_path=rel_path), [])
+        # A different file must still be reported.
+        self.assertNotEqual(scan_credential_text(text, rel_path="src/other.py"), [])
 
     def test_credential_scanner_regression(self):
         """Phase 0 / Regression: Verify shared scan_credential_text detects all forms and never exempts real-looking keys."""
