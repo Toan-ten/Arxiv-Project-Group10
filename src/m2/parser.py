@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+
+_CITATION_RE = re.compile(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)")
 import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
@@ -2845,8 +2847,8 @@ class Tree:
                 if style.strip() not in {"acmnumeric", "acmauthoryear"}:
                     raise ParseError("Unsupported ACM citation style: " + style)
                 self.layout_metadata.append(dict(command=name, arguments=[style]))
-            elif name in KEEP_COMMANDS or re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name) or name == "nocite":
-                is_citation = bool(re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name))
+            elif name in KEEP_COMMANDS or _CITATION_RE.fullmatch(name) or name == "nocite":
+                is_citation = bool(_CITATION_RE.fullmatch(name))
                 if (is_citation or name == "ref" and "hyperref" in self.gatherer.packages) and text[end:end + 1] == "*":
                     end += 1
                 start = options(text, end)
