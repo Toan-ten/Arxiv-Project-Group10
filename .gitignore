@@ -249,3 +249,6 @@ __marimo__/
 # Local assignment documents and captured source samples
 /request/
 /docs/contracts/evidence/
+
+# Locally captured course statement (not part of the milestone deliverable)
+/docs/web_statement.md

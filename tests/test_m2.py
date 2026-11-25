@@ -6170,7 +6170,7 @@ class M2Tests(unittest.TestCase):
             ("package declared, command unknown", r"\usepackage{somejournal}" + "\n" + tex(r"Text \weirdmacro{x} here."),
              "dependency_unavailable"),
             ("no package declared", tex(r"Text \weirdmacro{x} here."), "undeclared"),
-            ("environment from a declared package", r"\usepackage{tikz}" + "\n" + tex(r"\begin{tikzcd}A\end{tikzcd}"),
+            ("environment from a declared package", r"\usepackage{tcolorbox}" + "\n" + tex(r"\begin{promptbox}A\end{promptbox}"),
              "dependency_unavailable"),
             ("not a prose/environment family", tex(r"\cite{missing}"), "other"),
         ]
@@ -6186,6 +6186,25 @@ class M2Tests(unittest.TestCase):
         record = result["versions"][0]
         self.assertEqual(record["status"], "success", record)
         self.assertIsNone(record["error_origin"])
+
+    def test_cont10_tikz_diagrams_are_figure_leaves_not_unsupported_environments(self):
+        """A drawn diagram is one figure leaf: its source is not prose and not a parse failure."""
+        cases = [
+            ("tikzcd", r"\begin{tikzcd} A \arrow[r] & B \end{tikzcd}"),
+            ("tikzpicture*", r"\begin{tikzpicture*} \draw (0,0) -- (1,1); \end{tikzpicture*}"),
+        ]
+        for index, (env, body) in enumerate(cases):
+            with self.subTest(environment=env):
+                result = self.parse({"main.tex": r"\usepackage{tikz}" + "\n" + tex(body)},
+                                    aid=f"2508.7{index:04d}")
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "success", record.get("error"))
+                kinds = [element["kind"] for element in result["elements"]]
+                self.assertIn("figure", kinds, kinds)
+                # the diagram source stays inside the figure leaf; it never leaks into prose
+                for element in result["elements"]:
+                    if "arrow" in element["content"] or "draw" in element["content"]:
+                        self.assertEqual(element["kind"], "figure", element)
 
 
 def test_runner_attempt_records_benchmark_metrics(tmp_path):

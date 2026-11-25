@@ -7,10 +7,15 @@ import os
 from pathlib import Path
 import platform
 import re
+import signal
 import subprocess
 import sys
 import time
 import uuid
+
+# A paper that hangs must fail visibly rather than stall a corpus-wide run. The guard
+# is POSIX-only (signal.alarm); elsewhere the parse simply runs without a deadline.
+PARSE_TIMEOUT_SECONDS = 300
 from collections import Counter
 from datetime import datetime, timezone
 
@@ -258,6 +263,8 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
     if limit_versions is not None and (type(limit_versions) is not int or limit_versions <= 0):
         raise ParseError("--limit-versions must be positive")
     cohort = selection(corpus, paper, version, limit_versions, selected_versions)
+    # The fingerprint is the reproducibility anchor of a run, so every run pays for it:
+    # recording "dev-skip" would make a measurement impossible to certify afterwards.
     before, file_count = source_fingerprint(corpus)
     code_hash = digest(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py"))))
     definition = dict(input_fingerprint=before, parser_fingerprint=code_hash,
@@ -297,7 +304,22 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                     except (ParseError, OSError) as exc:
                         record.update(status="input_error", error=str(exc))
                     records.append(record)
-                result = parse_versions(aid, ready)
+                # platform alarm is POSIX-only: on Windows the guard is skipped so the
+                # run cannot crash, and no version is blamed for a timeout it never had.
+                alarm = getattr(signal, "SIGALRM", None)
+                if alarm is not None:
+                    def _timeout_handler(signum, frame):
+                        raise TimeoutError("parse timeout")
+                    signal.signal(alarm, _timeout_handler)
+                    signal.alarm(PARSE_TIMEOUT_SECONDS)
+                try:
+                    result = parse_versions(aid, ready)
+                except TimeoutError:
+                    result = {"versions": [{"version": ver, "status": "parse_error", "error": f"Parse timeout (>{PARSE_TIMEOUT_SECONDS}s)"} for ver, _ in ready],
+                              "elements": [], "hierarchy": [], "bibtex": []}
+                finally:
+                    if alarm is not None:
+                        signal.alarm(0)
                 by_version = {r["version"]: r for r in result.pop("versions")}
                 for rec in records:
                     if rec["version"] in by_version:

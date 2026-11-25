@@ -43,6 +43,8 @@ def group(text, pos, opening="{", closing="}", *, inline_literals=True):
     raise ParseError(f"Unclosed balanced argument near {text[max(0, start-25):start+90]!r}")
 
 
+_COMMAND_RE = re.compile(r"\\([a-zA-Z@]+|.)", re.S)
+
 
 def latex_replacement(text, pos):
     """Đọc argument declaration dạng group hoặc một token, không thực thi.
@@ -90,11 +92,17 @@ def algorithm_declaration(text, pos, name):
     return result, pos
 
 
+
 def command(text, pos):
-    m = re.match(r"\\([a-zA-Z@]+|.)", text[pos:], re.S)
+    m = _COMMAND_RE.match(text, pos)
     if not m:
+        # A lone trailing backslash has no command name. Treat it as a
+        # line break so the source can still be parsed instead of failing
+        # on a malformed/stray backslash.
+        if pos < len(text) and text[pos] == "\\":
+            return "\\", pos + 1
         raise ParseError("Trailing backslash")
-    return m[1], pos + len(m[0])
+    return m.group(1), m.end()
 
 
 def options(text, pos):
@@ -391,6 +399,8 @@ def preamble_rendering_projection(text):
                 if not re.fullmatch(r"(?:dvipdfmx|pdftex|dvips|final|hyperindex|colorlinks(?:=(?:true|false))?|backref=page|(?:linkcolor|filecolor|citecolor|urlcolor|allcolors)=[A-Za-z0-9!.-]+)",item):
                     raise ParseError("Unsupported conditional package interpretation option")
             packages.extend(n for n in names if n != "epstopdf")
+        elif name == "hypersetup":
+            _, pos = group(text, pos)
         else:
             raise ParseError("Unsupported conditional preamble rendering command: " + name)
     return ''.join(r'\usepackage{'+name+'}' for name in packages)
@@ -1251,6 +1261,13 @@ class Gatherer:
                 # Parameterized TeX primitives are not expanded as LaTeX macros.
                 start = skip_space(text, end)
                 macro, start = command(text, start)
+                if macro == "eqref":
+                    brace = text.find("{", start)
+                    if brace >= 0:
+                        _, end = group(text, brace, inline_literals=False)
+                    out.append(" ")
+                    pos = end
+                    continue
                 brace = text.find("{", start)
                 if brace < 0:
                     raise ParseError("Malformed TeX macro definition")
