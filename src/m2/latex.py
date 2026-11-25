@@ -96,6 +96,11 @@ def algorithm_declaration(text, pos, name):
 def command(text, pos):
     m = _COMMAND_RE.match(text, pos)
     if not m:
+        # A lone trailing backslash has no command name. Treat it as a
+        # line break so the source can still be parsed instead of failing
+        # on a malformed/stray backslash.
+        if pos < len(text) and text[pos] == "\\":
+            return "\\", pos + 1
         raise ParseError("Trailing backslash")
     return m.group(1), m.end()
 
