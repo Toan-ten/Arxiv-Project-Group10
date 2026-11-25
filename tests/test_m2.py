@@ -6126,6 +6126,44 @@ class M2Tests(unittest.TestCase):
         self.assertIn("Before or after.", " ".join(n["content"] for n in result["elements"]))
 
 
+    def test_cont08_declared_counter_print_is_kept_literal(self):
+        """A counter print keeps its token: the value belongs to \\the<counter>'s definition (ADR-001)."""
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\begin{document}",
+            r"\newcounter{procedure}",
+            r"\refstepcounter{procedure}",
+            r"\textbf{Procedure \theprocedure} runs here.",
+            r"\end{document}",
+        ])
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(node["content"] for node in result["elements"])
+        self.assertIn(r"\theprocedure", content)
+        # No number may be invented for the counter.
+        self.assertNotIn("Procedure 1", content)
+        self.assertNotIn("Procedure 0", content)
+        self.assertTrue(any(entry.get("counter_marker") for entry in result["versions"][0]["layout_metadata"]))
+
+    def test_cont08_kernel_counter_print_is_accepted(self):
+        for index, marker in enumerate(("theequation", "thefootnote", "thepage")):
+            with self.subTest(marker=marker):
+                result = self.parse({"main.tex": tex("See \\" + marker + " for details.")},
+                                    aid=f"2508.9{index:04d}")
+                self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+                self.assertIn("\\" + marker, " ".join(n["content"] for n in result["elements"]))
+
+    def test_cont08_undeclared_counter_print_still_fails(self):
+        result = self.parse({"main.tex": tex(r"Nothing declares it: \theprocedure.")})
+        self.assertEqual(result["versions"][0]["status"], "parse_error")
+        self.assertIn("Unsupported prose command", result["versions"][0]["error"])
+
+    def test_cont08_local_redefinition_of_counter_print_wins(self):
+        result = self.parse({"main.tex": tex(r"\newcommand{\theprocedure}{seven}\theprocedure")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("seven", " ".join(n["content"] for n in result["elements"]))
+
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"

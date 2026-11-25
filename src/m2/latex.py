@@ -1041,6 +1041,9 @@ class Gatherer:
         self.environment_depth = 0
         self.biblatex_rendering = []
         self.theorems = set()
+        # Counters declared by the source. \the<counter> prints a value the parser
+        # does not compute, but a declared name is proof the command is intentional.
+        self.counters = set()
         self.expanded_bytes = 0
         self.include_only = None
         self.packages = set()
@@ -1791,6 +1794,7 @@ class Gatherer:
             r"\\(?:usepackage|RequirePackage)(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
             for name in packages.split(",")}
         self.theorems = set(re.findall(r"\\newtheorem\*?\s*\{([^}]+)\}", lexical))
+        self.counters = {name.strip() for name in re.findall(r"\\newcounter\s*\{([^}]+)\}", lexical)}
         # thm-restate may name a theorem declared through thmtools rather
         # than newtheorem. Only literal preamble declarations with formatting/
         # counter options are evidence; hooks can print content and are refused.
