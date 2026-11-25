@@ -6095,6 +6095,37 @@ class M2Tests(unittest.TestCase):
         self.assertNotIn("singlespace", {node["kind"] for node in result["elements"]})
 
 
+    def test_cont07_template_metadata_declarations_carry_no_prose(self):
+        """CEURART-style metadata duplicates the title block; the body must survive alone."""
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\begin{document}",
+            r"\conference{CLEF 2025 Working Notes, 9--12 September 2025, Porto, Portugal}",
+            r"\TITLE{Sharper Perturbed-Kullback-Leibler Bounds}",
+            r"Body prose that must survive.",
+            r"\end{document}",
+        ])
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(node["content"] for node in result["elements"])
+        self.assertIn("Body prose that must survive.", content)
+        for leaked in ("CLEF 2025", "Porto", "Perturbed-Kullback-Leibler"):
+            self.assertNotIn(leaked, content)
+
+    def test_cont07_locally_defined_operator_is_not_dropped(self):
+        """A locally defined operator is expanded; treating it as metadata would delete content."""
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\begin{document}",
+            r"\providecommand{\OR}{or}",
+            r"Before \OR{} after.",
+            r"\end{document}",
+        ])
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("Before or after.", " ".join(n["content"] for n in result["elements"]))
+
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"

@@ -44,7 +44,8 @@ DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagesty
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize",
                  "usetikzlibrary", "pgfplotsset", "tikzset", "ioptwocol",
                  "refstepcounter", "newcounter", "stepcounter", "sisetup", "tikzstyle", "graphicspath",
-                 "copyrightyear", "copyrightclause", "RUNAUTHOR", "RUNTITLE", "editor"}
+                 "copyrightyear", "copyrightclause", "RUNAUTHOR", "RUNTITLE", "editor",
+                 "conference", "TITLE"}
 
 SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
                "M", "G", "T", "P", "E", "Z", "Y"}
