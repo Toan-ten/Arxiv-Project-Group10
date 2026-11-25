@@ -399,6 +399,8 @@ def preamble_rendering_projection(text):
                 if not re.fullmatch(r"(?:dvipdfmx|pdftex|dvips|final|hyperindex|colorlinks(?:=(?:true|false))?|backref=page|(?:linkcolor|filecolor|citecolor|urlcolor|allcolors)=[A-Za-z0-9!.-]+)",item):
                     raise ParseError("Unsupported conditional package interpretation option")
             packages.extend(n for n in names if n != "epstopdf")
+        elif name == "hypersetup":
+            _, pos = group(text, pos)
         else:
             raise ParseError("Unsupported conditional preamble rendering command: " + name)
     return ''.join(r'\usepackage{'+name+'}' for name in packages)
@@ -1259,6 +1261,13 @@ class Gatherer:
                 # Parameterized TeX primitives are not expanded as LaTeX macros.
                 start = skip_space(text, end)
                 macro, start = command(text, start)
+                if macro == "eqref":
+                    brace = text.find("{", start)
+                    if brace >= 0:
+                        _, end = group(text, brace, inline_literals=False)
+                    out.append(" ")
+                    pos = end
+                    continue
                 brace = text.find("{", start)
                 if brace < 0:
                     raise ParseError("Malformed TeX macro definition")
