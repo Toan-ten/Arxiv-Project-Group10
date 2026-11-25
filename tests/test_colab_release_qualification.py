@@ -153,7 +153,9 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
                        cwd=self.root, check=True, capture_output=True)
-        subprocess.run(["git", "diff", "--quiet", expected, "HEAD", "--", "src"],
+        # M1 modules must be byte-identical to the pinned runtime; src/m2 is the
+        # later milestone's own tree and must not invalidate the M1 pin.
+        subprocess.run(["git", "diff", "--quiet", expected, "HEAD", "--", "src", ":(exclude)src/m2"],
                        cwd=self.root, check=True, capture_output=True)
         colab_guide = (self.root / "docs" / "guides" / "colab.md").read_text(encoding="utf-8")
         self.assertIn(expected, colab_guide)
