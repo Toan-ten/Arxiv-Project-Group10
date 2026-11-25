@@ -6060,6 +6060,41 @@ class M2Tests(unittest.TestCase):
         self.assertIn("Starred abstract body.", " ".join(n["content"] for n in result["elements"]))
 
 
+    def test_cont06_counter_and_metadata_declarations_carry_no_prose(self):
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\graphicspath{{figures/}}",
+            r"\begin{document}",
+            r"\newcounter{observation}",
+            r"\refstepcounter{observation}",
+            r"\sisetup{detect-all}",
+            r"\tikzstyle{mystyle}=[draw]",
+            r"\copyrightyear{2026}\editor{A.~Editor}",
+            r"\RUNAUTHOR{Short title}",
+            r"\AND",
+            r"Visible prose after the declarations.",
+            r"\end{document}",
+        ])
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(node["content"] for node in result["elements"])
+        self.assertIn("Visible prose after the declarations.", content)
+        for leaked in ("figures/", "observation", "detect-all", "mystyle", "2026",
+                       "A.~Editor", "Short title"):
+            self.assertNotIn(leaked, content)
+
+    def test_cont06_keywords_and_singlespace_environments_preserve_content(self):
+        source = tex(r"\begin{keywords}acronyms, parsing\end{keywords}"
+                     r"\begin{singlespace}Single spaced body.\end{singlespace}")
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(node["content"] for node in result["elements"])
+        self.assertIn("acronyms, parsing", content)
+        self.assertIn("Single spaced body.", content)
+        # A layout-only environment must not become a structural level.
+        self.assertNotIn("singlespace", {node["kind"] for node in result["elements"]})
+
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"
