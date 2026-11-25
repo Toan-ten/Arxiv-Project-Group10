@@ -6090,3 +6090,16 @@ def test_runner_attempt_records_benchmark_metrics(tmp_path):
     assert attempt["provenance"]["measurement_environment"] in {"local", "colab-cpu", "colab-gpu", "colab-tpu"}
     # attempts/ is bookkeeping: it must not inflate the published output size.
     assert attempt["output_bytes"] < sum(p.stat().st_size for p in Path(result["run_root"]).rglob("*") if p.is_file())
+
+    # The full attempt keeps bibliography evidence and grows to hundreds of megabytes
+    # on a corpus-wide run; the compact summary must carry the same counters and the
+    # per-version outcome without it, so the report can be built from it.
+    run_root = Path(result["run_root"])
+    summaries = sorted((run_root / "summaries").glob("*.json"))
+    assert len(summaries) == 1
+    compact = json.loads(summaries[0].read_text(encoding="utf8"))
+    assert compact["statuses"] == attempt["statuses"]
+    assert compact["dedup"] == attempt["dedup"]
+    assert [r["status"] for r in compact["versions_detail"]] == [r["status"] for r in attempt["versions_detail"]]
+    assert all("arxiv_id" in r and "bibliography_evidence" not in r for r in compact["versions_detail"])
+    assert summaries[0].stat().st_size < (sorted((run_root / "attempts").glob("*.json"))[-1]).stat().st_size
