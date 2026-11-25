@@ -326,6 +326,7 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         except (OSError, subprocess.SubprocessError):
             provenance.update(git_commit=None, git_dirty=None)
         statuses = Counter(r["status"] for r in version_records)
+        origins = Counter(r.get("error_origin") for r in version_records if r["status"] == "parse_error")
         wall_seconds = time.perf_counter() - started
         # parse_versions records element_count per successful version, so the
         # before/after deduplication figures come from evidence, not estimation.
@@ -336,6 +337,7 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                        avg_seconds_per_publication=wall_seconds / len(grouped),
                        timing_scope="read/fingerprint input, parse, validate, write and reread Parquet; cached reruns recorded separately",
                        papers=len(grouped), versions=len(version_records), statuses=dict(statuses),
+                       error_origins=dict(origins),
                        cached_papers=cached, tables={n: len(rows) for n, rows in all_tables.items()},
                        dedup=dict(elements_before_dedup=elements_before,
                                   elements_after_dedup=elements_after,
@@ -353,7 +355,7 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         # counters and the per-version outcome, so record that separately.
         compact = {key: value for key, value in attempt.items() if key != "versions_detail"}
         compact["versions_detail"] = [
-            {k: record[k] for k in ("arxiv_id", "version", "status", "error", "element_count",
+            {k: record[k] for k in ("arxiv_id", "version", "status", "error", "error_origin", "element_count",
                                     "m1_source_status", "bibliography_status") if k in record}
             for record in version_records
         ]
