@@ -17,13 +17,14 @@ LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
           "subsubsection": 4, "paragraph": 5, "subparagraph": 6}
 MATH_ENVS = {"equation", "equation*", "align", "align*", "alignat", "alignat*",
              "gather", "gather*", "multline", "multline*", "displaymath", "eqnarray", "eqnarray*"}
-FIGURE_ENVS = {"figure", "figure*", "table", "table*", "longtable", "tabular", "tabular*", "tikzpicture"}
+FIGURE_ENVS = {"figure", "figure*", "table", "table*", "longtable", "tabular", "tabular*", "tikzpicture", "tikzpicture*", "tikzcd", "tikzcd*"}
 CONTAINERS = {"abstract", "center", "quote", "quotation", "flushleft", "flushright",
-              "theorem", "lemma", "proof", "proposition", "corollary", "definition",
+              "keyfindingbox", "theorem", "lemma", "proof", "proposition", "corollary", "definition",
               "remark", "example", "algorithm", "algorithmic", "algorithmicx",
               "acknowledgments", "acknowledgements", "acks", "appendices", "appendix"}
 KEEP_COMMANDS = {"url", "href", "path", "ref", "eqref", "autoref", "cref", "Cref",
-                 "footnote", "footnotetext", "thanks", "textsuperscript", "textsubscript", "ensuremath"}
+                 "footnote", "footnotetext", "thanks", "textsuperscript", "textsubscript", "ensuremath",
+                 "tikz", "collaboration", "IEEEaftertitletext", "lefttitle"}
 FORMATTING = {"textbf", "textit", "emph", "textrm", "textsf", "texttt", "underline", "mbox",
               "textsc", "textnormal", "textup", "textsl", "rlap", "enquote", "textquote", "keywords"}
 DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering", "raggedright",
@@ -32,12 +33,13 @@ DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering
         "sloppy", "protect", "hfill", "vfill", "medskip", "smallskip", "bigskip", "qedhere",
         "begingroup", "endgroup", "footnotemark", "authornotemark", "xspace", "nocopyright", "and",
         "bf", "it", "tt", "sf", "onecolumn", "makeatletter", "makeatother",
-        "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily"}
+        "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily", "ninept"}
 DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagestyle", "index",
-                 "refstepcounter",
+                 "refstepcounter", "newcounter", "setcopyright", "newcounter", "setcopyright",
                  "vspace", "hspace", "addcontentsline", "setcounter", "addtocounter",
                  "title", "author", "affiliation", "institute", "address", "email",
-                 "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize"}
+                 "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize",
+                  "tikzset", "usetikzlibrary"}
 
 SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
                "M", "G", "T", "P", "E", "Z", "Y"}
@@ -827,11 +829,12 @@ class Tree:
                 # LaTeX's sentence-space factor: no printable character and
                 # no argument. Keep whitespace and the next token intact.
                 self.layout_metadata.append(dict(command=name))
-            elif name in {"textmu", "lq", "rq", "textasciitilde", "texttildelow"} and name not in self.gatherer.macros:
+            elif name in {"textmu", "lq", "rq", "textasciitilde", "texttildelow", "textunderscore"} and name not in self.gatherer.macros:
                 # Kernel/textcomp glyphs. Keep tilde as a command because the
                 # normalizer treats a literal ~ as a nonbreaking space.
                 buffer.append({"textmu": "\u00b5", "lq": "\u2018", "rq": "\u2019",
-                               "textasciitilde": r"\textasciitilde{}", "texttildelow": r"\textasciitilde{}"}[name])
+                               "textasciitilde": r"\textasciitilde{}", "texttildelow": r"\textasciitilde{}",
+                               "textunderscore": "_"}[name])
                 end = skip_space(text, end)
             elif name == "o" and name not in self.gatherer.macros:
                 buffer.append("ø")
@@ -1679,7 +1682,7 @@ class Tree:
                     container = self.add("component", "biography: " + person, current())
                     self.layout_metadata.append(dict(environment=env, person=person, picture=picture))
                     self.parse(raw[cursor:], container, depth + 1)
-                elif env == "frontmatter" and self.gatherer.document_class in {"autart", "ecai", "imsart", "ifacconf", "wiley-article"}:
+                elif env == "frontmatter":
                     if optional_title is not None or env in self.gatherer.local_environments:
                         raise ParseError("Unsupported/local frontmatter environment semantics")
                     container = self.add("component", "frontmatter", current())
@@ -1699,9 +1702,7 @@ class Tree:
                     self.parse(raw, container, depth + 1)
                 elif env == "frontmatter" and self.gatherer.document_class == "elsarticle":
                     self.parse(raw, current(), depth + 1)
-                elif (env in {"keyword", "keywords"} and (
-                      self.gatherer.document_class in {"elsarticle", "IEEEtran", "ceurart", "mnras", "cas-dc", "cas-sc", "interact", "l4dc2025", "autart", "imsart", "siamltex", "siamart1116", "JFM-FLM_Au", "ifacconf"}
-                      or env == "keywords" and "spconf" in self.gatherer.packages)):
+                elif env in {"keyword", "keywords"}:
                     if optional_title is not None or env in self.gatherer.local_environments:
                         raise ParseError("Unsupported/local keyword environment semantics: " + env)
                     container = self.add("component", "keywords", current())
@@ -2320,7 +2321,7 @@ class Tree:
                     end = skip_space(text, end)
                     end += int(text[end:end + 1] == "*")
                 end = options(text, end)
-                for _ in range({"addcontentsline": 3, "setcounter": 2, "addtocounter": 2, "fontsize": 2}.get(name, 1)):
+                for _ in range({"addcontentsline": 3, "setcounter": 2, "addtocounter": 2, "fontsize": 2, "defcitealias": 2}.get(name, 1)):
                     _, end = group(text, end)
                 buffer.append(" ")
             elif (name in {"fancyhead", "fancyfoot", "fancyhf", "markboth", "markright"}
@@ -2694,6 +2695,27 @@ class Tree:
                 raw, end = group(text, end)
                 text = splice_tokens(text, pos, raw, end)
                 continue
+            elif name == "smash" and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                if text[start:start + 1] == "[":
+                    _, start = group(text, start, "[", "]")
+                value, end = group(text, start)
+                text = splice_tokens(text, pos, value, end)
+                continue
+            elif name == "captionof" and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                if text[start:start + 1] == "*":
+                    start += 1
+                    start = skip_space(text, start)
+                _kind, start = group(text, start)
+                caption, end = group(text, start)
+                buffer.append(caption)
+            elif name == "startcontents" and name not in self.gatherer.macros:
+                start = skip_space(text, end)
+                if text[start:start + 1] == "[":
+                    _, start = group(text, start, "[", "]")
+                end = start
+                buffer.append(" ")
             elif self.algorithm2e_depth and name in {"SetKwInOut", "SetKwInput"} and name not in self.gatherer.macros:
                 target, start = group(text, end)
                 label, end = group(text, start)
