@@ -69,6 +69,13 @@ SI_UNIT_COMMANDS = ({
 CVPR_ABBREVIATIONS = {"etc": "etc.", "ie": "i.e."}
 VISION_EXAMPLES = {"eg": "e.g.", "ie": "i.e.", "etal": "et al."}
 VISION_PACKAGES = {"cvpr", "iccv", "wacv", "eccvabbrv"}
+# Kernel counters always exist, so \the<name> for them needs no declaration.
+# The parser never evaluates them; it keeps the token (ADR-001).
+KERNEL_COUNTER_MARKERS = {
+    "thepart", "thechapter", "thesection", "thesubsection", "thesubsubsection",
+    "theparagraph", "thesubparagraph", "thepage", "theequation", "thefigure",
+    "thetable", "thefootnote", "theenumi", "theenumii", "theenumiii", "theenumiv",
+}
 
 
 
@@ -2874,6 +2881,14 @@ class Tree:
                 if style.strip() not in {"acmnumeric", "acmauthoryear"}:
                     raise ParseError("Unsupported ACM citation style: " + style)
                 self.layout_metadata.append(dict(command=name, arguments=[style]))
+            elif (re.fullmatch(r"the[A-Za-z]+", name) and name not in self.gatherer.macros
+                  and (name[3:] in self.gatherer.counters or name in KERNEL_COUNTER_MARKERS)):
+                # A counter print renders a value decided by \the<counter>'s own
+                # definition, which 22% of sources override and this parser does not
+                # interpret. Keep the token instead of inventing a number; the same
+                # policy already keeps \ref and \cite literal. See ADR-001.
+                buffer.append("\\" + name)
+                self.layout_metadata.append(dict(command=name, counter_marker=True))
             elif name in KEEP_COMMANDS or re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name) or name == "nocite":
                 is_citation = bool(re.fullmatch(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)", name))
                 if (is_citation or name == "ref" and "hyperref" in self.gatherer.packages) and text[end:end + 1] == "*":
