@@ -6164,6 +6164,30 @@ class M2Tests(unittest.TestCase):
         self.assertIn("seven", " ".join(n["content"] for n in result["elements"]))
 
 
+    def test_cont09_error_origin_separates_corpus_gaps_from_parser_gaps(self):
+        """README-level claim: a declared package with no style file is a corpus gap, not a parser gap."""
+        cases = [
+            ("package declared, command unknown", r"\usepackage{somejournal}" + "\n" + tex(r"Text \weirdmacro{x} here."),
+             "dependency_unavailable"),
+            ("no package declared", tex(r"Text \weirdmacro{x} here."), "undeclared"),
+            ("environment from a declared package", r"\usepackage{tikz}" + "\n" + tex(r"\begin{tikzcd}A\end{tikzcd}"),
+             "dependency_unavailable"),
+            ("not a prose/environment family", tex(r"\cite{missing}"), "other"),
+        ]
+        for index, (label, source, expected) in enumerate(cases):
+            with self.subTest(case=label):
+                result = self.parse({"main.tex": source}, aid=f"2508.8{index:04d}")
+                record = result["versions"][0]
+                self.assertEqual(record["status"], "parse_error", record)
+                self.assertEqual(record["error_origin"], expected, record.get("error"))
+
+    def test_cont09_successful_version_has_no_error_origin(self):
+        result = self.parse({"main.tex": tex(r"Plain sentence.")})
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record)
+        self.assertIsNone(record["error_origin"])
+
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"

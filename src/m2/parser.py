@@ -3238,6 +3238,33 @@ class Tree:
             self.parse(text[start:stop], item, depth)
 
 
+def error_origin(message, gatherer):
+    """Name where a failure comes from, so corpus gaps are not reported as parser gaps.
+
+    Only the prose/environment families are split, because those are the ones that
+    conflate an unimplemented construct with a dependency the M1 corpus never
+    downloaded. Every other family is a syntax decision and stays as it was.
+    """
+    head, _, tail = (message or "").partition(":")
+    head, tail = head.strip(), tail.strip()
+    if head not in {"Unsupported prose command", "Unsupported environment"}:
+        # Deliberately neutral: families such as "Missing compilation resource" are
+        # not unsupported syntax, and labelling them as such is the mistake this
+        # field exists to prevent. The family name stays in `error`.
+        return "other"
+    if gatherer is None:
+        return "unknown"
+    name = tail.lstrip("\\").strip()
+    if name in gatherer.macros or name in gatherer.local_environments:
+        # The source defines it, so refusing it is a parser limitation, not a gap.
+        return "source_defined"
+    if gatherer.packages:
+        # A package is declared and its file is not in the corpus: nothing in the
+        # source or the downloaded files defines the name (measured 2026-11-25).
+        return "dependency_unavailable"
+    return "undeclared"
+
+
 def parse_versions(aid, sources):
     """One paper: gather per version, union bibliography, then build shared elements."""
     prepared, records = {}, []
@@ -3264,6 +3291,7 @@ def parse_versions(aid, sources):
             prepared[version] = (gatherer, body, entries, record)
         except (ParseError, OSError, UnicodeError) as exc:
             record["error"] = str(exc)
+            record["error_origin"] = error_origin(str(exc), gatherer)
         finally:
             if gatherer is not None and gatherer.root_selection:
                 record["root_selection"] = gatherer.root_selection
@@ -3292,6 +3320,7 @@ def parse_versions(aid, sources):
             good[version] = entries
         except ParseError as exc:
             record["error"] = str(exc)
+            record["error_origin"] = error_origin(str(exc), gatherer)
     rows, aliases, conflicts = unify(aid, good)
     elements, hierarchy = {}, []
     for version, (gatherer, body, entries, record) in prepared.items():
@@ -3304,7 +3333,7 @@ def parse_versions(aid, sources):
             if previous != node:
                 raise ParseError("Element ID collision")
         hierarchy.extend(tree.edges)
-        record.update(status="success", error=None, element_count=len(tree.nodes),
+        record.update(status="success", error=None, error_origin=None, element_count=len(tree.nodes),
                       edge_count=len(tree.edges), bibliography_count=len(entries),
                       citation_aliases=aliases[version])
         notes = set(tree.warnings) | gatherer.math_aliases_used
