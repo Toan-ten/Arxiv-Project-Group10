@@ -17,11 +17,12 @@ MATH_ENVS = {"equation", "equation*", "align", "align*", "alignat", "alignat*",
              "gather", "gather*", "multline", "multline*", "displaymath", "eqnarray", "eqnarray*"}
 FIGURE_ENVS = {"figure", "figure*", "table", "table*", "longtable", "tabular", "tabular*", "tikzpicture",
                "SCfigure"}
-# A font-size environment (sidecap/older sources) changes appearance only, so its
-# content is reparsed into the current parent instead of becoming a component.
-FONT_SIZE_ENVS = {"tiny", "scriptsize", "footnotesize", "small", "normalsize",
-                  "large", "Large", "LARGE", "huge", "Huge"}
+# An environment in this set changes appearance or numbering only, so its content is
+# reparsed into the current parent instead of becoming a component of its own.
+LAYOUT_ONLY_ENVS = {"tiny", "scriptsize", "footnotesize", "small", "normalsize",
+                    "large", "Large", "LARGE", "huge", "Huge", "singlespace"}
 CONTAINERS = {"abstract", "abstract*", "center", "quote", "quotation", "flushleft", "flushright",
+              "keywords",
               "theorem", "lemma", "proof", "proposition", "corollary", "definition",
               "remark", "example", "algorithm", "algorithmic", "algorithmicx",
               "acknowledgments", "acknowledgements", "acks", "appendices", "appendix"}
@@ -35,12 +36,15 @@ DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering
         "sloppy", "protect", "hfill", "vfill", "medskip", "smallskip", "bigskip", "qedhere",
         "begingroup", "endgroup", "footnotemark", "authornotemark", "xspace", "nocopyright", "and",
         "bf", "it", "tt", "sf", "onecolumn", "makeatletter", "makeatother",
-        "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily"}
+        "huge", "LARGE", "selectfont", "upshape", "tiny", "scriptsize", "sc", "rmfamily",
+        "AND"}
 DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagestyle", "index",
                  "vspace", "hspace", "addcontentsline", "setcounter", "addtocounter",
                  "title", "author", "affiliation", "institute", "address", "email",
                  "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize",
-                 "usetikzlibrary", "pgfplotsset", "tikzset", "ioptwocol"}
+                 "usetikzlibrary", "pgfplotsset", "tikzset", "ioptwocol",
+                 "refstepcounter", "newcounter", "stepcounter", "sisetup", "tikzstyle", "graphicspath",
+                 "copyrightyear", "copyrightclause", "RUNAUTHOR", "RUNTITLE", "editor"}
 
 SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
                "M", "G", "T", "P", "E", "Z", "Y"}
@@ -1803,7 +1807,7 @@ class Tree:
                     # Reparse all content, including abstract/math/citations.
                     self.layout_metadata.append(dict(environment=env))
                     self.parse(raw, current(), depth + 1)
-                elif (env in FONT_SIZE_ENVS and env not in self.gatherer.local_environments):
+                elif (env in LAYOUT_ONLY_ENVS and env not in self.gatherer.local_environments):
                     # Appearance only: reparse the content where it stands.
                     self.layout_metadata.append(dict(environment=env))
                     self.parse(raw, current(), depth + 1)
