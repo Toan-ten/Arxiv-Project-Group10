@@ -1,0 +1,2 @@
+# Offline parser is Python stdlib. Arrow writes the course's explicit Parquet schemas.
+pyarrow>=14.0.0
