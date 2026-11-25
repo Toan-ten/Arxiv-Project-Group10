@@ -15,8 +15,13 @@ LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
           "subsubsection": 4, "paragraph": 5, "subparagraph": 6}
 MATH_ENVS = {"equation", "equation*", "align", "align*", "alignat", "alignat*",
              "gather", "gather*", "multline", "multline*", "displaymath", "eqnarray", "eqnarray*"}
-FIGURE_ENVS = {"figure", "figure*", "table", "table*", "longtable", "tabular", "tabular*", "tikzpicture"}
-CONTAINERS = {"abstract", "center", "quote", "quotation", "flushleft", "flushright",
+FIGURE_ENVS = {"figure", "figure*", "table", "table*", "longtable", "tabular", "tabular*", "tikzpicture",
+               "SCfigure"}
+# A font-size environment (sidecap/older sources) changes appearance only, so its
+# content is reparsed into the current parent instead of becoming a component.
+FONT_SIZE_ENVS = {"tiny", "scriptsize", "footnotesize", "small", "normalsize",
+                  "large", "Large", "LARGE", "huge", "Huge"}
+CONTAINERS = {"abstract", "abstract*", "center", "quote", "quotation", "flushleft", "flushright",
               "theorem", "lemma", "proof", "proposition", "corollary", "definition",
               "remark", "example", "algorithm", "algorithmic", "algorithmicx",
               "acknowledgments", "acknowledgements", "acks", "appendices", "appendix"}
@@ -34,7 +39,8 @@ DROP = {"maketitle", "newpage", "clearpage", "pagebreak", "noindent", "centering
 DROP_ARGUMENT = {"label", "bibliographystyle", "date", "pagestyle", "thispagestyle", "index",
                  "vspace", "hspace", "addcontentsline", "setcounter", "addtocounter",
                  "title", "author", "affiliation", "institute", "address", "email",
-                 "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize"}
+                 "titlerunning", "authorrunning", "authornote", "orcid", "captionsetup", "color", "fontsize",
+                 "usetikzlibrary", "pgfplotsset", "tikzset", "ioptwocol"}
 
 SI_PREFIXES = {"y", "z", "a", "f", "p", "n", "u", "m", "c", "d", "da", "h", "k",
                "M", "G", "T", "P", "E", "Z", "Y"}
@@ -677,6 +683,20 @@ class Tree:
                 flush()
                 headings.clear()
                 self.layout_metadata.append(dict(command=name))
+            elif name == "arraycolsep" and name not in self.gatherer.macros:
+                # A dimension assignment (\arraycolsep=1.4pt) carries no content.
+                start = skip_space(text, end)
+                if text[start:start + 1] == "=":
+                    start = skip_space(text, start + 1)
+                if text[start:start + 1] == "{":
+                    value, end = group(text, start)
+                else:
+                    match = re.match(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)",
+                                     text[start:])
+                    if not match:
+                        raise ParseError("Unsupported arraycolsep value")
+                    value, end = match.group(0), start + match.end()
+                self.layout_metadata.append(dict(command=name, arguments=[value]))
             elif name in {"ttfamily", "sffamily", "scshape", "Huge", "frenchspacing",
                           "medbreak", "smallbreak", "bigbreak", "goodbreak", "null", "thinspace"} and name not in self.gatherer.macros:
                 # Declaration/spacing của kernel không lấy group theo sau làm argument.
@@ -1781,6 +1801,10 @@ class Tree:
                            or (self.gatherer.document_class or "").startswith("aastex"))):
                     # The scoped environment changes line numbering only.
                     # Reparse all content, including abstract/math/citations.
+                    self.layout_metadata.append(dict(environment=env))
+                    self.parse(raw, current(), depth + 1)
+                elif (env in FONT_SIZE_ENVS and env not in self.gatherer.local_environments):
+                    # Appearance only: reparse the content where it stands.
                     self.layout_metadata.append(dict(environment=env))
                     self.parse(raw, current(), depth + 1)
                 elif (env == "landscape" and self.gatherer.packages & {"lscape", "pdflscape"}

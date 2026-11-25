@@ -6029,6 +6029,37 @@ class M2Tests(unittest.TestCase):
         self.assertIn('After.',' '.join(n['content'] for n in result['elements']))
 
 
+    def test_cont05_content_safe_layout_declarations_and_figure_environments(self):
+        """Library declarations, dimension assignments and size environments carry no structure."""
+        source = "\n".join([
+            r"\documentclass{article}",
+            r"\usepackage{tikz}",
+            r"\usetikzlibrary{arrows.meta}",
+            r"\begin{document}",
+            r"\arraycolsep=1.4pt",
+            r"\begin{large}Visible prose after the size change.\end{large}",
+            r"\begin{SCfigure}\caption{Side caption text.}\end{SCfigure}",
+            r"\end{document}",
+        ])
+        result = self.parse({"main.tex": source})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        content = " ".join(node["content"] for node in result["elements"])
+        self.assertIn("Visible prose after the size change.", content)
+        self.assertIn("Side caption text.", content)
+        # The declaration and the dimension assignment are not prose.
+        self.assertNotIn("arrows.meta", content)
+        self.assertNotIn("1.4pt", content)
+        # A font-size environment must not become a structural level of its own.
+        self.assertNotIn("large", {node["kind"] for node in result["elements"]})
+        figures = [node for node in result["elements"] if node["kind"] == "figure"]
+        self.assertTrue(figures and "Side caption text." in figures[0]["content"])
+
+    def test_cont05_starred_abstract_is_retained_as_content(self):
+        result = self.parse({"main.tex": tex(r"\begin{abstract*}Starred abstract body.\end{abstract*}")})
+        self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
+        self.assertIn("Starred abstract body.", " ".join(n["content"] for n in result["elements"]))
+
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"
