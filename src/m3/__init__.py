@@ -8,6 +8,7 @@ from .matching import (
     match_topk,
     mrr_at_k,
 )
+from .labeling import evaluate_mrr, interactive_label, load_labels, save_labels
 from .pipeline import run_matching
 
 __all__ = [
@@ -21,4 +22,8 @@ __all__ = [
     "match_topk",
     "mrr_at_k",
     "run_matching",
+    "load_labels",
+    "save_labels",
+    "interactive_label",
+    "evaluate_mrr",
 ]
