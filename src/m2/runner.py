@@ -346,7 +346,18 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                        output_bytes=output_bytes(run_root),
                        all_versions_processed=all(r["status"] in {"success", "empty_no_tex"} for r in version_records),
                        versions_detail=version_records, provenance=provenance, run_root=str(run_root))
-        write_new(run_root / "attempts" / (uuid.uuid4().hex + ".json"), encoded(attempt))
+        attempt_id = uuid.uuid4().hex
+        write_new(run_root / "attempts" / (attempt_id + ".json"), encoded(attempt))
+        # The full attempt carries per-version bibliography evidence, which reaches
+        # hundreds of megabytes on a corpus-wide run. The report only needs the
+        # counters and the per-version outcome, so record that separately.
+        compact = {key: value for key, value in attempt.items() if key != "versions_detail"}
+        compact["versions_detail"] = [
+            {k: record[k] for k in ("arxiv_id", "version", "status", "error", "element_count",
+                                    "m1_source_status", "bibliography_status") if k in record}
+            for record in version_records
+        ]
+        write_new(run_root / "summaries" / (attempt_id + ".json"), encoded(compact))
         return attempt
     finally:
         lock.unlink()
