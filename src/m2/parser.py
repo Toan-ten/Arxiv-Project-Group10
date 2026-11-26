@@ -413,8 +413,8 @@ def bibliography(gatherer, body):
                 raise ParseError("BibLaTeX refsections require source-scoped citation mapping; "
                                  "cannot merge into the M2 publication bibliography")
         except ParseError as exc:
-            raise ParseError(f"{path.relative_to(gatherer.root).as_posix()}: {exc}") from exc
-        relative = path.relative_to(gatherer.root).as_posix()
+            raise ParseError(f"{gatherer.source_label(path)}: {exc}") from exc
+        relative = gatherer.source_label(path)
         known = {e["key"] for e in entries}
         for entry in rendered:
             entry["source_file"] = relative
@@ -3354,7 +3354,7 @@ def _prepare_version(aid, version, path):
         record.update(root=root, included_files=gatherer.visited)
         body, entries, missing = bibliography(gatherer, body)
         record.update(root=root, included_files=gatherer.visited,
-                      encodings=gatherer.encoding, bibliography_files=[p.relative_to(gatherer.root).as_posix() for p in (*gatherer.bib_files, *gatherer.bbl_files)],
+                      encodings=gatherer.encoding, bibliography_files=[gatherer.source_label(p) for p in (*gatherer.bib_files, *gatherer.bbl_files)],
                       bibliography_status=("bibtex+bbl" if gatherer.bib_files and gatherer.bbl_files else
                                            "bbl" if gatherer.bbl_files else
                                            "bibtex" if gatherer.bib_files else "bibitem" if entries else "missing"),

@@ -6207,6 +6207,45 @@ class M2Tests(unittest.TestCase):
                         self.assertEqual(element["kind"], "figure", element)
 
 
+    def test_bib10_sibling_bbl_supplies_keys_without_a_bibliography_request(self):
+        """An uploaded rendered bibliography is data: cite keys need no \bibliography command."""
+        result = self.parse({
+            "main.tex": tex(r"Text \cite{AllamEtal2021} and \cite{LeCun2015}."),
+            "main.bbl": r"\begin{thebibliography}{10}"
+                        r"\bibitem{AllamEtal2021} Allam, A. Synthetic data. 2021."
+                        r"\bibitem{LeCun2015} LeCun, Y. Deep learning. 2015."
+                        r"\end{thebibliography}",
+        }, aid="2508.91001")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record.get("error"))
+        self.assertEqual(record["bibliography_status"], "bbl", record)
+        self.assertEqual(sorted(record["missing_citation_keys"]), [], record)
+        self.assertEqual(len(result["bibtex"]), 2, result["bibtex"])
+
+    def test_bib11_subfiles_child_is_a_fragment_even_when_the_parent_loads_it_indirectly(self):
+        """paper.tex names main.tex as its class option, which is the subfiles contract."""
+        result = self.parse({
+            "main.tex": "\\documentclass{article}\n\\input{preamble}\n"
+                        "\\begin{document}\n\\subfile{paper}\n\\end{document}\n",
+            "preamble.tex": r"\usepackage{subfiles}",
+            "paper.tex": "\\documentclass[main]{subfiles}\n\\begin{document}\nChild prose.\n\\end{document}\n",
+        }, aid="2508.91002")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record.get("error"))
+        self.assertTrue(record["root"].endswith("main.tex"), record["root"])
+
+    def test_bib12_root_failure_names_the_candidates(self):
+        """Triaging 93 duplicate-copy papers needs to know which files competed."""
+        result = self.parse({
+            "main.tex": tex(r"Main prose."),
+            "plots.tex": "\\documentclass{article}\n\\begin{document}\nPlot.\n\\end{document}\n",
+        }, aid="2508.91003")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error", record)
+        self.assertIn("found 2", record["error"])
+        self.assertIn("main.tex", record["error"])
+        self.assertIn("plots.tex", record["error"])
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"
@@ -6250,3 +6289,41 @@ def test_runner_attempt_records_benchmark_metrics(tmp_path):
     assert [r["status"] for r in compact["versions_detail"]] == [r["status"] for r in attempt["versions_detail"]]
     assert all("arxiv_id" in r and "bibliography_evidence" not in r for r in compact["versions_detail"])
     assert summaries[0].stat().st_size < (sorted((run_root / "attempts").glob("*.json"))[-1]).stat().st_size
+
+
+def test_bbl13_recorded_artifact_supplies_a_bibliography_the_source_never_shipped(tmp_path):
+    """arXiv's bibtex rendered it; M1 recorded it beside the version, not inside it."""
+    aid = "2508.92001"
+    paper = tmp_path / "corpus" / aid
+    (paper / "v1").mkdir(parents=True)
+    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
+    (paper / "bbl" / "v1" / "source_bbl").mkdir(parents=True)
+    (paper / "bbl" / "v1" / "source_bbl" / "main.bbl").write_text(
+        r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Recorded work. 2020."
+        r"\end{thebibliography}", encoding="utf-8")
+
+    result = parse_versions(aid, [(1, paper / "v1")])
+    record = result["versions"][0]
+    assert record["status"] == "success", record.get("error")
+    assert record["bibliography_status"] == "bbl", record
+    assert record["missing_citation_keys"] == [], record
+    assert len(result["bibtex"]) == 1, result["bibtex"]
+    assert any("source_bbl" in name for name in record["bibliography_files"]), record["bibliography_files"]
+
+
+def test_bbl14_recorded_artifact_is_ignored_when_it_would_be_ambiguous(tmp_path):
+    """Two recorded bibliographies prove nothing about which one this version used."""
+    aid = "2508.92002"
+    paper = tmp_path / "corpus" / aid
+    (paper / "v1").mkdir(parents=True)
+    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
+    folder = paper / "bbl" / "v1" / "source_bbl"
+    folder.mkdir(parents=True)
+    for name in ("first.bbl", "second.bbl"):
+        (folder / name).write_text(
+            r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Work."
+            r"\end{thebibliography}", encoding="utf-8")
+
+    record = parse_versions(aid, [(1, paper / "v1")])["versions"][0]
+    assert record["status"] == "parse_error", record
+    assert record["bibliography_status"] == "missing", record

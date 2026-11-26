@@ -1027,6 +1027,7 @@ class Gatherer:
         self.bib_files = []
         self.bbl_files = []
         self.bbl_evidence = []
+        self.bbl_fallback_reason = None
         self.bibliography_requests = []
         self.missing_bib_resources = []
         self.root_selection = None
@@ -1084,10 +1085,10 @@ class Gatherer:
                     raise ParseError(f"Unknown source encoding: {path.name}") from exc
                 encoding = "utf-8 (non-UTF8 bytes confined to comments)"
                 self.math_aliases_used.add("Non-UTF8 bytes confined to TeX comments: " +
-                                           path.relative_to(self.root).as_posix())
+                                           self.source_label(path))
             else:
                 raise ParseError(f"Unknown source encoding: {path.name}")
-        self.encoding[path.relative_to(self.root).as_posix()] = encoding
+        self.encoding[self.source_label(path)] = encoding
         return strip_comments(text) if comments and not comments_removed else text
 
     def resolve(self, name, current, suffix):
@@ -1115,7 +1116,7 @@ class Gatherer:
         self.expanded_bytes += len(text)
         if self.expanded_bytes > 16 * 1024 * 1024:
             raise ParseError("Expanded source exceeds 16 MiB")
-        rel = path.relative_to(self.root).as_posix()
+        rel = self.source_label(path)
         if rel not in self.visited:
             self.visited.append(rel)
         if body_mode:
@@ -1460,7 +1461,19 @@ class Gatherer:
                     raise ParseError("subfile requires a literal subfiles package declaration")
                 target, end = literal_input_filename(text, end, allow_unbraced=True)
                 if name != "include" or self.include_only is None or target in self.include_only:
-                    resource = self.resolve(target, path, ".tex")
+                    try:
+                        resource = self.resolve(target, path, ".tex")
+                    except ParseError:
+                        # \input{main.bbl} names a bibliography arXiv's bibtex produced,
+                        # so the recorded rendering is the file the paper compiled with.
+                        resource = None
+                        if target.lower().endswith(".bbl"):
+                            wanted = Path(target.replace("\\", "/")).name
+                            recorded = [item for item in self.recorded_bbl() if item.name == wanted]
+                            if len(recorded) == 1:
+                                resource = recorded[0]
+                        if resource is None:
+                            raise
                     if resource.suffix.lower() == ".bbl":
                         # A rendered bibliography is data, not executable TeX setup.
                         self.register_bbl(resource, "explicit_input", path, target)
@@ -1530,11 +1543,34 @@ class Gatherer:
         if path not in self.bbl_files:
             self.bbl_files.append(path)
             self.bbl_evidence.append(dict(
-                file=path.relative_to(self.root).as_posix(), association=association,
-                source_file=source.relative_to(self.root).as_posix(), target=target))
+                file=self.source_label(path), association=association,
+                source_file=self.source_label(source), target=target))
 
-    def fallback_bbl(self):
-        if not self.bibliography_requests:
+    def source_label(self, path):
+        """A portable label for evidence that may live beside the version, not inside it."""
+        for base in (self.root, self.root.parent):
+            try:
+                return path.relative_to(base).as_posix()
+            except ValueError:
+                continue
+        return path.name
+
+    def recorded_bbl(self):
+        """The bibliography M1 recorded from the compilation arXiv actually ran.
+
+        It lives beside the version rather than inside it, because a version
+        directory may only hold the files its manifest lists.
+        """
+        folder = self.root.parent / "bbl" / self.root.name / "source_bbl"
+        if not folder.is_dir():
+            return []
+        return sorted(path for path in folder.glob("*.bbl") if path.is_file())
+
+    def fallback_bbl(self, cited=False):
+        # A source can cite keys without ever issuing \bibliography (the rendered
+        # bibliography was uploaded instead), so an explicit request is not the
+        # only legitimate reason to look for the root's own .bbl.
+        if not self.bibliography_requests and not cited:
             return
         if any(name in self.macros for name in ("jobname", "bibliography")):
             raise ParseError("Cannot associate .bbl with locally redefined jobname/bibliography")
@@ -1546,6 +1582,16 @@ class Gatherer:
                 candidates.append(path)
         if len(candidates) > 1:
             raise ParseError("Ambiguous .bbl files for document root: " + self.document_root.name)
+        if not candidates:
+            # Nothing beside the source: use the rendered bibliography M1 recorded,
+            # but only when it is unambiguous for this version.
+            recorded = self.recorded_bbl()
+            matching = [path for path in recorded if path.stem == self.document_root.stem]
+            if len(matching) == 1:
+                recorded = matching
+            if len(recorded) == 1:
+                self.register_bbl(recorded[0], "m1_bbl_artifact", self.document_root, recorded[0].name)
+            return
         if candidates:
             self.register_bbl(candidates[0], "document_jobname", self.document_root,
                               self.document_root.stem + ".bbl")
@@ -1772,6 +1818,28 @@ class Gatherer:
                             evidence["via"] = [p.relative_to(self.root).as_posix() for p in chain]
                         roles[child] = [evidence]
             mains = [path for path in roots if not roles[path]]
+            # A subfiles child names its parent as the class option, but that only
+            # counts when the parent provably loads subfiles: an unprovable preamble
+            # (conditional, missing include, redefined \usepackage) proves nothing.
+            for path in roots:
+                if roles[path] or path in fragments:
+                    continue
+                declaration = self.root_class(probes[path])
+                if not declaration or declaration[0] != "subfiles" or not declaration[1]:
+                    continue
+                try:
+                    parent = self.resolve(declaration[1], path, ".tex").resolve()
+                    if parent not in roots or parent == path:
+                        continue
+                    packages = self.root_preamble_packages(parent, probes[parent], probes)
+                except ParseError:
+                    continue
+                if "subfiles" not in packages:
+                    continue
+                roles[path] = [dict(kind="included_document_body",
+                                    parent=parent.relative_to(self.root).as_posix(),
+                                    command="documentclass", target=declaration[1])]
+            mains = [path for path in roots if not roles[path]]
             if len(mains) == 1:
                 chosen = mains[0]
                 self.root_selection = dict(
@@ -1790,7 +1858,9 @@ class Gatherer:
                         self.root_selection["excluded_documents"] = self.root_selection.pop("excluded_supplements")
                 roots = [chosen]
         if len(roots) != 1:
-            raise ParseError(f"Expected exactly one documentclass root, found {len(roots)}")
+            raise ParseError(
+                f"Expected exactly one documentclass root, found {len(roots)}: "
+                + ", ".join(path.relative_to(self.root).as_posix() for path in sorted(roots)[:6]))
         if copies:
             if self.root_selection is None:
                 self.root_selection = dict(policy="equivalent_document_copies",
@@ -1806,6 +1876,18 @@ class Gatherer:
         root_document_inputs(header, packages=self.packages, preamble_only=True)
         text = self.expand(roots[0])
         lexical = mask_literals(text)
+        cited = bool(re.search(r"\\(?:[cC]ite[a-zA-Z]*|nocite)\s*[\[{]", lexical))
+        inline_bibliography = bool(re.search(r"\\begin\s*\{thebibliography\}", lexical))
+        # A rendered .bbl is only evidence when nothing else already supplies the
+        # bibliography: a parsed .bib or inline bibitems win, as they always did.
+        if not self.bbl_files and not self.bib_files and not inline_bibliography and (
+                self.bibliography_requests or cited):
+            try:
+                self.fallback_bbl(cited=cited)
+            except ParseError as exc:
+                # A sibling .bbl is optional evidence, not a requirement. Keep the
+                # version's own failure instead of inventing one from an ambiguity.
+                self.bbl_fallback_reason = str(exc)
         class_match = re.search(r"\\documentclass(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
         self.document_class = class_match[1].strip() if class_match else None
         self.packages = {name.strip() for packages in re.findall(
