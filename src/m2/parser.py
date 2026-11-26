@@ -14,6 +14,7 @@ from .latex import Gatherer, ParseError, grouped_natbib_keys, literal_length_tar
 
 _CITATION_RE = re.compile(r"(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)")
 _COUNTER_PRINT_RE = re.compile(r"the[A-Za-z]+")
+FONT_SIZE_ENVS = {"tiny", "large", "Large", "LARGE", "huge", "Huge"}
 
 LEVELS = {"part": 0, "chapter": 1, "section": 2, "subsection": 3,
           "subsubsection": 4, "paragraph": 5, "subparagraph": 6}
@@ -704,18 +705,20 @@ class Tree:
                 headings.clear()
                 self.layout_metadata.append(dict(command=name))
             elif name == "arraycolsep" and name not in self.gatherer.macros:
-                # A dimension assignment (\arraycolsep=1.4pt) carries no content.
+                # Literal dimension assignment only; never discard arbitrary TeX.
                 start = skip_space(text, end)
                 if text[start:start + 1] == "=":
                     start = skip_space(text, start + 1)
+                dimension = r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)"
                 if text[start:start + 1] == "{":
                     value, end = group(text, start)
+                    if not re.fullmatch(dimension, value.strip()):
+                        raise ParseError("Unsupported arraycolsep value")
                 else:
-                    match = re.match(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\s*(?:pt|em|ex|mm|cm|in|bp|pc|sp)",
-                                     text[start:])
+                    match = re.match(dimension + r"(?![A-Za-z])", text[start:])
                     if not match:
                         raise ParseError("Unsupported arraycolsep value")
-                    value, end = match.group(0), start + match.end()
+                    value, end = match[0], start + match.end()
                 self.layout_metadata.append(dict(command=name, arguments=[value]))
             elif name in {"ttfamily", "sffamily", "scshape", "Huge", "frenchspacing",
                           "medbreak", "smallbreak", "bigbreak", "goodbreak", "null", "thinspace"} and name not in self.gatherer.macros:
@@ -872,19 +875,7 @@ class Tree:
                                "textunderscore": "_"}[name])
                 end = skip_space(text, end)
             elif name == "futurelet":
-                # \futurelet defers a decision to the tokens that follow; the branch is
-                # never evaluated, so those tokens are consumed and nothing is emitted.
-                pos2 = end
-                for _ in range(3):
-                    pos2 = skip_space(text, pos2)
-                    if pos2 >= len(text):
-                        break
-                    if text[pos2:pos2 + 1] == "\\":
-                        _, pos2 = command(text, pos2)
-                    else:
-                        pos2 += 1
-                end = pos2
-                buffer.append(" ")
+                raise ParseError("Unsupported dynamic futurelet lookahead; content was not discarded")
             elif name in {"o", "O", "ss", "i", "j"} and name not in self.gatherer.macros:
                 buffer.append({"o":"\u00f8", "O":"\u00d8", "ss":"\u00df", "i":"\u0131", "j":"\u0237"}[name])
                 end = skip_space(text, end)
@@ -1357,13 +1348,30 @@ class Tree:
                 self.layout_metadata.append(dict(command=name, language=language))
             elif name == "begin":
                 env, start = group(text, end)
-                if env not in {"CJK","CJK*","math"}:
+                layout_override = self.gatherer.layout_environment_overrides.get(env)
+                if (env == "proof" and self.gatherer.macros.get("proof", ())[:2] == (0, None)
+                        and self.gatherer.macros.get("endproof", ())[:2] == (0, None)):
+                    before = self.gatherer.macros["proof"][2]
+                    after = self.gatherer.macros["endproof"][2]
+                    if (re.fullmatch(r"\{\s*\\it\s+Proof\.\s*\}\s*\\ ", before)
+                            and re.fullmatch(r"\\hfill\s*\$\s*\\Box\s*\$\s*\\par\s*\\vskip\s*"
+                                             r"\d+(?:\.\d+)?mm\s*", after)
+                            and not {"it", "hfill", "par", "vskip"} & self.gatherer.macros.keys()):
+                        layout_override = (before, after)
+                if (env in FIGURE_ENVS | CONTAINERS | LAYOUT_ONLY_ENVS
+                        and (env in self.gatherer.local_environments
+                             and env not in self.gatherer.environment_definitions
+                             or {env, "end" + env} & self.gatherer.macros.keys())
+                        and layout_override is None):
+                    # Do not let a named built-in hide a local replacement body.
+                    raise ParseError("Unsupported environment: " + env)
+                if env not in {"CJK","CJK*","math"} | FONT_SIZE_ENVS | {"singlespace"}:
                     front_matter = False
                     flush()
                 if env not in {"verbatim", "verbatim*", "lstlisting"}:
                     start = skip_space(text, start)
                 optional_title = None
-                if env not in {"verbatim", "verbatim*"} and text[start:start + 1] == "[":
+                if env not in {"verbatim", "verbatim*"} | FONT_SIZE_ENVS | {"singlespace"} and text[start:start + 1] == "[":
                     optional_title, start = group(text, start, "[", "]")
                 if env in {"verbatim", "verbatim*", "lstlisting"}:
                     closing = r"\end{" + env + "}"
@@ -1709,9 +1717,9 @@ class Tree:
                         raise ParseError("Unsupported/local template content environment: " + env)
                     container = self.add("component", env, current())
                     self.parse(raw, container, depth + 1)
-                elif env == "frontmatter" and self.gatherer.document_class == "elsarticle":
-                    self.parse(raw, current(), depth + 1)
-                elif env in {"keyword", "keywords"}:
+                elif (env in {"keyword", "keywords"} and (
+                      self.gatherer.document_class in {"elsarticle", "IEEEtran", "ceurart", "mnras", "cas-dc", "cas-sc", "interact", "l4dc2025", "autart", "imsart", "siamltex", "siamart1116", "JFM-FLM_Au", "ifacconf"}
+                      or env == "keywords" and self.gatherer.packages & {"spconf", "jmlr2e"})):
                     if optional_title is not None or env in self.gatherer.local_environments:
                         raise ParseError("Unsupported/local keyword environment semantics: " + env)
                     container = self.add("component", "keywords", current())
@@ -1836,10 +1844,13 @@ class Tree:
                     # Reparse all content, including abstract/math/citations.
                     self.layout_metadata.append(dict(environment=env))
                     self.parse(raw, current(), depth + 1)
-                elif (env in LAYOUT_ONLY_ENVS and env not in self.gatherer.local_environments):
-                    # Appearance only: reparse the content where it stands.
+                elif (env in FONT_SIZE_ENVS | {"singlespace"}
+                      and not {env, "end" + env} & self.gatherer.macros.keys()):
+                    if env == "singlespace" and "setspace" not in self.gatherer.packages:
+                        raise ParseError("Unsupported singlespace provider")
                     self.layout_metadata.append(dict(environment=env))
-                    self.parse(raw, current(), depth + 1)
+                    text = splice_tokens(text, pos, raw, end)
+                    continue
                 elif (env == "landscape" and self.gatherer.packages & {"lscape", "pdflscape"}
                       and env not in self.gatherer.local_environments):
                     self.layout_metadata.append(dict(environment=env))
@@ -1863,12 +1874,19 @@ class Tree:
                     if optional_title is not None:
                         self.parse(optional_title, container, depth + 1)
                     self.parse(raw, container, depth + 1)
-                elif env in CONTAINERS or env in self.gatherer.theorems:
+                elif env in CONTAINERS - {"keywords"} or env in self.gatherer.theorems:
                     if env in {"appendices", "appendix"} and depth == 0:
                         # An explicit appendix division is not a child of the
                         # last main-text section (e.g. Springer Declarations).
                         headings.clear()
                     container = self.add("component", env, current())
+                    if layout_override is not None:
+                        self.layout_metadata.append(dict(environment=env, source_begin=layout_override[0],
+                                                         source_end=layout_override[1], literal_layout_override=True))
+                        if env == "proof":
+                            # Preserve the explicitly written end-of-proof math
+                            # marker as well as the proof's scientific content.
+                            raw += r" $\Box$"
                     # Optional theorem/proof headings contain visible prose and
                     # citations; unlike float placement, they are not layout.
                     if optional_title is not None and (env == "proof" or env in self.gatherer.theorems):
@@ -2154,7 +2172,16 @@ class Tree:
                 if condition is not None:
                     self.parse_algorithm_argument(condition, container, depth + 1)
                 self.parse_algorithm_argument(raw, container, depth + 1)
-            elif name in DROP:
+            elif (name in FONT_SIZE_ENVS | {"small", "footnotesize", "scriptsize", "normalsize"}
+                  and name in self.gatherer.macros
+                  and self.gatherer.macros[name][:2] == (0, None)
+                  and re.fullmatch(r"\\@setfontsize\s*\\" + re.escape(name)
+                                   + r"\s*\{\s*\d+(?:\.\d+)?pt\s*\}\s*\{\s*\d+(?:\.\d+)?pt\s*\}",
+                                   self.gatherer.macros[name][2].strip())):
+                # A proven, literal font-size override is layout only. Other
+                # local definitions must reach the ordinary macro handler.
+                self.layout_metadata.append(dict(command=name, literal_font_override=True))
+            elif name in DROP and name not in self.gatherer.macros:
                 if name == "maketitle":
                     front_matter = False
                 if name == "printbibliography" and text[skip_space(text, end):].startswith("["):
@@ -2281,8 +2308,12 @@ class Tree:
             elif name == "par":
                 flush()
             elif (name == "captionof" and name not in self.gatherer.macros
-                  and (self.gatherer.packages & {"caption", "capt-of"} or self.gatherer.document_class == "acmart")):
-                kind, start = group(text, end)
+                   and (self.gatherer.packages & {"caption", "capt-of", "cvpr", "iccv"}
+                        or self.gatherer.document_class == "acmart")):
+                start = skip_space(text, end)
+                starred = text[start:start + 1] == "*"
+                start += int(starred)
+                kind, start = group(text, start)
                 if kind not in {"figure", "table"}:
                     raise ParseError("Unsupported captionof type: " + kind)
                 start = options(text, start)
@@ -2291,6 +2322,8 @@ class Tree:
                 if not reference_section:
                     container = self.add("component", kind + " caption", current())
                     self.parse(value, container, depth + 1)
+                if self.gatherer.packages & {"cvpr", "iccv"}:
+                    self.warnings.append("CVPR/ICCV caption convention; original style file not interpreted")
             elif name == "caption":
                 front_matter = False
                 flush()
@@ -2332,7 +2365,17 @@ class Tree:
                         author_options, end = group(text, tail, "[", "]")
                         self.layout_metadata.append(dict(command=name, author=value, options=author_options))
                 buffer.append(" ")
-            elif name in DROP_ARGUMENT:
+            elif name == "tikzstyle" and name not in self.gatherer.macros:
+                if "tikz" not in self.gatherer.packages:
+                    raise ParseError("Unsupported tikzstyle provider")
+                style, start = group(text, end)
+                start = skip_space(text, start)
+                if text[start:start + 1] != "=":
+                    raise ParseError("Unsupported tikzstyle assignment")
+                start = skip_space(text, start + 1)
+                settings, end = group(text, start, "[", "]")
+                self.layout_metadata.append(dict(command=name, style=style, settings=settings))
+            elif name in DROP_ARGUMENT and name not in self.gatherer.macros:
                 if name in {"hspace", "vspace"} or (name == "title" and self.gatherer.document_class == "svmult"):
                     end = skip_space(text, end)
                     end += int(text[end:end + 1] == "*")
@@ -2718,14 +2761,6 @@ class Tree:
                 value, end = group(text, start)
                 text = splice_tokens(text, pos, value, end)
                 continue
-            elif name == "captionof" and name not in self.gatherer.macros:
-                start = skip_space(text, end)
-                if text[start:start + 1] == "*":
-                    start += 1
-                    start = skip_space(text, start)
-                _kind, start = group(text, start)
-                caption, end = group(text, start)
-                buffer.append(caption)
             elif name == "startcontents" and name not in self.gatherer.macros:
                 start = skip_space(text, end)
                 if text[start:start + 1] == "[":
@@ -2924,7 +2959,8 @@ class Tree:
                     raise ParseError("Unsupported ACM citation style: " + style)
                 self.layout_metadata.append(dict(command=name, arguments=[style]))
             elif (bool(_COUNTER_PRINT_RE.fullmatch(name)) and name not in self.gatherer.macros
-                  and (name[3:] in self.gatherer.counters or name in KERNEL_COUNTER_MARKERS)):
+                  and (name[3:] in self.gatherer.counters or name in KERNEL_COUNTER_MARKERS
+                       and (name != "thechapter" or self.gatherer.document_class in {"book", "report", "memoir", "scrbook", "scrreprt"}))):
                 # A counter print renders a value decided by \the<counter>'s own
                 # definition, which 22% of sources override and this parser does not
                 # interpret. Keep the token instead of inventing a number; the same
@@ -3301,49 +3337,44 @@ def error_origin(message, gatherer):
         # The source defines it, so refusing it is a parser limitation, not a gap.
         return "source_defined"
     if gatherer.packages:
-        # A package is declared and its file is not in the corpus: nothing in the
-        # source or the downloaded files defines the name (measured 2026-11-25).
-        return "dependency_unavailable"
+        # The declared package set does not establish this command's provider.
+        return "unknown"
     return "undeclared"
 
 
-def parse_versions(aid, sources):
-    """One paper: gather per version, union bibliography, then build shared elements."""
-    prepared, records = {}, []
-    for version, path in sources:
-        record = dict(version=version, status="parse_error", root=None, included_files=[],
-                      bibliography_status=None, error=None)
-        records.append(record)
-        gatherer = None
-        try:
-            gatherer = Gatherer(path)
-            root, body = gatherer.gather()
-            record.update(root=root, included_files=gatherer.visited)
-            body, entries, missing = bibliography(gatherer, body)
-            record.update(root=root, included_files=gatherer.visited,
-                          encodings=gatherer.encoding, bibliography_files=[p.relative_to(gatherer.root).as_posix() for p in (*gatherer.bib_files, *gatherer.bbl_files)],
-                          bibliography_status=("bibtex+bbl" if gatherer.bib_files and gatherer.bbl_files else
-                                               "bbl" if gatherer.bbl_files else
-                                               "bibtex" if gatherer.bib_files else "bibitem" if entries else "missing"),
-                          missing_citation_keys=missing, bibliography_evidence=entries)
-            if gatherer.biblatex_rendering:
-                record["bibliography_rendering_declarations"] = gatherer.biblatex_rendering
-            if missing:
-                raise ParseError("Cited bibliography entries unavailable: " + ", ".join(missing[:12]))
-            prepared[version] = (gatherer, body, entries, record)
-        except (ParseError, OSError, UnicodeError) as exc:
-            record["error"] = str(exc)
-            record["error_origin"] = error_origin(str(exc), gatherer)
-        finally:
-            if gatherer is not None and gatherer.root_selection:
-                record["root_selection"] = gatherer.root_selection
-            if gatherer is not None and gatherer.bbl_evidence:
-                record["bbl_sources"] = gatherer.bbl_evidence
-            if gatherer is not None and gatherer.missing_bib_resources:
-                record["unavailable_bib_resources"] = gatherer.missing_bib_resources
-    # Validate trees once before bibliography union: bad versions cannot change good keys.
-    good = {}
-    for version, (gatherer, body, entries, record) in prepared.items():
+def _prepare_version(aid, version, path):
+    ready = valid = False
+    body, entries = None, []
+    record = dict(version=version, status="parse_error", root=None, included_files=[],
+                  bibliography_status=None, error=None)
+    gatherer = None
+    try:
+        gatherer = Gatherer(path)
+        root, body = gatherer.gather()
+        record.update(root=root, included_files=gatherer.visited)
+        body, entries, missing = bibliography(gatherer, body)
+        record.update(root=root, included_files=gatherer.visited,
+                      encodings=gatherer.encoding, bibliography_files=[p.relative_to(gatherer.root).as_posix() for p in (*gatherer.bib_files, *gatherer.bbl_files)],
+                      bibliography_status=("bibtex+bbl" if gatherer.bib_files and gatherer.bbl_files else
+                                           "bbl" if gatherer.bbl_files else
+                                           "bibtex" if gatherer.bib_files else "bibitem" if entries else "missing"),
+                      missing_citation_keys=missing, bibliography_evidence=entries)
+        if gatherer.biblatex_rendering:
+            record["bibliography_rendering_declarations"] = gatherer.biblatex_rendering
+        if missing:
+            raise ParseError("Cited bibliography entries unavailable: " + ", ".join(missing[:12]))
+        ready = True
+    except (ParseError, OSError, UnicodeError) as exc:
+        record["error"] = str(exc)
+        record["error_origin"] = error_origin(str(exc), gatherer)
+    finally:
+        if gatherer is not None and gatherer.root_selection:
+            record["root_selection"] = gatherer.root_selection
+        if gatherer is not None and gatherer.bbl_evidence:
+            record["bbl_sources"] = gatherer.bbl_evidence
+        if gatherer is not None and gatherer.missing_bib_resources:
+            record["unavailable_bib_resources"] = gatherer.missing_bib_resources
+    if ready:
         try:
             tree = Tree(aid, version, gatherer, {})
             tree.parse(body)
@@ -3359,29 +3390,69 @@ def parse_versions(aid, sources):
             if unavailable:
                 raise ParseError("Cited bibliography entries unavailable after expansion: " + ", ".join(unavailable[:12]))
             unify(aid, {version: entries})  # Reject an ambiguous key in this version only.
-            good[version] = entries
+            valid = True
         except ParseError as exc:
             record["error"] = str(exc)
             record["error_origin"] = error_origin(str(exc), gatherer)
-    rows, aliases, conflicts = unify(aid, good)
+    return gatherer, body, entries, record, valid
+
+
+def _render_version(aid, version, gatherer, body, aliases):
+    tree = Tree(aid, version, gatherer, aliases)
+    tree.parse(body)
+    return tree.nodes, tree.edges, tree.warnings, tree.layout_metadata
+
+
+def parse_versions(aid, sources, *, version_executor=None):
+    """Keep cross-version bibliography union; optionally bound each version's work."""
+    prepared, records, good = {}, [], {}
+    def execute(version, function, arguments):
+        return (function(*arguments) if version_executor is None else
+                version_executor(version, function, arguments))
+    for version, path in sources:
+        try:
+            gatherer, body, entries, record, valid = execute(
+                version, _prepare_version, (aid, version, path))
+        except TimeoutError:
+            record = dict(version=version, status="parse_error", root=None,
+                          included_files=[], bibliography_status=None,
+                          error="Parse timeout; retryable on resume", error_origin="timeout", retryable=True)
+            valid = False
+        records.append(record)
+        if valid:
+            prepared[version] = (gatherer, body, entries, record)
+            good[version] = entries
+    # A failed rendering must not alter the keys of a successful version.
+    while True:
+        rows, aliases, conflicts = unify(aid, good)
+        rendered, failed = {}, []
+        for version in good:
+            gatherer, body, entries, record = prepared[version]
+            try:
+                rendered[version] = execute(version, _render_version,
+                    (aid, version, gatherer, body, aliases[version]))
+            except TimeoutError:
+                record.update(error="Parse timeout; retryable on resume", error_origin="timeout", retryable=True)
+                failed.append(version)
+        if not failed:
+            break
+        for version in failed:
+            del good[version]
     elements, hierarchy = {}, []
-    for version, (gatherer, body, entries, record) in prepared.items():
-        if version not in good:
-            continue
-        tree = Tree(aid, version, gatherer, aliases[version])
-        tree.parse(body)
-        for node in tree.nodes:
+    for version in good:
+        gatherer, body, entries, record = prepared[version]
+        nodes, edges, warnings, layout_metadata = rendered[version]
+        for node in nodes:
             previous = elements.setdefault(node["element_id"], node)
             if previous != node:
                 raise ParseError("Element ID collision")
-        hierarchy.extend(tree.edges)
-        record.update(status="success", error=None, error_origin=None, element_count=len(tree.nodes),
-                      edge_count=len(tree.edges), bibliography_count=len(entries),
-                      citation_aliases=aliases[version])
-        notes = set(tree.warnings) | gatherer.math_aliases_used
+        hierarchy.extend(edges)
+        record.update(status="success", error=None, error_origin=None, element_count=len(nodes),
+                      edge_count=len(edges), bibliography_count=len(entries), citation_aliases=aliases[version])
+        notes = set(warnings) | gatherer.math_aliases_used
         if notes:
             record["normalization_notes"] = sorted(notes)
-        if tree.layout_metadata:
-            record["layout_metadata"] = tree.layout_metadata
+        if layout_metadata:
+            record["layout_metadata"] = layout_metadata
     return dict(elements=list(elements.values()), hierarchy=hierarchy, bibtex=rows,
                 versions=records, bibliography_conflicts=conflicts)

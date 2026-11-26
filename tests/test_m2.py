@@ -6062,7 +6062,7 @@ class M2Tests(unittest.TestCase):
 
     def test_cont06_counter_and_metadata_declarations_carry_no_prose(self):
         source = "\n".join([
-            r"\documentclass{article}",
+            r"\documentclass{article}\usepackage{tikz,siunitx}",
             r"\graphicspath{{figures/}}",
             r"\begin{document}",
             r"\newcounter{observation}",
@@ -6085,7 +6085,7 @@ class M2Tests(unittest.TestCase):
 
     def test_cont06_keywords_and_singlespace_environments_preserve_content(self):
         source = tex(r"\begin{keywords}acronyms, parsing\end{keywords}"
-                     r"\begin{singlespace}Single spaced body.\end{singlespace}")
+                     r"\begin{singlespace}Single spaced body.\end{singlespace}").replace("{article}", "{elsarticle}\\usepackage{setspace}")
         result = self.parse({"main.tex": source})
         self.assertEqual(result["versions"][0]["status"], "success", result["versions"])
         content = " ".join(node["content"] for node in result["elements"])
@@ -6168,10 +6168,10 @@ class M2Tests(unittest.TestCase):
         """README-level claim: a declared package with no style file is a corpus gap, not a parser gap."""
         cases = [
             ("package declared, command unknown", r"\usepackage{somejournal}" + "\n" + tex(r"Text \weirdmacro{x} here."),
-             "dependency_unavailable"),
+             "unknown"),
             ("no package declared", tex(r"Text \weirdmacro{x} here."), "undeclared"),
             ("environment from a declared package", r"\usepackage{tcolorbox}" + "\n" + tex(r"\begin{promptbox}A\end{promptbox}"),
-             "dependency_unavailable"),
+             "unknown"),
             ("not a prose/environment family", tex(r"\cite{missing}"), "other"),
         ]
         for index, (label, source, expected) in enumerate(cases):

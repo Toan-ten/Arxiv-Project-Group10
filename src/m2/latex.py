@@ -96,11 +96,6 @@ def algorithm_declaration(text, pos, name):
 def command(text, pos):
     m = _COMMAND_RE.match(text, pos)
     if not m:
-        # A lone trailing backslash has no command name. Treat it as a
-        # line break so the source can still be parsed instead of failing
-        # on a malformed/stray backslash.
-        if pos < len(text) and text[pos] == "\\":
-            return "\\", pos + 1
         raise ParseError("Trailing backslash")
     return m.group(1), m.end()
 
@@ -1040,6 +1035,7 @@ class Gatherer:
         self.listing_options = {}
         self.box_styles = {}
         self.local_environments = set()
+        self.layout_environment_overrides = {}
         self.environment_definitions = {}
         self.encoding = {}
         self.macros = {}
@@ -1233,6 +1229,18 @@ class Gatherer:
                         default, start = group(text, start, "[", "]")
                 before, start = group(text, start, inline_literals=False)
                 after, end = group(text, start, inline_literals=False)
+                # An explicit abstract label and whitespace/font changes carry
+                # no extra scientific payload. Keep the exact source as audit
+                # evidence. Broader/local replacements remain unsupported.
+                if (name == "renewenvironment" and env == "abstract" and argc == 0
+                        and default is None and not self.document_started and not scope_depth
+                        and re.fullmatch(r"\s*\\small\s*\\noindent\s*\\textbf\{Abstract\.\}"
+                                         r"\s*\\normalsize\s*\\ignorespaces\s*", before)
+                        and re.fullmatch(r"\s*\\par\s*\\noindent\s*\\ignorespacesafterend\s*", after)
+                        and not {"small", "noindent", "textbf", "normalsize", "ignorespaces", "par", "ignorespacesafterend"} & self.macros.keys()):
+                    self.layout_environment_overrides[env] = (before, after)
+                else:
+                    self.layout_environment_overrides.pop(env, None)
                 if name == "newenvironment" and env not in self.local_environments:
                     self.environment_definitions[env] = (argc, default, before, after)
                 else:
@@ -1261,13 +1269,6 @@ class Gatherer:
                 # Parameterized TeX primitives are not expanded as LaTeX macros.
                 start = skip_space(text, end)
                 macro, start = command(text, start)
-                if macro == "eqref":
-                    brace = text.find("{", start)
-                    if brace >= 0:
-                        _, end = group(text, brace, inline_literals=False)
-                    out.append(" ")
-                    pos = end
-                    continue
                 brace = text.find("{", start)
                 if brace < 0:
                     raise ParseError("Malformed TeX macro definition")

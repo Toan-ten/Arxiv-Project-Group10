@@ -1,0 +1,582 @@
+[
+  {
+    "name": "basic_bibtex",
+    "body": "\\section{Results}Science $x=y$ \\cite{k}.\\bibliography{r}",
+    "preamble": "",
+    "contains": [
+      "Science",
+      "$x=y$",
+      "\\cite{k}"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "smash_preserves_body",
+    "body": "Before \\smash{SCIENTIFIC RESULT} after.\\cite{k}\\bibliography{r}",
+    "preamble": "",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "\\cite{k}"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "smash_local_override",
+    "body": "\\smash{RESULT}",
+    "preamble": "\\renewcommand{\\smash}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "scfigure_with_provider",
+    "body": "\\section{Results}\\begin{SCfigure}Diagram\\caption{SCIENTIFIC RESULT \\cite{k}}\\end{SCfigure}After.\\bibliography{r}",
+    "preamble": "\\usepackage{sidecap}",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "After."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": "figure"
+  },
+  {
+    "name": "abstract_star_with_local_definition",
+    "body": "\\begin{abstract*}BODY\\end{abstract*}After.",
+    "preamble": "\\newenvironment{abstract*}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT",
+      "After."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "single_space_with_provider",
+    "body": "\\section{Results}\\begin{singlespace}SCIENTIFIC RESULT \\cite{k}.\\end{singlespace}After.\\bibliography{r}",
+    "preamble": "\\usepackage{setspace}",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "After.",
+      "\\cite{k}"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "single_space_local_definition",
+    "body": "\\begin{singlespace}BODY\\end{singlespace}",
+    "preamble": "\\newenvironment{singlespace}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "font_literal_brackets",
+    "body": "Before \\begin{large}[SCIENTIFIC RESULT]\\end{large} after.",
+    "preamble": "",
+    "contains": [
+      "Before [SCIENTIFIC RESULT] after."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "font_heading_state",
+    "body": "\\section{Outer}\\begin{large}\\section{Inner}Inside.\\end{large} After.",
+    "preamble": "",
+    "contains": [],
+    "expect_reject": false,
+    "relation": [
+      "After.",
+      "Inner"
+    ],
+    "kind": null
+  },
+  {
+    "name": "font_local_override",
+    "body": "\\begin{large}BODY\\end{large}",
+    "preamble": "\\renewcommand{\\large}{SCIENTIFIC RESULT}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "futurelet_execution",
+    "body": "Before.\\futurelet\\look\\dispatch X After.",
+    "preamble": "\\newcommand{\\dispatch}{SCIENTIFIC RESULT}",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "X",
+      "After."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_conference",
+    "body": "\\conference{RESULT}",
+    "preamble": "\\newcommand{\\conference}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_TITLE",
+    "body": "\\TITLE{RESULT}",
+    "preamble": "\\newcommand{\\TITLE}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_usetikzlibrary",
+    "body": "\\usetikzlibrary{RESULT}",
+    "preamble": "\\newcommand{\\usetikzlibrary}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_sisetup",
+    "body": "\\sisetup{RESULT}",
+    "preamble": "\\newcommand{\\sisetup}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_editor",
+    "body": "\\editor{RESULT}",
+    "preamble": "\\newcommand{\\editor}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_ninept",
+    "body": "\\ninept{RESULT}",
+    "preamble": "\\newcommand{\\ninept}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_AND",
+    "body": "\\AND{RESULT}",
+    "preamble": "\\newcommand{\\AND}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_lefttitle",
+    "body": "\\lefttitle{RESULT}",
+    "preamble": "\\newcommand{\\lefttitle}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_IEEEaftertitletext",
+    "body": "\\IEEEaftertitletext{RESULT}",
+    "preamble": "\\newcommand{\\IEEEaftertitletext}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_collaboration",
+    "body": "\\collaboration{RESULT}",
+    "preamble": "\\newcommand{\\collaboration}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_refstepcounter",
+    "body": "\\refstepcounter{RESULT}",
+    "preamble": "\\renewcommand{\\refstepcounter}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_tikzset",
+    "body": "\\tikzset{RESULT}",
+    "preamble": "\\newcommand{\\tikzset}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_override_graphicspath",
+    "body": "\\graphicspath{RESULT}",
+    "preamble": "\\newcommand{\\graphicspath}[1]{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "arraycolsep_dimension",
+    "body": "Before.\\arraycolsep=1.4pt After.\\cite{k}\\bibliography{r}",
+    "preamble": "",
+    "contains": [
+      "Before.",
+      "After.",
+      "\\cite{k}"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "arraycolsep_malformed",
+    "body": "\\arraycolsep{SCIENTIFIC RESULT}After.",
+    "preamble": "",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "tikzcd_diagram",
+    "body": "\\section{Results}\\begin{tikzcd}A\\arrow[r]&B\\end{tikzcd}After.",
+    "preamble": "\\usepackage{tikz-cd}",
+    "contains": [
+      "\\arrow[r]",
+      "After."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": "figure"
+  },
+  {
+    "name": "tikzstyle_configuration",
+    "body": "\\tikzstyle{box}=[draw]SCIENTIFIC RESULT.",
+    "preamble": "\\usepackage{tikz}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "tikzset_configuration",
+    "body": "\\tikzset{box/.style={draw}}SCIENTIFIC RESULT.",
+    "preamble": "\\usepackage{tikz}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "keyfinding_local_definition",
+    "body": "\\begin{keyfindingbox}BODY\\end{keyfindingbox}",
+    "preamble": "\\newenvironment{keyfindingbox}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "captionof_known_provider",
+    "body": "\\captionof{figure}{SCIENTIFIC RESULT \\cite{k}}After.\\bibliography{r}",
+    "preamble": "\\usepackage{capt-of}",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "After.",
+      "\\cite{k}"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "captionof_without_provider",
+    "body": "\\captionof{figure}{SCIENTIFIC RESULT}",
+    "preamble": "",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "counter_print_declared",
+    "body": "There are \\themycount items.",
+    "preamble": "\\newcounter{mycount}",
+    "contains": [
+      "\\themycount",
+      "items."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "counter_local_macro",
+    "body": "Value \\themycount.",
+    "preamble": "\\newcounter{mycount}\\renewcommand{\\themycount}{SCIENTIFIC RESULT}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "counter_in_unused_factory",
+    "body": "Value \\theghost.",
+    "preamble": "\\newcommand{\\factory}{\\newcounter{ghost}}",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "counter_in_false_branch",
+    "body": "Value \\theghost.",
+    "preamble": "\\iffalse\\newcounter{ghost}\\fi",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "counter_missing_article_chapter",
+    "body": "Value \\thechapter.",
+    "preamble": "",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "primitive_eqref_override",
+    "body": "Equation \\eqref{x}.",
+    "preamble": "\\def\\eqref#1{SCIENTIFIC #1}",
+    "contains": [
+      "SCIENTIFIC x"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "error_origin_typo",
+    "body": "\\THISISTYPO{SCIENTIFIC RESULT}",
+    "preamble": "\\usepackage{graphicx}",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "amsmath_guard_absent",
+    "body": "\\begin{subequations}\\begin{equation}x=y\\end{equation}\\end{subequations}",
+    "preamble": "",
+    "contains": [],
+    "expect_reject": true,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "amsmath_guard_present",
+    "body": "\\begin{subequations}\\begin{equation}x=y\\end{equation}\\end{subequations}",
+    "preamble": "\\usepackage{amsmath}",
+    "contains": [
+      "x=y"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "frontmatter_elsarticle",
+    "body": "\\begin{frontmatter}\\title{Title}\\begin{abstract}SCIENTIFIC RESULT.\\end{abstract}\\end{frontmatter}\\section{Results}After.",
+    "preamble": "",
+    "contains": [
+      "SCIENTIFIC RESULT",
+      "After."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null,
+    "documentclass": "elsarticle"
+  },
+  {
+    "name": "counter_optional_reset_argument",
+    "body": "There are \\themycount items.",
+    "preamble": "\\newcounter{mycount}[section]",
+    "contains": [
+      "\\themycount",
+      "items."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null,
+    "not_contains": [
+      "[section]"
+    ]
+  },
+  {
+    "name": "scfigure_local_definition",
+    "body": "\\begin{SCfigure}BODY\\end{SCfigure}",
+    "preamble": "\\newenvironment{SCfigure}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "hypersetup_conditional_metadata",
+    "body": "\\section{Results}SCIENTIFIC RESULT.",
+    "preamble": "\\usepackage{hyperref}\\ifpdf\\hypersetup{pdftitle={Metadata A}}\\else\\hypersetup{pdftitle={Metadata B}}\\fi",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_renew_SCfigure",
+    "body": "\\begin{SCfigure}BODY\\end{SCfigure}",
+    "preamble": "\\usepackage{sidecap}\\renewenvironment{SCfigure}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "local_renew_tikzcd",
+    "body": "\\begin{tikzcd}BODY\\end{tikzcd}",
+    "preamble": "\\usepackage{tikz-cd}\\renewenvironment{tikzcd}{SCIENTIFIC }{ RESULT}",
+    "contains": [
+      "SCIENTIFIC",
+      "BODY",
+      "RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "textunderscore_plain",
+    "body": "Science\\textunderscore{}DATA. Following text.",
+    "preamble": "",
+    "contains": [
+      "Science_DATA.",
+      "Following text."
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "textunderscore_local_override",
+    "body": "\\textunderscore",
+    "preamble": "\\renewcommand{\\textunderscore}{SCIENTIFIC RESULT}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "relation": null,
+    "kind": null
+  },
+  {
+    "name": "shared_title_override",
+    "source": "\\documentclass{article}\\renewcommand{\\title}[1]{SCIENTIFIC #1}\\begin{document}\\title{RESULT}After.\\end{document}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "kind": null,
+    "relation": null
+  },
+  {
+    "name": "shared_maketitle_abstract",
+    "source": "\\documentclass{article}\\renewcommand{\\maketitle}{\\begin{abstract}SCIENTIFIC RESULT.\\end{abstract}}\\begin{document}\\maketitle After.\\end{document}",
+    "contains": [
+      "SCIENTIFIC RESULT"
+    ],
+    "expect_reject": false,
+    "kind": null,
+    "relation": null
+  }
+]

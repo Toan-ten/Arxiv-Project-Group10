@@ -7,20 +7,20 @@ import os
 from pathlib import Path
 import platform
 import re
-import signal
+import math
 import subprocess
 import sys
 import time
 import uuid
 
-# A paper that hangs must fail visibly rather than stall a corpus-wide run. The guard
-# is POSIX-only (signal.alarm); elsewhere the parse simply runs without a deadline.
+# Each version uses a bounded child worker on Windows and Linux alike.
 PARSE_TIMEOUT_SECONDS = 300
 from collections import Counter
 from datetime import datetime, timezone
 
 from .latex import ParseError, safe_path
 from .parser import parse_versions
+from .execution import VersionExecutor
 
 
 TABLE_COLUMNS = {
@@ -60,9 +60,15 @@ def peak_rss_kib_linux():
 
 
 def output_bytes(root):
-    """Size of the published output, excluding per-attempt bookkeeping."""
-    return sum(path.stat().st_size for path in root.rglob("*")
-               if path.is_file() and "attempts" not in path.relative_to(root).parts)
+    """Current publication size, excluding bookkeeping and retry history."""
+    total = 0
+    for path in root.rglob("*"):
+        parts = path.relative_to(root).parts
+        history = (parts[0] in {"attempts", "summaries", "partial_attempts"}
+                   or len(parts) > 2 and parts[0] == "papers" and parts[2] == "partial")
+        if path.is_file() and not history:
+            total += path.stat().st_size
+    return total
 
 
 def write_new(path, data):
@@ -246,7 +252,10 @@ def export_parquet(root, tables):
     return checksums
 
 
-def run(corpus, output, *, paper=None, version=None, limit_versions=None, selected_versions=None):
+def run(corpus, output, *, paper=None, version=None, limit_versions=None, selected_versions=None, parse_timeout_seconds=PARSE_TIMEOUT_SECONDS):
+    if (isinstance(parse_timeout_seconds, bool) or not isinstance(parse_timeout_seconds, (int, float))
+            or not math.isfinite(parse_timeout_seconds) or parse_timeout_seconds <= 0):
+        raise ParseError("parse_timeout_seconds must be finite and positive")
     started = time.perf_counter()
     started_at = datetime.now(timezone.utc).isoformat()
     corpus, output = Path(corpus).resolve(), Path(output).resolve()
@@ -268,7 +277,8 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
     before, file_count = source_fingerprint(corpus)
     code_hash = digest(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py"))))
     definition = dict(input_fingerprint=before, parser_fingerprint=code_hash,
-                      selection=[(a, owner, v) for a, owner, v, _, _ in cohort])
+                      selection=[(a, owner, v) for a, owner, v, _, _ in cohort],
+                      parse_timeout_seconds=parse_timeout_seconds)
     run_root = output / ("run-" + digest(encoded(definition))[:16])
     run_root.mkdir(parents=True, exist_ok=True)
     lock = run_root / ".writer.lock"
@@ -304,36 +314,29 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                     except (ParseError, OSError) as exc:
                         record.update(status="input_error", error=str(exc))
                     records.append(record)
-                # platform alarm is POSIX-only: on Windows the guard is skipped so the
-                # run cannot crash, and no version is blamed for a timeout it never had.
-                alarm = getattr(signal, "SIGALRM", None)
-                if alarm is not None:
-                    def _timeout_handler(signum, frame):
-                        raise TimeoutError("parse timeout")
-                    signal.signal(alarm, _timeout_handler)
-                    signal.alarm(PARSE_TIMEOUT_SECONDS)
-                try:
-                    result = parse_versions(aid, ready)
-                except TimeoutError:
-                    result = {"versions": [{"version": ver, "status": "parse_error", "error": f"Parse timeout (>{PARSE_TIMEOUT_SECONDS}s)"} for ver, _ in ready],
-                              "elements": [], "hierarchy": [], "bibtex": []}
-                finally:
-                    if alarm is not None:
-                        signal.alarm(0)
+                result = parse_versions(aid, ready, version_executor=VersionExecutor(parse_timeout_seconds))
                 by_version = {r["version"]: r for r in result.pop("versions")}
                 for rec in records:
                     if rec["version"] in by_version:
                         rec.update(by_version[rec["version"]])
                 result["versions"] = records
                 validate_tables(result)
-                write_new(result_path, encoded(dict(payload=result, sha256=digest(encoded(result)))))
+                checkpoint = encoded(dict(payload=result, sha256=digest(encoded(result))))
+                if any(record.get("retryable") for record in result["versions"]):
+                    # Preserve good tables from this attempt, but never freeze a
+                    # temporary timeout into the immutable completed-paper cache.
+                    write_new(result_path.parent / "partial" / (uuid.uuid4().hex + ".json"), checkpoint)
+                else:
+                    write_new(result_path, checkpoint)
             validate_tables(result)
             for table in TABLE_COLUMNS:
                 all_tables[table].extend(result[table])
             version_records.extend(result["versions"])
         validate_tables(all_tables)
-        checksums = export_parquet(run_root, all_tables)
-        write_new(run_root / "output_checksums.json", encoded(checksums))
+        retryable = any(record.get("retryable") for record in version_records)
+        publication_root = run_root / "partial_attempts" / uuid.uuid4().hex if retryable else run_root
+        checksums = export_parquet(publication_root, all_tables)
+        write_new(publication_root / "output_checksums.json", encoded(checksums))
         after, _ = source_fingerprint(corpus)
         if after != before:
             raise ParseError("Input changed during M2 run; results must not be certified")
@@ -349,6 +352,8 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
             provenance.update(git_commit=None, git_dirty=None)
         statuses = Counter(r["status"] for r in version_records)
         origins = Counter(r.get("error_origin") for r in version_records if r["status"] == "parse_error")
+        peak_rss = peak_rss_kib_linux()
+        size_bytes = output_bytes(publication_root)
         wall_seconds = time.perf_counter() - started
         # parse_versions records element_count per successful version, so the
         # before/after deduplication figures come from evidence, not estimation.
@@ -357,7 +362,7 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         attempt = dict(started_at=started_at, ended_at=datetime.now(timezone.utc).isoformat(),
                        wall_seconds=wall_seconds,
                        avg_seconds_per_publication=wall_seconds / len(grouped),
-                       timing_scope="read/fingerprint input, parse, validate, write and reread Parquet; cached reruns recorded separately",
+                       timing_scope="read/fingerprint input, parse, validate, write and reread Parquet; cached reruns recorded separately; resource reads included; attempt/summary writes excluded",
                        papers=len(grouped), versions=len(version_records), statuses=dict(statuses),
                        error_origins=dict(origins),
                        cached_papers=cached, tables={n: len(rows) for n, rows in all_tables.items()},
@@ -366,8 +371,11 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
                                   elements_removed=elements_before - elements_after,
                                   element_removal_ratio=((elements_before - elements_after) / elements_before
                                                          if elements_before else None)),
-                       peak_rss_kib_linux=peak_rss_kib_linux(),
-                       output_bytes=output_bytes(run_root),
+                       peak_rss_kib_linux=peak_rss,
+                       peak_rss_scope="current_process_lifetime_excludes_children",
+                       output_bytes=size_bytes,
+                       output_bytes_scope="current_publication_directory_excludes_attempts_summaries_partial_history",
+                       publication_root=str(publication_root), retryable=retryable,
                        all_versions_processed=all(r["status"] in {"success", "empty_no_tex"} for r in version_records),
                        versions_detail=version_records, provenance=provenance, run_root=str(run_root))
         attempt_id = uuid.uuid4().hex
@@ -377,7 +385,7 @@ def run(corpus, output, *, paper=None, version=None, limit_versions=None, select
         # counters and the per-version outcome, so record that separately.
         compact = {key: value for key, value in attempt.items() if key != "versions_detail"}
         compact["versions_detail"] = [
-            {k: record[k] for k in ("arxiv_id", "version", "status", "error", "error_origin", "element_count",
+            {k: record[k] for k in ("arxiv_id", "version", "status", "error", "error_origin", "retryable", "element_count",
                                     "m1_source_status", "bibliography_status") if k in record}
             for record in version_records
         ]
