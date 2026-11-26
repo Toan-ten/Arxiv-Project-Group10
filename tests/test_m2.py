@@ -6207,6 +6207,45 @@ class M2Tests(unittest.TestCase):
                         self.assertEqual(element["kind"], "figure", element)
 
 
+    def test_bib10_sibling_bbl_supplies_keys_without_a_bibliography_request(self):
+        """An uploaded rendered bibliography is data: cite keys need no \bibliography command."""
+        result = self.parse({
+            "main.tex": tex(r"Text \cite{AllamEtal2021} and \cite{LeCun2015}."),
+            "main.bbl": r"\begin{thebibliography}{10}"
+                        r"\bibitem{AllamEtal2021} Allam, A. Synthetic data. 2021."
+                        r"\bibitem{LeCun2015} LeCun, Y. Deep learning. 2015."
+                        r"\end{thebibliography}",
+        }, aid="2508.91001")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record.get("error"))
+        self.assertEqual(record["bibliography_status"], "bbl", record)
+        self.assertEqual(sorted(record["missing_citation_keys"]), [], record)
+        self.assertEqual(len(result["bibtex"]), 2, result["bibtex"])
+
+    def test_bib11_subfiles_child_is_a_fragment_even_when_the_parent_loads_it_indirectly(self):
+        """paper.tex names main.tex as its class option, which is the subfiles contract."""
+        result = self.parse({
+            "main.tex": "\\documentclass{article}\n\\input{preamble}\n"
+                        "\\begin{document}\n\\subfile{paper}\n\\end{document}\n",
+            "preamble.tex": r"\usepackage{subfiles}",
+            "paper.tex": "\\documentclass[main]{subfiles}\n\\begin{document}\nChild prose.\n\\end{document}\n",
+        }, aid="2508.91002")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "success", record.get("error"))
+        self.assertTrue(record["root"].endswith("main.tex"), record["root"])
+
+    def test_bib12_root_failure_names_the_candidates(self):
+        """Triaging 93 duplicate-copy papers needs to know which files competed."""
+        result = self.parse({
+            "main.tex": tex(r"Main prose."),
+            "plots.tex": "\\documentclass{article}\n\\begin{document}\nPlot.\n\\end{document}\n",
+        }, aid="2508.91003")
+        record = result["versions"][0]
+        self.assertEqual(record["status"], "parse_error", record)
+        self.assertIn("found 2", record["error"])
+        self.assertIn("main.tex", record["error"])
+        self.assertIn("plots.tex", record["error"])
+
 def test_runner_attempt_records_benchmark_metrics(tmp_path):
     """The report needs wall time, per-publication time, peak RAM, output size and dedup counts."""
     corpus = tmp_path / "corpus"
