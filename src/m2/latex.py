@@ -1032,6 +1032,7 @@ class Gatherer:
         self.bib_files = []
         self.bbl_files = []
         self.bbl_evidence = []
+        self.bbl_fallback_reason = None
         self.bibliography_requests = []
         self.missing_bib_resources = []
         self.root_selection = None
@@ -1532,8 +1533,11 @@ class Gatherer:
                 file=path.relative_to(self.root).as_posix(), association=association,
                 source_file=source.relative_to(self.root).as_posix(), target=target))
 
-    def fallback_bbl(self):
-        if not self.bibliography_requests:
+    def fallback_bbl(self, cited=False):
+        # A source can cite keys without ever issuing \bibliography (the rendered
+        # bibliography was uploaded instead), so an explicit request is not the
+        # only legitimate reason to look for the root's own .bbl.
+        if not self.bibliography_requests and not cited:
             return
         if any(name in self.macros for name in ("jobname", "bibliography")):
             raise ParseError("Cannot associate .bbl with locally redefined jobname/bibliography")
@@ -1771,6 +1775,28 @@ class Gatherer:
                             evidence["via"] = [p.relative_to(self.root).as_posix() for p in chain]
                         roles[child] = [evidence]
             mains = [path for path in roots if not roles[path]]
+            # A subfiles child names its parent as the class option, but that only
+            # counts when the parent provably loads subfiles: an unprovable preamble
+            # (conditional, missing include, redefined \usepackage) proves nothing.
+            for path in roots:
+                if roles[path] or path in fragments:
+                    continue
+                declaration = self.root_class(probes[path])
+                if not declaration or declaration[0] != "subfiles" or not declaration[1]:
+                    continue
+                try:
+                    parent = self.resolve(declaration[1], path, ".tex").resolve()
+                    if parent not in roots or parent == path:
+                        continue
+                    packages = self.root_preamble_packages(parent, probes[parent], probes)
+                except ParseError:
+                    continue
+                if "subfiles" not in packages:
+                    continue
+                roles[path] = [dict(kind="included_document_body",
+                                    parent=parent.relative_to(self.root).as_posix(),
+                                    command="documentclass", target=declaration[1])]
+            mains = [path for path in roots if not roles[path]]
             if len(mains) == 1:
                 chosen = mains[0]
                 self.root_selection = dict(
@@ -1789,7 +1815,9 @@ class Gatherer:
                         self.root_selection["excluded_documents"] = self.root_selection.pop("excluded_supplements")
                 roots = [chosen]
         if len(roots) != 1:
-            raise ParseError(f"Expected exactly one documentclass root, found {len(roots)}")
+            raise ParseError(
+                f"Expected exactly one documentclass root, found {len(roots)}: "
+                + ", ".join(path.relative_to(self.root).as_posix() for path in sorted(roots)[:6]))
         if copies:
             if self.root_selection is None:
                 self.root_selection = dict(policy="equivalent_document_copies",
@@ -1805,6 +1833,18 @@ class Gatherer:
         root_document_inputs(header, packages=self.packages, preamble_only=True)
         text = self.expand(roots[0])
         lexical = mask_literals(text)
+        cited = bool(re.search(r"\\(?:[cC]ite[a-zA-Z]*|nocite)\s*[\[{]", lexical))
+        inline_bibliography = bool(re.search(r"\\begin\s*\{thebibliography\}", lexical))
+        # A rendered .bbl is only evidence when nothing else already supplies the
+        # bibliography: a parsed .bib or inline bibitems win, as they always did.
+        if not self.bbl_files and not self.bib_files and not inline_bibliography and (
+                self.bibliography_requests or cited):
+            try:
+                self.fallback_bbl(cited=cited)
+            except ParseError as exc:
+                # A sibling .bbl is optional evidence, not a requirement. Keep the
+                # version's own failure instead of inventing one from an ambiguity.
+                self.bbl_fallback_reason = str(exc)
         class_match = re.search(r"\\documentclass(?:\s*\[[^\]]*\])?\s*\{([^{}]+)\}", lexical)
         self.document_class = class_match[1].strip() if class_match else None
         self.packages = {name.strip() for packages in re.findall(
