@@ -15,30 +15,37 @@ def _read_parquet(path):
     ]
 
 
-def load_references(path):
-    """Load M1 references Parquet. Returns list of dicts."""
+def _load_table(path, table):
+    """Load one M2/M1 table, never a neighbour's rows.
+
+    A run writes tables into sibling folders (``data/bibtex``, ``data/elements``,
+    ``data/hierarchy``), so a directory has to be resolved to the named table
+    rather than to every Parquet file underneath it; otherwise the bibliography
+    load would also return element and hierarchy rows.
+    """
     if os.path.isdir(path):
-        files = sorted(glob.glob(os.path.join(path, "**", "*.parquet"), recursive=True))
+        nested = os.path.join(path, table)
+        if os.path.isdir(nested):
+            files = sorted(glob.glob(os.path.join(nested, "**", "*.parquet"), recursive=True))
+        else:
+            files = sorted(glob.glob(os.path.join(path, table + "*.parquet")))
         if not files:
-            raise FileNotFoundError("No parquet files in " + path)
+            raise FileNotFoundError("No " + table + " parquet files in " + path)
         rows = []
-        for f in files:
-            rows.extend(_read_parquet(f))
+        for name in files:
+            rows.extend(_read_parquet(name))
         return rows
     return _read_parquet(path)
+
+
+def load_references(path):
+    """Load M1 references Parquet. Returns list of dicts."""
+    return _load_table(path, "references")
 
 
 def load_bibtex(path):
     """Load M2 BibTeX Parquet. Returns list of dicts."""
-    if os.path.isdir(path):
-        files = sorted(glob.glob(os.path.join(path, "**", "*.parquet"), recursive=True))
-        if not files:
-            raise FileNotFoundError("No parquet files in " + path)
-        rows = []
-        for f in files:
-            rows.extend(_read_parquet(f))
-        return rows
-    return _read_parquet(path)
+    return _load_table(path, "bibtex")
 
 
 def group_by_arxiv(rows):

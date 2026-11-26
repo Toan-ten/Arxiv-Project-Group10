@@ -52,3 +52,40 @@ class TestM3Matching(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestM3Corpus(unittest.TestCase):
+    def test_directory_load_reads_only_the_named_table(self):
+        """A run writes data/bibtex, data/elements and data/hierarchy side by side."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import tempfile
+        from pathlib import Path
+        from src.m3.corpus import load_bibtex, load_references
+
+        with tempfile.TemporaryDirectory() as scratch:
+            data = Path(scratch) / "data"
+            for table, rows in (
+                ("bibtex", [{"arxiv_id": "2508.00001", "key": "a2020", "title": "Bib"} ]),
+                ("elements", [{"arxiv_id": "2508.00001", "kind": "sentence", "content": "Prose"} ]),
+                ("hierarchy", [{"arxiv_id": "2508.00001", "child": "x", "parent": "y"} ]),
+                ("references", [{"arxiv_id": "2508.00001", "title": "Ref", "doi": "10.1/x"} ]),
+            ):
+                folder = data / table
+                folder.mkdir(parents=True)
+                pq.write_table(pa.Table.from_pylist(rows), folder / "part-0.parquet")
+
+            bibtex = load_bibtex(str(data))
+            self.assertEqual([row["key"] for row in bibtex], ["a2020"], bibtex)
+            references = load_references(str(data))
+            self.assertEqual([row["doi"] for row in references], ["10.1/x"], references)
+
+    def test_missing_table_fails_instead_of_loading_everything(self):
+        import tempfile
+        from pathlib import Path
+        from src.m3.corpus import load_bibtex
+
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "elements").mkdir(parents=True)
+            with self.assertRaises(FileNotFoundError):
+                load_bibtex(scratch)
