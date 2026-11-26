@@ -1085,10 +1085,10 @@ class Gatherer:
                     raise ParseError(f"Unknown source encoding: {path.name}") from exc
                 encoding = "utf-8 (non-UTF8 bytes confined to comments)"
                 self.math_aliases_used.add("Non-UTF8 bytes confined to TeX comments: " +
-                                           path.relative_to(self.root).as_posix())
+                                           self.source_label(path))
             else:
                 raise ParseError(f"Unknown source encoding: {path.name}")
-        self.encoding[path.relative_to(self.root).as_posix()] = encoding
+        self.encoding[self.source_label(path)] = encoding
         return strip_comments(text) if comments and not comments_removed else text
 
     def resolve(self, name, current, suffix):
@@ -1116,7 +1116,7 @@ class Gatherer:
         self.expanded_bytes += len(text)
         if self.expanded_bytes > 16 * 1024 * 1024:
             raise ParseError("Expanded source exceeds 16 MiB")
-        rel = path.relative_to(self.root).as_posix()
+        rel = self.source_label(path)
         if rel not in self.visited:
             self.visited.append(rel)
         if body_mode:
@@ -1461,7 +1461,19 @@ class Gatherer:
                     raise ParseError("subfile requires a literal subfiles package declaration")
                 target, end = literal_input_filename(text, end, allow_unbraced=True)
                 if name != "include" or self.include_only is None or target in self.include_only:
-                    resource = self.resolve(target, path, ".tex")
+                    try:
+                        resource = self.resolve(target, path, ".tex")
+                    except ParseError:
+                        # \input{main.bbl} names a bibliography arXiv's bibtex produced,
+                        # so the recorded rendering is the file the paper compiled with.
+                        resource = None
+                        if target.lower().endswith(".bbl"):
+                            wanted = Path(target.replace("\\", "/")).name
+                            recorded = [item for item in self.recorded_bbl() if item.name == wanted]
+                            if len(recorded) == 1:
+                                resource = recorded[0]
+                        if resource is None:
+                            raise
                     if resource.suffix.lower() == ".bbl":
                         # A rendered bibliography is data, not executable TeX setup.
                         self.register_bbl(resource, "explicit_input", path, target)
@@ -1531,8 +1543,28 @@ class Gatherer:
         if path not in self.bbl_files:
             self.bbl_files.append(path)
             self.bbl_evidence.append(dict(
-                file=path.relative_to(self.root).as_posix(), association=association,
-                source_file=source.relative_to(self.root).as_posix(), target=target))
+                file=self.source_label(path), association=association,
+                source_file=self.source_label(source), target=target))
+
+    def source_label(self, path):
+        """A portable label for evidence that may live beside the version, not inside it."""
+        for base in (self.root, self.root.parent):
+            try:
+                return path.relative_to(base).as_posix()
+            except ValueError:
+                continue
+        return path.name
+
+    def recorded_bbl(self):
+        """The bibliography M1 recorded from the compilation arXiv actually ran.
+
+        It lives beside the version rather than inside it, because a version
+        directory may only hold the files its manifest lists.
+        """
+        folder = self.root.parent / "bbl" / self.root.name / "source_bbl"
+        if not folder.is_dir():
+            return []
+        return sorted(path for path in folder.glob("*.bbl") if path.is_file())
 
     def fallback_bbl(self, cited=False):
         # A source can cite keys without ever issuing \bibliography (the rendered
@@ -1550,6 +1582,16 @@ class Gatherer:
                 candidates.append(path)
         if len(candidates) > 1:
             raise ParseError("Ambiguous .bbl files for document root: " + self.document_root.name)
+        if not candidates:
+            # Nothing beside the source: use the rendered bibliography M1 recorded,
+            # but only when it is unambiguous for this version.
+            recorded = self.recorded_bbl()
+            matching = [path for path in recorded if path.stem == self.document_root.stem]
+            if len(matching) == 1:
+                recorded = matching
+            if len(recorded) == 1:
+                self.register_bbl(recorded[0], "m1_bbl_artifact", self.document_root, recorded[0].name)
+            return
         if candidates:
             self.register_bbl(candidates[0], "document_jobname", self.document_root,
                               self.document_root.stem + ".bbl")
