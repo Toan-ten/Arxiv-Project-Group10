@@ -6289,3 +6289,41 @@ def test_runner_attempt_records_benchmark_metrics(tmp_path):
     assert [r["status"] for r in compact["versions_detail"]] == [r["status"] for r in attempt["versions_detail"]]
     assert all("arxiv_id" in r and "bibliography_evidence" not in r for r in compact["versions_detail"])
     assert summaries[0].stat().st_size < (sorted((run_root / "attempts").glob("*.json"))[-1]).stat().st_size
+
+
+def test_bbl13_recorded_artifact_supplies_a_bibliography_the_source_never_shipped(tmp_path):
+    """arXiv's bibtex rendered it; M1 recorded it beside the version, not inside it."""
+    aid = "2508.92001"
+    paper = tmp_path / "corpus" / aid
+    (paper / "v1").mkdir(parents=True)
+    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
+    (paper / "bbl" / "v1" / "source_bbl").mkdir(parents=True)
+    (paper / "bbl" / "v1" / "source_bbl" / "main.bbl").write_text(
+        r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Recorded work. 2020."
+        r"\end{thebibliography}", encoding="utf-8")
+
+    result = parse_versions(aid, [(1, paper / "v1")])
+    record = result["versions"][0]
+    assert record["status"] == "success", record.get("error")
+    assert record["bibliography_status"] == "bbl", record
+    assert record["missing_citation_keys"] == [], record
+    assert len(result["bibtex"]) == 1, result["bibtex"]
+    assert any("source_bbl" in name for name in record["bibliography_files"]), record["bibliography_files"]
+
+
+def test_bbl14_recorded_artifact_is_ignored_when_it_would_be_ambiguous(tmp_path):
+    """Two recorded bibliographies prove nothing about which one this version used."""
+    aid = "2508.92002"
+    paper = tmp_path / "corpus" / aid
+    (paper / "v1").mkdir(parents=True)
+    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
+    folder = paper / "bbl" / "v1" / "source_bbl"
+    folder.mkdir(parents=True)
+    for name in ("first.bbl", "second.bbl"):
+        (folder / name).write_text(
+            r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Work."
+            r"\end{thebibliography}", encoding="utf-8")
+
+    record = parse_versions(aid, [(1, paper / "v1")])["versions"][0]
+    assert record["status"] == "parse_error", record
+    assert record["bibliography_status"] == "missing", record
