@@ -248,3 +248,162 @@ class TestM3Review(unittest.TestCase):
         self.assertEqual(element_surnames("Abdar, Moloud"), ["abdar"])
         self.assertEqual(element_surnames("Evdoxia Taka"), ["taka"])
         self.assertEqual(surnames(["Smith, John, Doe, Jane,"]), {"smith", "doe"})
+
+
+class TestM3AutoMatch(unittest.TestCase):
+    """The classic matcher that fills the automatic pool."""
+
+    def _corpus(self, arxiv_id="2508.20001"):
+        entries = [
+            dict(arxiv_id=arxiv_id, citation_key="good", entry_type="article",
+                 title="Stability and bifurcation in a discrete plankton model",
+                 authors=["Shoyimardonov, S.,"], year=2025, doi=None, journal=None, url=None),
+            dict(arxiv_id=arxiv_id, citation_key="unrelated", entry_type="article",
+                 title="A survey of graph neural networks for molecules",
+                 authors=["Other, B.,"], year=2019, doi=None, journal=None, url=None),
+        ]
+        refs = [
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.30001",
+                 ref_title="Stability and bifurcation in a discrete plankton model",
+                 ref_authors=["S. Shoyimardonov"], ref_submission_date="2025-07-24"),
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.30003",
+                 ref_title="Molecular property prediction with message passing networks",
+                 ref_authors=["M. Zaripov"], ref_submission_date="2024-02-02"),
+        ]
+        return entries, refs
+
+    def _sibling_corpus(self, arxiv_id="2508.20002"):
+        """Two papers of one series: same authors, the title differs in the part number."""
+        entries = [dict(arxiv_id=arxiv_id, citation_key="part2", entry_type="article",
+                        title="Stability and bifurcation in a discrete plankton model part 2",
+                        authors=["Shoyimardonov, S.,"], year=2025, doi=None, journal=None,
+                        url=None)]
+        refs = [
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.30001",
+                 ref_title="Stability and bifurcation in a discrete plankton model",
+                 ref_authors=["S. Shoyimardonov"], ref_submission_date="2025-07-24"),
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.30002",
+                 ref_title="Stability and bifurcation in a discrete plankton model part 1",
+                 ref_authors=["S. Shoyimardonov"], ref_submission_date="2025-07-01"),
+        ]
+        return entries, refs
+
+    def test_verbatim_title_with_shared_surname_is_matched(self):
+        from src.m3.auto_match import MATCHED, label_publication
+
+        entries, refs = self._corpus()
+        rows = {row["citation_key"]: row for row in label_publication(entries, refs)}
+        self.assertEqual(rows["good"]["decision"], MATCHED)
+        self.assertEqual(rows["good"]["groundtruth_arxiv_id"], "2507.30001")
+        self.assertEqual(rows["good"]["method"], "title_and_author")
+
+    def test_series_paper_is_not_matched_to_its_sibling(self):
+        from src.m3.auto_match import label_publication
+
+        entries, refs = self._sibling_corpus()
+        row = label_publication(entries, refs)[0]
+        # "part 2" against the title of "part 1": the numbers decide, so no label is invented.
+        self.assertEqual(row["decision"], "auto_none")
+        self.assertIn("number", row["reason"])
+
+    def test_a_near_tie_is_left_unlabelled_rather_than_guessed(self):
+        from src.m3.auto_match import label_publication
+
+        entries, refs = self._sibling_corpus()
+        exact = dict(refs[0], ref_title=entries[0]["title"])
+        row = label_publication(entries, [exact, refs[1]])[0]
+        # Both references carry the same title up to the part number, so the winner has no
+        # margin over the runner-up; labelling either would be a coin flip.
+        self.assertEqual(row["decision"], "auto_none")
+        self.assertIn("margin", row["reason"])
+
+    def test_unrelated_entry_carries_a_reason_not_a_label(self):
+        from src.m3.auto_match import UNMATCHED, label_publication
+
+        entries, refs = self._corpus()
+        rows = {row["citation_key"]: row for row in label_publication(entries, refs)}
+        self.assertEqual(rows["unrelated"]["decision"], UNMATCHED)
+        self.assertIsNone(rows["unrelated"]["groundtruth_arxiv_id"])
+        self.assertTrue(rows["unrelated"]["reason"])
+
+    def test_a_reference_is_claimed_at_most_once(self):
+        from src.m3.auto_match import label_publication
+
+        entries, refs = self._corpus()
+        twin = dict(entries[0], citation_key="duplicate")
+        rows = label_publication([entries[0], twin], refs)
+        claimed = [row["groundtruth_arxiv_id"] for row in rows if row["groundtruth_arxiv_id"]]
+        self.assertEqual(len(claimed), len(set(claimed)))
+        self.assertEqual(sum(1 for row in rows if row["decision"] == "auto_match"), 1)
+        self.assertEqual(sum(1 for row in rows if row["decision"] == "auto_none"), 1)
+        # Every "no" explains itself; a silent one would be impossible to audit.
+        for row in rows:
+            self.assertTrue(row["reason"], row)
+
+    def test_pool_selection_samples_representative_publications(self):
+        from src.m3.auto_match import select_auto_publications
+
+        summary = {"a": dict(entries=30, matched=0, references=10),      # no matches
+                   "b": dict(entries=30, matched=25, references=12),
+                   "c": dict(entries=20, matched=20, references=20),
+                   "d": dict(entries=400, matched=200, references=350),  # a survey
+                   "e": dict(entries=40, matched=2, references=30)}      # below the floor
+        selected, eligible = select_auto_publications(summary, limit=5, minimum_matches=10)
+        ids = [row["arxiv_id"] for row in selected]
+        self.assertEqual(ids, ["b", "c"])          # the survey and the two weak ones are out
+        self.assertEqual(len(eligible), 2)
+        selected, _ = select_auto_publications(summary, limit=5, minimum_matches=10, exclude={"c"})
+        self.assertNotIn("c", [row["arxiv_id"] for row in selected])
+
+    def test_pool_sampling_is_seeded_and_reproducible(self):
+        from src.m3.auto_match import select_auto_publications
+
+        summary = {f"2508.{index:05d}": dict(entries=50, matched=30, references=40)
+                   for index in range(40)}
+        first, _ = select_auto_publications(summary, limit=10, minimum_matches=10)
+        second, _ = select_auto_publications(summary, limit=10, minimum_matches=10)
+        self.assertEqual([row["arxiv_id"] for row in first], [row["arxiv_id"] for row in second])
+        self.assertEqual(len(first), 10)
+        other, _ = select_auto_publications(summary, limit=10, minimum_matches=10, seed=7)
+        self.assertNotEqual([row["arxiv_id"] for row in first],
+                            [row["arxiv_id"] for row in other])
+
+    def test_pool_statistics_report_the_decision_split(self):
+        from src.m3.auto_match import MATCHED, UNMATCHED, pool_statistics
+
+        rows = [dict(decision=MATCHED, method="title_and_author"),
+                dict(decision=UNMATCHED, method="none")]
+        stats = pool_statistics(rows, {"p": dict(entries=2, matched=1, references=3)})
+        self.assertEqual((stats["matched"], stats["unmatched"]), (1, 1))
+        self.assertEqual(stats["match_rate"], 0.5)
+        self.assertEqual(stats["methods"], {"title_and_author": 1})
+        self.assertEqual(stats["publications_with_matches"], 1)
+
+    def test_scores_do_not_saturate_so_evidence_still_orders_candidates(self):
+        from src.m3.matrix import pair_features
+        from src.m3.review import heuristic_score
+
+        entries, refs = self._sibling_corpus()
+        exact = dict(refs[0], ref_title=entries[0]["title"])
+        identical = heuristic_score(pair_features(entries[0], exact))
+        near_copy = heuristic_score(pair_features(entries[0], refs[1]))
+        self.assertGreater(identical, near_copy)
+        self.assertLessEqual(identical, 1.0)
+
+    def test_calibration_sweeps_thresholds_against_human_labels(self):
+        from src.m3.auto_match import MATCHED, calibrate, label_publication
+
+        entries, refs = self._corpus()
+        predicted = {row["citation_key"]: row for row in label_publication(entries, refs)}
+        truth = [dict(arxiv_id="2508.20001", citation_key=key,
+                      groundtruth_arxiv_id=row["groundtruth_arxiv_id"] if row["decision"] == MATCHED else None)
+                 for key, row in predicted.items()]
+        curve = calibrate(truth, entries, refs, thresholds=[0.5, 0.9], margins=[0.0, 0.2])
+        self.assertEqual(len(curve), 4)
+        for row in curve:
+            self.assertTrue(0.0 <= row["precision"] <= 1.0)
+            self.assertTrue(0.0 <= row["recall"] <= 1.0)
+            self.assertEqual(row["actual_matches"], 1)
+        lenient = [row for row in curve if row["threshold"] == 0.5][0]
+        self.assertGreaterEqual(lenient["accepted"], 1)
+        self.assertEqual(lenient["precision"], 1.0)

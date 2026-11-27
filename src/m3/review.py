@@ -25,13 +25,17 @@ from pathlib import Path
 
 from .matrix import pair_features, split_authors, surnames
 
-# Weights are a judgement call, documented so the page can explain every suggestion.
+# Weights are a judgement call, documented so the page can explain every suggestion. The
+# five similarities sum to 0.80 and the three bonuses to 0.20, so a perfect match scores
+# exactly 1.0 and nothing saturates early: two candidates that both look strong must remain
+# distinguishable, because a matcher that cannot separate an exact title from a near copy
+# picks between them by accident.
 SCORE_WEIGHTS = dict(
-    title_sequence_ratio=0.40,
-    title_token_jaccard=0.25,
-    title_char_ngram_cosine=0.20,
-    author_jaccard=0.10,
-    first_author_match=0.05,
+    title_sequence_ratio=0.34,
+    title_token_jaccard=0.20,
+    title_char_ngram_cosine=0.16,
+    author_jaccard=0.06,
+    first_author_match=0.04,
 )
 TITLE_BONUS = 0.10          # a title that agrees this closely is already evidence
 FIRST_AUTHOR_BONUS = 0.05   # the same first author as the entry
