@@ -183,3 +183,22 @@ class HeuristicBaseline:
             features["doi_exact"] = 0.0
             scores.append(heuristic_score(features))
         return np.asarray(scores, dtype=float)
+
+
+def cells_for_entries(entries, references, features=MODEL_FEATURES, truths=None):
+    """Every cell of one publication, whether or not the entry has a label.
+
+    Prediction needs the whole candidate matrix; training only needed the labelled entries.
+    Keeping them in one builder means the model sees exactly the same features at fit time
+    and at predict time.
+    """
+    truths = truths or {}
+    matrix, meta = [], []
+    for entry in entries:
+        truth = truths.get((entry["arxiv_id"], entry["citation_key"]))
+        for reference in references:
+            cell = pair_features(entry, reference)
+            matrix.append([cell[name] for name in features])
+            meta.append((entry["arxiv_id"], entry["citation_key"], reference["ref_arxiv_id"],
+                         truth))
+    return np.asarray(matrix, dtype=float), meta

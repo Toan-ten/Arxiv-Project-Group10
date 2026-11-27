@@ -640,3 +640,122 @@ class TestM3Model(unittest.TestCase):
         self.assertEqual(len(baseline), len(target))
         self.assertGreater(baseline[0], baseline[1])   # the matching pair outranks the other
 
+
+
+class TestM3Predictions(unittest.TestCase):
+    """The submissions table must match the statement's schema exactly."""
+
+    def _rankings(self):
+        return {
+            ("2508.40001", "a"): [(0.9, "r1", "r1"), (0.4, "r2", None), (0.2, "r3", None)],
+            ("2508.40001", "b"): [(0.1, "r4", None)],
+        }
+
+    def _refs(self):
+        return {"2508.40001": [dict(ref_arxiv_id=f"r{i}") for i in (1, 2, 3, 4)]}
+
+    def test_rows_use_the_statement_columns(self):
+        from src.m3.pipeline import PREDICTION_COLUMNS, build_predictions
+
+        rows = build_predictions(self._rankings(), {"2508.40001": "test"},
+                                 {("2508.40001", "a"): "r1"})
+        self.assertEqual(list(rows[0].keys()), PREDICTION_COLUMNS)
+        self.assertEqual(PREDICTION_COLUMNS[-1], "cand_5")
+        self.assertIn("partition", PREDICTION_COLUMNS)
+        self.assertNotIn("rank", PREDICTION_COLUMNS)
+        first = rows[0]
+        self.assertEqual((first["partition"], first["groundtruth_arxiv_id"]), ("test", "r1"))
+        self.assertEqual([first[f"cand_{i}"] for i in range(1, 4)], ["r1", "r2", "r3"])
+        self.assertIsNone(first["cand_4"])
+
+    def test_publications_outside_the_split_are_not_shipped(self):
+        from src.m3.pipeline import build_predictions
+
+        rows = build_predictions(self._rankings(), {"9999.99999": "train"})
+        self.assertEqual(rows, [])
+
+    def test_abstention_writes_an_all_null_row(self):
+        from src.m3.pipeline import build_predictions
+
+        rows = build_predictions(self._rankings(), {"2508.40001": "valid"}, abstain=0.5)
+        by_key = {row["citation_key"]: row for row in rows}
+        self.assertEqual(by_key["a"]["cand_1"], "r1")           # above the threshold survives
+        self.assertIsNone(by_key["a"]["cand_2"])                # below it, dropped
+        self.assertIsNone(by_key["b"]["cand_1"])                # nothing to name at all
+
+    def test_validation_accepts_a_good_table(self):
+        from src.m3.pipeline import build_predictions, validate_predictions
+
+        partitions = {"2508.40001": "test"}
+        rows = build_predictions(self._rankings(), partitions, {("2508.40001", "a"): "r1"})
+        report = validate_predictions(rows, partitions=partitions, references=self._refs())
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual((report["rows"], report["publications"]), (2, 1))
+
+    def test_validation_catches_the_mistakes_that_matter(self):
+        from src.m3.pipeline import build_predictions, validate_predictions
+
+        partitions = {"2508.40001": "test"}
+        rows = build_predictions(self._rankings(), partitions, {("2508.40001", "a"): "r1"})
+
+        drifted = [dict(rows[0], partition="train"), rows[1]]
+        problems = " ".join(validate_predictions(drifted, partitions=partitions)["problems"])
+        self.assertIn("was assigned", problems)
+
+        duplicated = [rows[0], dict(rows[0])]
+        problems = " ".join(validate_predictions(duplicated, partitions=partitions)["problems"])
+        self.assertIn("appears twice", problems)
+
+        stray = [dict(rows[0], cand_2="not-a-reference"), rows[1]]
+        problems = " ".join(validate_predictions(stray, partitions=partitions,
+                                                 references=self._refs())["problems"])
+        self.assertIn("not a reference of that publication", problems)
+
+        bad_truth = [dict(rows[0], groundtruth_arxiv_id="not-a-reference"), rows[1]]
+        problems = " ".join(validate_predictions(bad_truth, partitions=partitions,
+                                                 references=self._refs())["problems"])
+        self.assertIn("labels not-a-reference", problems)
+
+        wrong_columns = [{"arxiv_id": "1", "citation_key": "a", "rank": 1}]
+        problems = " ".join(validate_predictions(wrong_columns)["problems"])
+        self.assertIn("missing column", problems)
+        self.assertIn("unexpected column", problems)
+
+    def test_shards_are_written_one_per_partition_with_a_summary(self):
+        import tempfile
+        from pathlib import Path
+
+        import pyarrow.parquet as pq
+
+        from src.m3.pipeline import PREDICTION_COLUMNS, build_predictions, write_predictions
+
+        rankings = {("2508.40001", "a"): [(0.9, "r1", "r1")],
+                    ("2508.40002", "b"): [(0.8, "r9", None)]}
+        rows = build_predictions(rankings, {"2508.40001": "test", "2508.40002": "train"})
+        with tempfile.TemporaryDirectory() as folder:
+            written = write_predictions(rows, folder)
+            self.assertEqual(sorted(written), ["test", "train"])
+            table = pq.read_table(Path(folder) / Path(written["test"]["path"]).name)
+            self.assertEqual(table.schema.names, PREDICTION_COLUMNS)
+            self.assertTrue((Path(folder) / "summary.json").exists())
+
+    def test_labels_load_from_every_format_the_page_and_scripts_produce(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from src.m3.pipeline import load_labels
+
+        row = dict(arxiv_id="2508.40001", citation_key="a", groundtruth_arxiv_id="r1")
+        with tempfile.TemporaryDirectory() as folder:
+            jsonl = Path(folder) / "labels.jsonl"
+            jsonl.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            self.assertEqual(load_labels(jsonl)[("2508.40001", "a")], "r1")
+
+            export = Path(folder) / "export.json"
+            export.write_text(json.dumps({"reviewer": "ana", "rows": [row]}), encoding="utf-8")
+            self.assertEqual(load_labels(export)[("2508.40001", "a")], "r1")
+
+            legacy = Path(folder) / "legacy.json"
+            legacy.write_text(json.dumps({"2508.40001": {"a": "r1"}}), encoding="utf-8")
+            self.assertEqual(load_labels(legacy)[("2508.40001", "a")], "r1")
