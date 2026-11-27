@@ -22,6 +22,12 @@ import uuid
 
 PARSER_COMMIT = "072ee384efa2e22f743ada7786aa0f67113a1490"
 TABLES = ("elements", "hierarchy", "bibtex")
+# Verified release used by existing Drive campaigns; never accept an arbitrary
+# helper/hash pair merely because the rest of a campaign happens to match.
+LEGACY_HELPERS = {
+    ("13fb8c693382694d7eaef976002c1bf2aa1e88de",
+     "c7b6486ef55dad73eed537475d4cb614c33057508d31f41ee81ef98c140cebcc"),
+}
 
 
 def encoded(value):
@@ -369,7 +375,7 @@ def cohort_run(name, archives, scratch, campaign, runner, scope, *, existing_onl
     return result
 
 
-def export_batch(names, audits, campaign, scope):
+def export_batch(names, audits, campaign, scope, execution_config):
     label = names[0][7:11] + "-" + names[-1][7:11]
     package = campaign / "upload" / ("m2-" + scope["owner"] + "-" + label + "-" + PARSER_COMMIT[:12])
     aggregate = Counter()
@@ -386,6 +392,7 @@ def export_batch(names, audits, campaign, scope):
         versions.extend({k: r.get(k) for k in ("arxiv_id", "version", "status", "error", "bibliography_status")} for r in attempt["versions_detail"])
     coverage = dict(parser_commit=PARSER_COMMIT, owner=scope["owner"], hf_repo_id=scope["hf_repo_id"], cohorts=names,
                     requested_cohorts=scope["cohorts"], campaign=read(campaign / "campaign.json"),
+                    execution_config=execution_config,
                     cohort_count=len(names), assigned_cohort_count=50, requested_cohort_count=len(scope["cohorts"]),
                     assigned_range_complete=len(names) == 50,
                     partial_coverage=any(a["partial_coverage"] for a in audits),
@@ -419,7 +426,24 @@ def campaign_path(config, scope):
     return Path(config["output_drive_dir"]).resolve() / scope["owner"] / (label + "-" + PARSER_COMMIT[:12] + "-" + hf_hash)
 
 
-def operate(config, action):
+def validate_campaign(saved, current):
+    def stable(value):
+        result = json.loads(json.dumps(value))
+        result.pop("helper_commit", None)
+        result.pop("helper_sha256", None)
+        size = result["scope"].pop("batch_size")
+        if type(size) is not int or not 1 <= size <= 50:
+            raise ValueError("Invalid saved campaign batch size; preserve and review")
+        return result
+    if stable(saved) != stable(current):
+        raise ValueError("Existing evidence differs; incompatible campaign; preserve and review")
+    old = (saved.get("helper_commit"), saved.get("helper_sha256"))
+    active = (current["helper_commit"], current["helper_sha256"])
+    if old != active and old not in LEGACY_HELPERS:
+        raise ValueError("Unknown campaign helper release/hash; preserve and review")
+
+
+def runtime_context(config):
     scope = scope_for(config)
     if not re.fullmatch(r"[0-9a-f]{40}", config["helper_commit"]):
         raise ValueError("Invalid helper release commit")
@@ -440,49 +464,128 @@ def operate(config, action):
                     python_major_minor=list(sys.version_info[:2]), pyarrow=pyarrow.__version__,
                     cohorts=scope["cohorts"], parse_timeout_seconds=300,
                     archives=str(archives), campaign=str(campaign))
+    identity_path = campaign / "campaign.json"
+    if identity_path.exists():
+        validate_campaign(read(identity_path), identity)
+    return dict(scope=scope, repo=repo, campaign=campaign, archives=archives,
+                scratch=scratch, runner=runner, identity=identity)
+
+
+def completed_batches(campaign, scope):
+    """Validate historical packages in place, independent of today's batch size."""
+    result, seen = [], set()
+    for marker in sorted((campaign / "batches").glob("*.json")):
+        batch = read(marker)
+        names = batch.get("cohorts")
+        if (not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names)
+                or len(set(names)) != len(names) or not set(names) <= set(scope["cohorts"])):
+            raise ValueError(f"Invalid completed batch cohort selection: {marker}")
+        positions = [scope["cohorts"].index(n) for n in names]
+        if positions != list(range(positions[0], positions[0] + len(names))) or seen.intersection(names):
+            raise ValueError("Overlapping/noncontiguous historical batch; preserve and review")
+        label = names[0][7:11] + "-" + names[-1][7:11]
+        package = campaign / "upload" / ("m2-" + scope["owner"] + "-" + label + "-" + PARSER_COMMIT[:12])
+        if marker.stem != label or Path(batch.get("package", "")).resolve() != package.resolve():
+            raise ValueError("Historical package path/label mismatch")
+        coverage = read(package / "coverage.json")
+        checksums = read(package / "checksums.json")
+        required = {f"data/{t}/{n}.parquet" for t in TABLES for n in names} | {"coverage.json", "BATCH_CARD.md"}
+        if (set(checksums) != required or sha(package / "coverage.json") != batch.get("coverage_sha256")
+                or any((package / f).is_symlink() or sha(package / f) != checksums[f] for f in required)):
+            raise ValueError("Previously completed upload package is corrupt")
+        ready = read(package / "READY.json")
+        if ready != dict(verified=True, cohorts=names, checksums_sha256=sha(package / "checksums.json")):
+            raise ValueError("Historical READY evidence differs")
+        evidence = [read(campaign / "verified" / (n + ".json")) for n in names]
+        if (coverage.get("cohorts") != names or coverage.get("owner") != scope["owner"]
+                or coverage.get("parser_commit") != PARSER_COMMIT
+                or coverage.get("hf_repo_id") != scope["hf_repo_id"]
+                or coverage.get("processing_complete") is not True
+                or coverage.get("provenance") != evidence
+                or any(e.get("audit", {}).get("verified") is not True for e in evidence)):
+            raise ValueError("Historical coverage/checkpoint evidence differs")
+        seen.update(names)
+        result.append(batch)
+    return result
+
+
+def plan_from_context(context, action):
+    scope, campaign = context["scope"], context["campaign"]
+    batches = completed_batches(campaign, scope)
+    packaged = {n for b in batches for n in b["cohorts"]}
+    verified = []
+    for n in scope["cohorts"]:
+        marker = campaign / "verified" / (n + ".json")
+        if marker.exists():
+            evidence = read(marker)
+            if evidence.get("audit", {}).get("verified") is not True or not Path(evidence.get("attempt_path", "")).is_file():
+                raise ValueError("Invalid recorded cohort checkpoint; preserve and review")
+            verified.append(n)
+    if action == "smoke":
+        selected = scope["cohorts"][:1]
+    elif action == "next":
+        selected = []
+        for n in scope["cohorts"]:
+            if n in packaged:
+                if selected:
+                    break  # Keep new package ranges contiguous across historical batches.
+                continue
+            selected.append(n)
+            if len(selected) == scope["batch_size"]:
+                break
+    elif action == "audit":
+        selected = [n for n in scope["cohorts"] if n in packaged]
+    else:
+        raise ValueError("Unknown export action")
+    return dict(student_id=scope["owner"], cohort_range=[scope["start"], scope["end"]],
+                effective_batch_size=scope["batch_size"], campaign=str(campaign),
+                cohorts_completed=verified, cohorts_packaged=[n for n in scope["cohorts"] if n in packaged],
+                cohorts_this_run=selected, cohorts_reused=[n for n in selected if n in verified],
+                cohorts_requiring_parse=[n for n in selected if n not in verified])
+
+
+def execution_plan(config, action):
+    """Read-only preview; does not create a campaign, parse or update evidence."""
+    return plan_from_context(runtime_context(config), action)
+
+
+def operate(config, action):
+    context = runtime_context(config)
+    scope, campaign = context["scope"], context["campaign"]
+    archives, scratch, runner = context["archives"], context["scratch"], context["runner"]
+    identity = context["identity"]
     with writer(campaign):
-        immutable(campaign / "campaign.json", encoded(identity))
+        if (campaign / "campaign.json").exists():
+            validate_campaign(read(campaign / "campaign.json"), identity)
+        else:
+            immutable(campaign / "campaign.json", encoded(identity))
+        execution = dict(effective_batch_size=scope["batch_size"], helper_commit=config["helper_commit"],
+                         helper_sha256=sha(__file__))
+        immutable(campaign / "execution_configs" / (hashlib.sha256(encoded(execution)).hexdigest() + ".json"), encoded(execution))
+        plan = plan_from_context(context, action)
+        print(json.dumps(plan, ensure_ascii=False), flush=True)
+        names = plan["cohorts_this_run"]
         if action == "smoke":
-            return cohort_run(scope["cohorts"][0], archives, scratch, campaign, runner, scope)
-        names = scope["cohorts"]
-        size = scope["batch_size"]
-        batches = [names[i:i + size] for i in range(0, len(names), size)]
+            return cohort_run(names[0], archives, scratch, campaign, runner, scope)
         if action == "next":
-            for names in batches:
-                label = names[0][7:11] + "-" + names[-1][7:11]
-                marker = campaign / "batches" / (label + ".json")
-                if marker.exists():
-                    previous = read(marker)
-                    package = Path(previous["package"])
-                    if previous["cohorts"] != names or sha(package / "coverage.json") != previous["coverage_sha256"]:
-                        raise ValueError("Completed batch evidence changed; run audit and review")
-                    for relative, expected in read(package / "checksums.json").items():
-                        if sha(package / relative) != expected:
-                            raise ValueError("Previously completed upload package is corrupt")
-                    continue
-                audits = [cohort_run(n, archives, scratch, campaign, runner, scope) for n in names]
-                package = export_batch(names, audits, campaign, scope)
-                immutable(marker, encoded(dict(cohorts=names, package=str(package), coverage_sha256=sha(package / "coverage.json"))))
-                print(f"Batch {label} đã audit; gói upload thủ công: {package}", flush=True)
-                return str(package)
-            print("Đã xử lý mọi batch được cấu hình. Chạy audit trước khi công bố tổng coverage.")
-            return None
+            if not names:
+                print("Mọi cohort đã có completed package; dùng Audit để kiểm tra lại.")
+                return None
+            audits = [cohort_run(n, archives, scratch, campaign, runner, scope) for n in names]
+            package = export_batch(names, audits, campaign, scope, execution)
+            label = names[0][7:11] + "-" + names[-1][7:11]
+            immutable(campaign / "batches" / (label + ".json"),
+                      encoded(dict(cohorts=names, package=str(package), coverage_sha256=sha(package / "coverage.json"))))
+            print(f"Batch {label} đã audit; gói upload thủ công: {package}", flush=True)
+            return str(package)
         if action == "audit":
-            completed = []
-            for names in batches:
-                marker = campaign / "batches" / (names[0][7:11] + "-" + names[-1][7:11] + ".json")
-                if not marker.exists():
-                    continue
-                audits = [cohort_run(n, archives, scratch, campaign, runner, scope, existing_only=True) for n in names]
-                package = export_batch(names, audits, campaign, scope)
-                expected = dict(cohorts=names, package=str(package), coverage_sha256=sha(package / "coverage.json"))
-                if read(marker) != expected:
-                    raise ValueError("Batch completion marker differs from verified package")
-                completed.extend(names)
-            print(json.dumps(dict(verified_cohorts=completed, count=len(completed), requested=len(scope["cohorts"]), assigned=50,
-                                  partial_requested_coverage=len(completed) != len(scope["cohorts"]),
-                                  partial_assigned_coverage=len(completed) != 50), ensure_ascii=False), flush=True)
-            return completed
+            for n in names:
+                cohort_run(n, archives, scratch, campaign, runner, scope, existing_only=True)
+            completed_batches(campaign, scope)  # Never regenerate or rewrite old packages.
+            print(json.dumps(dict(verified_cohorts=names, count=len(names), requested=len(scope["cohorts"]),
+                                  assigned=50, partial_requested_coverage=len(names) != len(scope["cohorts"]),
+                                  partial_assigned_coverage=len(names) != 50), ensure_ascii=False), flush=True)
+            return names
         raise ValueError("Unknown export action")
 
 
