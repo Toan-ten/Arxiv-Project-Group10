@@ -89,13 +89,17 @@ Hai checkout riêng bảo đảm source parser giữ nguyên khi phát hành hel
 
 Campaign thực tế dưới:
 `OUTPUT_DRIVE_DIR/<STUDENT_ID>/<START-END>-<parser SHA12>-<HF repo hash12>/`.
-HF repo khác, MSSV khác hoặc dải khác có namespace riêng. Campaign identity còn khóa
-BATCH_SIZE, parser fingerprint, helper SHA/commit, Python minor, Arrow, input path và HF repo.
-Không đổi identity để ép dùng checkpoint khác. Notebook cá nhân cũ không tự migration sang campaign mới.
+HF repo khác, MSSV khác hoặc dải khác có namespace riêng. Campaign identity khóa
+parser fingerprint, Python minor, Arrow, input path và HF repo. BATCH_SIZE chỉ là cấu hình
+lập lịch (1–50), không thuộc identity thu thập. Helper mới chỉ tiếp nhận helper/hash cũ
+đã được xác minh; helper hoặc identity không tương thích thì dừng để review.
+Không đổi identity để ép dùng checkpoint khác. campaign.json cũ được giữ nguyên bytes;
+execution_configs/ ghi riêng batch size và helper release của từng cấu hình thực thi. Notebook cá nhân cũ không tự migration sang campaign mới.
 
 ```text
 <campaign>/
   campaign.json
+  execution_configs/<configuration hash>.json
   inputs/cohort_NNNN_corpus.json
   results/cohort_NNNN_corpus/run-<fingerprint>/
     definition.json
@@ -125,6 +129,33 @@ Stop gửi SIGINT tới cả process group, rồi kill hữu hạn nếu không 
 Hard runtime termination có thể để lại lock: không tự phá lock. Chỉ lưu trữ/di chuyển lock
 sau khi chắc chắn process/runtime cũ đã chết và đã giữ bằng chứng để review.
 Drive FUSE không đảm bảo toàn bộ tính chất atomic của filesystem local; phải smoke/Resume thật trên Drive.
+
+
+### Đổi batch size và tiếp tục từ 0106
+
+Lỗi ở bản helper cũ: Setup chụp cấu hình vào file JSON; Run batch tiếp tục đọc file cũ.
+Notebook mới đọc lại BATCH_SIZE ngay trước mỗi Run, kiểm tra cấu hình rồi ghi file JSON local.
+Sau khi đổi riêng BATCH_SIZE, chạy lại ô Configuration rồi Run batch; không cần Setup lại.
+Nếu đổi MSSV, dải cohort, paths hoặc HF repo sau Setup, notebook yêu cầu chạy lại Setup.
+
+Để tiếp tục campaign 0101–0150 đã hoàn tất 0101–0105:
+
+1. Mở notebook mới từ GitHub; nếu dùng bản sao Drive, cập nhật các ô từ notebook mới.
+2. Giữ nguyên STUDENT_ID, START_COHORT=101, END_COHORT=150, input/output paths và HF_REPO_ID cũ.
+   Đặt BATCH_SIZE=50. Không đổi START_COHORT thành 106 vì sẽ tạo namespace khác.
+3. Chạy Configuration → Setup để tải helper release mới (cần làm một lần khi nâng notebook).
+4. Chạy Run batch. Xem effective_batch_size=50, cohorts_completed có 0101–0105 và
+   cohorts_this_run chỉ có 0106–0150 trước khi xử lý. Nếu khác, Stop và review cấu hình.
+5. Chạy Audit sau khi hoàn tất. Gói 0101–0105 giữ nguyên; gói mới 0106–0150 riêng biệt.
+
+Helper xác minh completion markers và checksum của các gói lịch sử theo phạm vi thật,
+không dựng lại ranh giới batch bằng batch size mới. Cohort đã verified nhưng chưa đóng gói
+được audit và dùng lại, không parse lại. Batch đã đóng gói hợp lệ không được chọn lại.
+Campaign, checkpoint, Parquet, manifest và audit cũ không bị ghi đè hoặc migration.
+Thiếu/hỏng bằng chứng hoặc khác parser/environment/input identity thì dừng; không xóa để chạy tiếp.
+Trước mỗi Run, notebook in student_id, cohort_range, effective_batch_size, campaign,
+cohorts_completed, cohorts_packaged, cohorts_this_run và các cohort cần parse/dùng lại.
+Không chạy hai runtime cùng campaign; chỉ đổi batch size khi invocation trước đã dừng.
 
 ## Audit, trạng thái và partial release
 

@@ -351,6 +351,7 @@ def test_notebook_setup_and_launcher_commands_without_network(tmp_path, monkeypa
     popen_calls = []
     process = types.SimpleNamespace(stdout=io.StringIO("fake cohort verified\n"), wait=Mock(return_value=0))
     monkeypatch.setattr(subprocess, "Popen", lambda args, **kw: (popen_calls.append((args, kw)) or process))
+    namespace["export_tools"].execution_plan = Mock(return_value=dict(cohorts_this_run=["cohort_0101_corpus"]))
     namespace["run_export"]("smoke")
     assert popen_calls[0][0][-2:] == ["--action", "smoke"]
     assert "--catalog" not in popen_calls[0][0]
@@ -359,7 +360,7 @@ def test_notebook_setup_and_launcher_commands_without_network(tmp_path, monkeypa
     assert process.stdout.closed
 
 
-def test_notebook_stop_interrupts_the_whole_export_process_group(monkeypatch):
+def test_notebook_stop_interrupts_the_whole_export_process_group(monkeypatch, tmp_path):
     import os
     import signal
     import subprocess
@@ -371,7 +372,9 @@ def test_notebook_stop_interrupts_the_whole_export_process_group(monkeypatch):
                   and "def run_export(action):" in "".join(c["source"]))
     function = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "run_export")
     namespace = dict(os=os, sys=sys, subprocess=subprocess, HELPER_ROOT=Path("tools"), CONFIG_PATH=Path("config.json"),
-                     require_input_files=Mock(), active_input_cohorts=Mock(return_value=[]))
+                     require_input_files=Mock(), current_run_config=Mock(return_value={}), json=json,
+                     export_tools=SimpleNamespace(execution_plan=Mock(return_value=dict(cohorts_this_run=[]))))
+    namespace["CONFIG_PATH"] = tmp_path / "config.json"
     exec(compile(ast.Module(body=[function], type_ignores=[]), "<notebook>", "exec"), namespace)
     stream = Mock()
     stream.__iter__ = Mock(side_effect=KeyboardInterrupt)
@@ -509,11 +512,26 @@ def notebook_preflight(tmp_path):
     source = next("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
                   and "def require_input_files" in "".join(c["source"]))
     functions = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)
-                 and n.name in {"require_input_files", "active_input_cohorts", "run_export"}]
+                 and n.name in {"require_input_files", "current_run_config", "active_input_cohorts", "run_export"}]
     import os, sys, subprocess
-    ns = dict(Path=Path, INPUT_DRIVE_DIR=tmp_path / "archives", CAMPAIGN=tmp_path / "campaign",
-              BATCH_SIZE=2, scope=dict(cohorts=[f"cohort_{n:04d}_corpus" for n in range(101,104)]),
-              os=os, sys=sys, subprocess=subprocess)
+    from types import SimpleNamespace
+    config = make_config(tmp_path, end=103, size=2)
+    ns = dict(Path=Path, INPUT_DRIVE_DIR=config["input_drive_dir"], CAMPAIGN=campaign(config),
+              STUDENT_ID=config["student_id"], START_COHORT=101, END_COHORT=103, BATCH_SIZE=2,
+              OUTPUT_DRIVE_DIR=config["output_drive_dir"], HF_REPO_ID=config["hf_repo_id"],
+              CODE_ROOT=Path(config["repo"]), HELPER_COMMIT=config["helper_commit"], config=config,
+              CONFIG_PATH=tmp_path / "config.json", HELPER_ROOT=Path("tools"), json=json,
+              scope=export.scope_for(config), os=os, sys=sys, subprocess=subprocess)
+    # Notebook preflight tests delegate scheduling to a fake read-only helper plan.
+    # Actual package/checkpoint validation is tested separately below.
+    def plan(live, action):
+        names=export.scope_for(live)["cohorts"]
+        completed=names[:2] if list((ns["CAMPAIGN"] / "batches").glob("*.json")) else []
+        selected = (names[:1] if action=="smoke" else completed if action=="audit"
+                    else [n for n in names if n not in completed][:live["batch_size"]])
+        return dict(cohorts_this_run=selected,effective_batch_size=live["batch_size"])
+    ns["export_tools"]=SimpleNamespace(scope_for=export.scope_for,execution_plan=Mock(side_effect=plan))
+    ns["INPUT_DRIVE_DIR"]=Path(ns["INPUT_DRIVE_DIR"])
     exec(compile(ast.Module(body=functions,type_ignores=[]),"<notebook-preflight>","exec"),ns)
     return ns
 
@@ -579,3 +597,131 @@ def test_input_preflight_default_path_is_shared_and_output_stays_isolated(studen
     ns={};exec(compile(tree,"<notebook-config>","exec"),ns)
     assert ns["INPUT_DRIVE_DIR"]==f"/content/drive/MyDrive/M1-pipeline-optimization-full/{student}/archives"
     assert ns["OUTPUT_DRIVE_DIR"]==f"/content/drive/MyDrive/ArxivGroup10/{student}/m2-exports"
+
+@pytest.mark.parametrize("size,expected", [(5,5),(50,50)])
+def test_effective_batch_size_selection_without_parsing(tmp_path,monkeypatch,size,expected):
+    config=make_config(tmp_path,size=size)
+    monkeypatch.setattr(export,"verify_runtime",lambda _:runner)
+    parse=Mock(side_effect=AssertionError("planning must not parse"))
+    monkeypatch.setattr(runner,"run",parse)
+    plan=export.execution_plan(config,"next")
+    assert plan["effective_batch_size"]==size
+    assert len(plan["cohorts_this_run"])==expected
+    assert plan["cohorts_this_run"][0]=="cohort_0101_corpus"
+    assert not campaign(config).exists()
+    parse.assert_not_called()
+
+
+@pytest.mark.parametrize("size",[5,50])
+def test_notebook_uses_batch_size_changed_after_setup(tmp_path,monkeypatch,capsys,size):
+    from types import SimpleNamespace
+    ns=notebook_preflight(tmp_path)
+    ns["INPUT_DRIVE_DIR"].mkdir()
+    for n in range(101,104):
+        for suffix in (".tar.gz",".manifest.json",".tar.gz.sha256"):
+            (ns["INPUT_DRIVE_DIR"]/(f"cohort_{n:04d}_corpus"+suffix)).write_bytes(b"mock input")
+    assert ns["config"]["batch_size"]==2
+    ns["BATCH_SIZE"]=size
+    process=SimpleNamespace(stdout=io.StringIO("mock export\n"),wait=Mock(return_value=0))
+    launch=Mock(return_value=process)
+    monkeypatch.setattr(ns["subprocess"],"Popen",launch)
+    ns["run_export"]("next")
+    assert export.read(ns["CONFIG_PATH"])["batch_size"]==size
+    assert ns["config"]["batch_size"]==2
+    assert ns["export_tools"].execution_plan.call_args.args[0]["batch_size"]==size
+    assert f'"effective_batch_size": {size}' in capsys.readouterr().out
+    launch.assert_called_once()
+
+
+@pytest.mark.parametrize("field,value",[("STUDENT_ID","24120260"),("START_COHORT",102),
+    ("END_COHORT",102),("INPUT_DRIVE_DIR","different-input"),
+    ("OUTPUT_DRIVE_DIR","different-output"),("HF_REPO_ID","other/dataset")])
+def test_other_configuration_changes_require_setup(tmp_path,field,value):
+    ns=notebook_preflight(tmp_path);ns[field]=value
+    with pytest.raises((ValueError,RuntimeError)):
+        ns["run_export"]("next")
+    ns["export_tools"].execution_plan.assert_not_called()
+    assert not ns["CONFIG_PATH"].exists()
+
+
+@pytest.fixture
+def legacy_campaign(tmp_path,monkeypatch,request):
+    """Actual old helper writes old-format evidence using synthetic source only."""
+    import importlib.util
+    import subprocess
+    old_commit,old_hash=next(iter(export.LEGACY_HELPERS))
+    blob=subprocess.check_output(["git","show",old_commit+":scripts/m2_colab_export.py"])
+    assert hashlib.sha256(blob).hexdigest()==old_hash
+    path=tmp_path/"legacy_export.py";path.write_bytes(blob)
+    spec=importlib.util.spec_from_file_location("legacy_export",path)
+    old=importlib.util.module_from_spec(spec);spec.loader.exec_module(old)
+    monkeypatch.setattr(old,"verify_runtime",lambda _:runner)
+    monkeypatch.setattr(export,"verify_runtime",lambda _:runner)
+    for n in range(101,107):fixture_archive(tmp_path,n)
+    config=make_config(tmp_path,end=getattr(request,"param",106),size=5)|dict(helper_commit=old_commit)
+    old.operate(config,"next")
+    root=campaign(config)
+    before={str(p.relative_to(root)):p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    return config,root,before
+
+
+def test_legacy_five_completed_cohorts_resume_with_size_50_preserving_all_bytes(legacy_campaign,monkeypatch):
+    config,root,before=legacy_campaign
+    updated=config|dict(batch_size=50,helper_commit="a"*40)
+    plan=export.execution_plan(updated,"next")
+    assert campaign(updated)==root
+    assert plan["cohorts_completed"]==[f"cohort_{n:04d}_corpus" for n in range(101,106)]
+    assert plan["cohorts_this_run"]==["cohort_0106_corpus"]
+    original=runner.run;calls=[]
+    def only_remaining(corpus,output):
+        calls.append(Path(corpus).name)
+        assert Path(corpus).name=="cohort_0106_corpus"
+        return original(corpus,output)
+    monkeypatch.setattr(runner,"run",only_remaining)
+    export.operate(updated,"next")
+    assert calls==["cohort_0106_corpus"]
+    assert all((root/relative).read_bytes()==data for relative,data in before.items())
+    assert export.execution_plan(updated,"next")["cohorts_this_run"]==[]
+    monkeypatch.setattr(runner,"run",Mock(side_effect=AssertionError("completed cohorts must not parse")))
+    assert export.operate(updated,"next") is None
+    assert len(export.operate(updated,"audit"))==6
+    assert all((root/relative).read_bytes()==data for relative,data in before.items())
+    history=list((root/"execution_configs").glob("*.json"))
+    assert len(history)==1 and export.read(history[0])["effective_batch_size"]==50
+
+
+@pytest.mark.parametrize("legacy_campaign",[150],indirect=True)
+def test_completed_first_five_selects_only_0106_through_0150(legacy_campaign,monkeypatch):
+    config,root,_=legacy_campaign
+    # Same 50-cohort identity and actual legacy markers; no 45-cohort parsing.
+    updated=config|dict(batch_size=50,helper_commit="a"*40)
+    names=[f"cohort_{n:04d}_corpus" for n in range(101,106)]
+    plan=export.execution_plan(updated,"next")
+    assert plan["cohorts_packaged"]==names
+    assert plan["cohorts_this_run"]==[f"cohort_{n:04d}_corpus" for n in range(106,151)]
+    assert plan["effective_batch_size"]==50
+
+
+@pytest.mark.parametrize("change",["parser_commit","parser_fingerprint","pyarrow","archives","helper_sha256"])
+def test_legacy_campaign_does_not_relax_other_identity_guards(legacy_campaign,change):
+    config,root,_=legacy_campaign
+    current=export.runtime_context(config|dict(batch_size=50,helper_commit="a"*40))["identity"]
+    saved=export.read(root/"campaign.json");saved[change]="invalid"
+    with pytest.raises(ValueError):export.validate_campaign(saved,current)
+
+
+def test_corrupt_legacy_package_blocks_before_parsing(legacy_campaign,monkeypatch):
+    config,root,_=legacy_campaign
+    next((root/"upload").glob("*/data/bibtex/*.parquet")).write_bytes(b"corrupt")
+    parse=Mock(side_effect=AssertionError("corrupt evidence must stop before parse"))
+    monkeypatch.setattr(runner,"run",parse)
+    with pytest.raises(ValueError,match="corrupt"):
+        export.operate(config|dict(batch_size=50,helper_commit="a"*40),"next")
+    parse.assert_not_called()
+
+
+def test_pending_selection_stays_contiguous_across_existing_package(tmp_path,monkeypatch):
+    scope=export.scope_for(make_config(tmp_path,end=105,size=50))
+    monkeypatch.setattr(export,"completed_batches",lambda *args:[dict(cohorts=["cohort_0103_corpus"])])
+    plan=export.plan_from_context(dict(campaign=tmp_path,scope=scope),"next")
+    assert plan["cohorts_this_run"]==["cohort_0101_corpus","cohort_0102_corpus"]
