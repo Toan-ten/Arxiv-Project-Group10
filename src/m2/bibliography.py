@@ -480,8 +480,12 @@ def _explicit_bibinfo(entry):
         entry["fields"]["author"] = " and ".join(values["author"])
 
 
-def _bbl_comments(text):
-    """URL readers treat percent escapes as data; ordinary TeX comments do not."""
+def _bbl_comments(text, *, biber_verbatim=False):
+    """Protect data literals before TeX comment handling.
+
+    Format probes also protect Biber's line-verbatim grammar. The default
+    remains the rendered-BBL reader; no caller's original source is changed.
+    """
     if "\x00" in text:
         raise ParseError("NUL in .bbl source")
     protected, out, pos = [], [], 0
@@ -492,6 +496,16 @@ def _bbl_comments(text):
             out.append(text[pos:end])
             pos = end
         elif text[pos] == "\\":
+            if biber_verbatim:
+                literal = re.match(
+                    r"\\verb\{[A-Za-z][A-Za-z0-9_-]*\}[\s\S]*?\\endverb\b",
+                    text[pos:],
+                )
+                if literal:
+                    out.append(f"\x00{len(protected)}\x00")
+                    protected.append(literal[0])
+                    pos += literal.end()
+                    continue
             name, end = command(text, pos)
             start = skip_space(text, end)
             if name in {"url", "href", "path", "doi"} and text[start:start + 1] == "{":
@@ -535,24 +549,48 @@ def _normalize_mcite_wrapper(text: str) -> str:
     return text
 
 
+def _bbl_format(text: str) -> str | None:
+    """Select the existing reader without lexing another producer's grammar.
+
+    This is only dispatch evidence; the selected reader must still validate
+    the complete input. Keep the same precedence for specialized formats.
+    Probe comments only after shielding Biber data from the inline lexer;
+    commented producer markers are not evidence of another format.
+    """
+    text = _bbl_comments(text, biber_verbatim=True)
+    if re.search(r"\\begin\s*\{bibdiv\}", text):
+        return "amsrefs"
+    if re.search(r"\\harvarditem\b", text):
+        return "harvard"
+    if "mcitethebibliography" in text or "endmcitethebibliography" in text:
+        return "mcite"
+    if (re.search(r"\\(?:refsection|datalist)\b", text)
+            and re.search(r"\\entry\b", text)):
+        return "biblatex"
+    if re.search(r"\\begin\s*\{thebibliography\}", text):
+        return "thebibliography"
+    return None
+
+
 def parse_bbl(text: str, *, enriched: bool = False) -> list[dict]:
     """Read one static thebibliography list; never execute .bbl control code."""
     from .bbl_formats import enrich_entry, parse_amsrefs, parse_harvard
 
-    if re.search(r"\\begin\s*\{bibdiv\}", text):
+    format_name = _bbl_format(text)
+    if format_name == "amsrefs":
         entries = parse_amsrefs(text)
         return [enrich_entry(entry) for entry in entries] if enriched else entries
-    if re.search(r"\\harvarditem\b", text):
+    if format_name == "harvard":
         entries = parse_harvard(text)
         return [enrich_entry(entry) for entry in entries] if enriched else entries
-    if "mcitethebibliography" in text or "endmcitethebibliography" in text:
+    if format_name == "mcite":
         text = _normalize_mcite_wrapper(text)
-    if (re.search(r"\\(?:refsection|datalist)\b", text)
-            and re.search(r"\\entry\b", text)):
+        format_name = _bbl_format(text)
+    if format_name == "biblatex":
         from .biblatex import parse_biblatex
         entries = parse_biblatex(text)
         return [enrich_entry(entry) for entry in entries] if enriched else entries
-    if not re.search(r"\\begin\s*\{thebibliography\}", text):
+    if format_name != "thebibliography":
         raise ParseError("Unsupported .bbl format: expected one thebibliography; BibLaTeX entry format is not supported")
     text = _bbl_comments(text)
     starts = list(re.finditer(r"\\begin\s*\{thebibliography\}", text))

@@ -8,7 +8,7 @@ import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
 
-from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify, _top_level_bibitems, _bbl_comments
+from .bibliography import parse_bbl, parse_bibitems, parse_bibtex, unify, _top_level_bibitems, _bbl_comments, _bbl_format
 from .latex import Gatherer, ParseError, grouped_natbib_keys, literal_length_target, algorithm_declaration, citation_keys, command, environment, group, mask_literals, mask_root_inline_verbatim, normalize, options, listing_options, resolve_listing_options, box_options, sentences, skip_space, splice_tokens
 
 
@@ -275,6 +275,10 @@ def bbl_item_group_projection(text, gatherer):
     nested item group is not a missing key merely because its marker has
     nonzero brace depth. Unknown declarations/conditionals stay guarded.
     """
+    # Biber's line-verbatim fields are not inline TeX literals. Dispatch
+    # before any rendered-BBL lexer; each dedicated reader validates raw data.
+    if _bbl_format(text) != "thebibliography":
+        return text
     cleaned = _bbl_comments(text)
     starts = list(re.finditer(r"\\begin\s*\{thebibliography\}", cleaned))
     if len(starts) != 1:
