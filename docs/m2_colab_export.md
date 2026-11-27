@@ -28,7 +28,7 @@ STUDENT_ID = "24120232"
 START_COHORT = 101
 END_COHORT = 150
 BATCH_SIZE = 5
-INPUT_DRIVE_DIR = f"/content/drive/MyDrive/ArxivGroup10/{STUDENT_ID}/m1-archives"
+INPUT_DRIVE_DIR = f"/content/drive/MyDrive/M1-pipeline-optimization-full/{STUDENT_ID}/archives"
 OUTPUT_DRIVE_DIR = f"/content/drive/MyDrive/ArxivGroup10/{STUDENT_ID}/m2-exports"
 HF_REPO_ID = "toanten/arxiv-project-group10"
 ```
@@ -39,7 +39,12 @@ Notebook không tạo hoặc kiểm tra quyền sở hữu HF repo qua mạng; n
 
 ## Input M1 cần có trên Drive
 
-Chép đủ **ba file cho mỗi cohort** vào INPUT_DRIVE_DIR, không đổi tên hoặc bytes:
+Cả bốn thành viên dùng `MyDrive/M1-pipeline-optimization-full/<STUDENT_ID>/archives`.
+Chỉ MSSV thay đổi trong đường dẫn input; `OUTPUT_DRIVE_DIR` vẫn riêng theo từng người.
+Thư mục input phải tồn tại sau khi mount Drive; Setup dừng và báo đúng path nếu thiếu,
+không tự tạo thư mục hoặc dữ liệu M1.
+
+Đặt đủ **ba file cho mỗi cohort** trong INPUT_DRIVE_DIR, không đổi tên hoặc bytes:
 
 ```text
 cohort_NNNN_corpus.tar.gz
@@ -51,6 +56,9 @@ cohort_NNNN_corpus.tar.gz.sha256
 Archive chứa trực tiếp thư mục ID: `<ID>/manifest.json`, `<ID>/metadata.json`, `<ID>/vN/...`.
 Helper kiểm tra archive hash với sidecar và archive manifest, expected/included IDs,
 MSSV và toàn bộ source checksums theo manifest từng version trước khi parse.
+Trước Smoke, batch kế tiếp hoặc Audit, notebook liệt kê **tất cả paths thiếu** trong
+phạm vi đó và dừng trước khi khởi chạy M2. Không yêu cầu đủ mọi cohort tương lai chỉ để smoke.
+Helper tiếp tục kiểm tra độc lập archive/manifest/sidecar và checksum như trước.
 Thiếu checksum, metadata không khớp hoặc archive bị đổi thì dừng an toàn.
 Có thể chép trước cohort đầu để smoke; sau đó bổ sung từng batch. Input của cohort đã chạy
 được khóa trong campaign, nhưng thêm file của cohort chưa chạy không phá Resume.

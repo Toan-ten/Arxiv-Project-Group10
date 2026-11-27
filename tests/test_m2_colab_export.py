@@ -325,6 +325,9 @@ def test_notebook_setup_and_launcher_commands_without_network(tmp_path, monkeypa
                      START_COHORT=101, END_COHORT=101, BATCH_SIZE=1,
                      INPUT_DRIVE_DIR=str(tmp_path/"archives"), OUTPUT_DRIVE_DIR=str(tmp_path/"outputs"),
                      HF_REPO_ID="member/dataset")
+    Path(namespace["INPUT_DRIVE_DIR"]).mkdir()
+    for suffix in (".tar.gz", ".manifest.json", ".tar.gz.sha256"):
+        (Path(namespace["INPUT_DRIVE_DIR"]) / ("cohort_0101_corpus" + suffix)).write_bytes(b"mock launcher input")
     colab = types.ModuleType("google.colab")
     colab.drive = types.SimpleNamespace(mount=Mock())
     monkeypatch.setitem(sys.modules, "google.colab", colab)
@@ -367,7 +370,8 @@ def test_notebook_stop_interrupts_the_whole_export_process_group(monkeypatch):
     source = next("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
                   and "def run_export(action):" in "".join(c["source"]))
     function = next(n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef) and n.name == "run_export")
-    namespace = dict(os=os, sys=sys, subprocess=subprocess, HELPER_ROOT=Path("tools"), CONFIG_PATH=Path("config.json"))
+    namespace = dict(os=os, sys=sys, subprocess=subprocess, HELPER_ROOT=Path("tools"), CONFIG_PATH=Path("config.json"),
+                     require_input_files=Mock(), active_input_cohorts=Mock(return_value=[]))
     exec(compile(ast.Module(body=[function], type_ignores=[]), "<notebook>", "exec"), namespace)
     stream = Mock()
     stream.__iter__ = Mock(side_effect=KeyboardInterrupt)
@@ -496,3 +500,82 @@ def test_notebook_pins_a_committed_helper_with_identical_source():
     blob=subprocess.check_output(["git","-C",str(repo),"show",pins["HELPER_COMMIT"]+":scripts/m2_colab_export.py"])
     assert blob==(repo/"scripts/m2_colab_export.py").read_bytes()
     subprocess.run(["git","-C",str(repo),"diff","--exit-code",pins["PARSER_COMMIT"],"HEAD","--","src/m2"],check=True)
+
+
+# Preflight-only fixtures: no call to runner.run, parsing, Drive or data APIs.
+def notebook_preflight(tmp_path):
+    repo = Path(__file__).resolve().parents[1]
+    nb = export.read(repo / "notebooks/m2/m2_team_colab_export.ipynb")
+    source = next("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"
+                  and "def require_input_files" in "".join(c["source"]))
+    functions = [n for n in ast.parse(source).body if isinstance(n, ast.FunctionDef)
+                 and n.name in {"require_input_files", "active_input_cohorts", "run_export"}]
+    import os, sys, subprocess
+    ns = dict(Path=Path, INPUT_DRIVE_DIR=tmp_path / "archives", CAMPAIGN=tmp_path / "campaign",
+              BATCH_SIZE=2, scope=dict(cohorts=[f"cohort_{n:04d}_corpus" for n in range(101,104)]),
+              os=os, sys=sys, subprocess=subprocess)
+    exec(compile(ast.Module(body=functions,type_ignores=[]),"<notebook-preflight>","exec"),ns)
+    return ns
+
+
+def test_input_preflight_missing_directory_reports_path_without_creating_it(tmp_path):
+    ns=notebook_preflight(tmp_path)
+    with pytest.raises(FileNotFoundError) as exc:
+        ns["require_input_files"](["cohort_0101_corpus"])
+    assert str(ns["INPUT_DRIVE_DIR"]) in str(exc.value)
+    assert not ns["INPUT_DRIVE_DIR"].exists()
+    for suffix in (".tar.gz", ".manifest.json", ".tar.gz.sha256"):
+        assert str(ns["INPUT_DRIVE_DIR"] / ("cohort_0101_corpus" + suffix)) in str(exc.value)
+
+
+@pytest.mark.parametrize("missing",[".tar.gz",".manifest.json",".tar.gz.sha256"])
+def test_input_preflight_names_the_exact_missing_file(tmp_path,missing):
+    ns=notebook_preflight(tmp_path);root=ns["INPUT_DRIVE_DIR"];root.mkdir()
+    for suffix in (".tar.gz",".manifest.json",".tar.gz.sha256"):
+        if suffix!=missing:(root/("cohort_0101_corpus"+suffix)).write_bytes(b"preflight-only fixture")
+    with pytest.raises(FileNotFoundError) as exc:
+        ns["require_input_files"](["cohort_0101_corpus"])
+    assert str(root/("cohort_0101_corpus"+missing)) in str(exc.value)
+    assert len(list(root.iterdir()))==2
+
+
+def test_input_preflight_lists_all_six_missing_paths(tmp_path):
+    ns=notebook_preflight(tmp_path);root=ns["INPUT_DRIVE_DIR"];root.mkdir()
+    names=["cohort_0101_corpus","cohort_0102_corpus"]
+    with pytest.raises(FileNotFoundError) as exc:ns["require_input_files"](names)
+    for name in names:
+        for suffix in (".tar.gz",".manifest.json",".tar.gz.sha256"):
+            assert str(root/(name+suffix)) in str(exc.value)
+    assert not list(root.iterdir())
+
+
+def test_input_preflight_checks_only_the_active_batch_and_completed_audit(tmp_path):
+    ns=notebook_preflight(tmp_path)
+    assert ns["active_input_cohorts"]("smoke")==["cohort_0101_corpus"]
+    assert ns["active_input_cohorts"]("next")==["cohort_0101_corpus","cohort_0102_corpus"]
+    marker=ns["CAMPAIGN"] / "batches/0101-0102.json";marker.parent.mkdir(parents=True);marker.write_text("{}")
+    assert ns["active_input_cohorts"]("next")==["cohort_0103_corpus"]
+    assert ns["active_input_cohorts"]("audit")==["cohort_0101_corpus","cohort_0102_corpus"]
+
+
+def test_input_preflight_blocks_launch_when_a_file_is_missing(tmp_path,monkeypatch):
+    ns=notebook_preflight(tmp_path);ns["INPUT_DRIVE_DIR"].mkdir()
+    launch=Mock(side_effect=AssertionError("No M2 invocation allowed"))
+    monkeypatch.setattr(ns["subprocess"],"Popen",launch)
+    with pytest.raises(FileNotFoundError):ns["run_export"]("next")
+    launch.assert_not_called()
+
+
+@pytest.mark.parametrize("student",["24120010","24120035","24120232","24120260"])
+def test_input_preflight_default_path_is_shared_and_output_stays_isolated(student):
+    repo=Path(__file__).resolve().parents[1]
+    nb=export.read(repo/"notebooks/m2/m2_team_colab_export.ipynb")
+    config=next("".join(c["source"]) for c in nb["cells"] if c["cell_type"]=="code")
+    tree=ast.parse(config)
+    for node in tree.body:
+        if isinstance(node,ast.Assign) and isinstance(node.targets[0],ast.Name) and node.targets[0].id=="STUDENT_ID":
+            node.value=ast.Constant(student)
+    ast.fix_missing_locations(tree)
+    ns={};exec(compile(tree,"<notebook-config>","exec"),ns)
+    assert ns["INPUT_DRIVE_DIR"]==f"/content/drive/MyDrive/M1-pipeline-optimization-full/{student}/archives"
+    assert ns["OUTPUT_DRIVE_DIR"]==f"/content/drive/MyDrive/ArxivGroup10/{student}/m2-exports"
