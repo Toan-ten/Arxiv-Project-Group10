@@ -105,6 +105,9 @@
     <datalist id="memberNames"></datalist>
   </label>
   <span class="pill" id="progressPill"></span>
+  <button id="bulkAcceptBtn" class="ghost" title="Near-verbatim title + shared surname + no number conflict">Bulk accept</button>
+  <button id="bulkNoneBtn" class="ghost" title="No candidate anywhere near the plausibility floor">Bulk none</button>
+  <button id="readBtn" class="ghost" title="Rows that need reading">Read queue</button>
   <button id="exportBtn" class="primary">Export labels</button>
   <button id="importBtn" class="ghost">Import…</button>
   <input type="file" id="importFile" accept=".json,application/json" hidden>
@@ -181,7 +184,12 @@ function firstOpenPublication() {
   return 0;
 }
 function entryOrder(pub) {
-  return store.order === "easy" ? pub.difficulty.slice() : pub.entries.map(e => e.key);
+  const all = pub.entries.map(e => e.key);
+  const keys = store.order === "easy" ? pub.difficulty.slice()
+    : store.order === "source" ? all
+    : store.order === "bulk" ? pub.entries.filter(e => pub._draft[e.key].bulk !== "read").map(e => e.key)
+    : pub.entries.filter(e => pub._draft[e.key].bulk === "read").map(e => e.key);
+  return keys.length ? keys : all;
 }
 function currentPub() { return P.publications[view.pub]; }
 
@@ -225,6 +233,10 @@ function renderSidebar() {
   const q = P.quota;
   document.getElementById("quotaPill").textContent =
     `${q.publications} pubs · ${q.entries} labels · ${q.members} members`;
+  const counts = bulkCounts(myPublications(), false);
+  document.getElementById("bulkAcceptBtn").textContent = `Bulk accept ${counts.accept}`;
+  document.getElementById("bulkNoneBtn").textContent = `Bulk none ${counts.none}`;
+  document.getElementById("readBtn").textContent = `Read queue ${counts.read}`;
 }
 
 function decidedPick(pub, key) {
@@ -265,7 +277,7 @@ function renderWork() {
         draft confidence: ${draft.tier}</span>
       ${existing ? `<span class="pill good">decided: ${existing.pick || "none"}</span>` : ""}
       <span class="grow"></span>
-      <button class="ghost" id="orderBtn">order: ${store.order === "easy" ? "easy → hard" : "source"}</button>
+      <button class="ghost" id="orderBtn">order: ${esc(store.order === "easy" ? "easy → hard" : store.order)}</button>
     </div>
 
     <div class="card" style="margin-top:12px">
@@ -307,7 +319,7 @@ function renderWork() {
 
     <div class="card">
       <div class="meta">Decisions for ${esc(pub.arxiv_id)}</div>
-      <table class="decisions"><thead><tr><th>entry</th><th>title</th><th>decision</th><th>draft</th><th></th></tr></thead>
+      <table class="decisions"><thead><tr><th>entry</th><th>title</th><th>decision</th><th>draft</th><th>how</th><th></th></tr></thead>
       <tbody>
         ${pub.entries.map(e => {
           const d = decisionFor(pub.arxiv_id, e.key);
@@ -317,6 +329,7 @@ function renderWork() {
             <td>${esc((e.title || "").slice(0, 78))}${(e.title || "").length > 78 ? "…" : ""}</td>
             <td>${d ? esc(d.pick || "none") : "—"}</td>
             <td class="meta">${esc(dr.pick || "—")}</td>
+            <td class="meta">${d ? esc(d.via === "bulk" ? "bulk" : "read") : "—"}</td>
             <td><button class="linkish" data-goto="${esc(e.key)}">open</button></td>
           </tr>`;
         }).join("")}
@@ -335,7 +348,9 @@ function renderWork() {
   document.getElementById("skipBtn").onclick = skipEntry;
   document.getElementById("backBtn").onclick = previousEntry;
   document.getElementById("orderBtn").onclick = () => {
-    store.order = store.order === "easy" ? "source" : "easy"; saveStore(); render();
+    const cycle = { easy: "source", source: "read", read: "bulk", bulk: "easy" };
+    store.order = cycle[store.order] || "easy";
+    saveStore(); render();
   };
 }
 
@@ -351,14 +366,64 @@ function render() { renderSidebar(); renderWork(); }
 
 /* ---------- decisions ---------- */
 
-function recordDecision(pub, entry, pick, kind) {
+function recordDecision(pub, entry, pick, kind, via) {
   history.push({ aid: pub.arxiv_id, key: entry.key, previous: decisionFor(pub.arxiv_id, entry.key) });
   store.decisions[dkey(pub.arxiv_id, entry.key)] = {
     pick: pick, decision: kind, reviewer: store.reviewer || "",
-    reviewed_at: new Date().toISOString(), draft: pub._draft[entry.key].pick || null
+    reviewed_at: new Date().toISOString(), draft: pub._draft[entry.key].pick || null,
+    via: via || "read"
   };
   saveStore();
   advance(pub);
+}
+
+function myPublications() {
+  const name = (store.reviewer || "").trim();
+  const mine = P.publications.filter(pub => pub.member === name);
+  return mine.length ? mine : P.publications;
+}
+
+function bulkCounts(publications, undecidedOnly) {
+  const counts = { accept: 0, none: 0, read: 0 };
+  publications.forEach(pub => pub.draft.forEach(draft => {
+    if (undecidedOnly && decisionFor(pub.arxiv_id, draft.key)) return;
+    counts[draft.bulk] = (counts[draft.bulk] || 0) + 1;
+  }));
+  return counts;
+}
+
+function applyBulk(kind) {
+  const name = (store.reviewer || "").trim();
+  if (!name) { document.getElementById("reviewer").focus();
+    alert("Put your name in the Reviewer box first - every row is signed."); return; }
+  const publications = myPublications();
+  let applied = 0;
+  publications.forEach(pub => pub.draft.forEach(draft => {
+    if (draft.bulk !== kind) return;
+    const key = dkey(pub.arxiv_id, draft.key);
+    if (store.decisions[key]) return;
+    store.decisions[key] = {
+      pick: kind === "accept" ? draft.pick : null,
+      decision: kind === "accept" ? "match" : "none",
+      reviewer: name, reviewed_at: new Date().toISOString(),
+      draft: draft.pick || null, via: "bulk"
+    };
+    applied++;
+  }));
+  saveStore(); view.sel = null; view.entryKey = null; render();
+  alert(applied ? `${applied} row(s) decided in bulk.\n\nAudit a sample before exporting - ` +
+        `the Read queue holds the ones a human still has to judge.`
+      : "Nothing left to apply in bulk.");
+}
+
+function jumpToReadQueue() {
+  store.order = "read"; saveStore();
+  for (const pub of myPublications()) {
+    const key = pub.entries.map(e => e.key).find(k => pub._draft[k].bulk === "read"
+                                                    && !isDecided(pub.arxiv_id, k));
+    if (key) { view = { pub: pub._index, sel: null, entryKey: key }; render(); return; }
+  }
+  view.sel = null; render();
 }
 
 function confirmMatch() {
@@ -366,11 +431,11 @@ function confirmMatch() {
   const entry = currentEntry();
   const ref = pub.references[view.sel];
   if (!ref) return;
-  recordDecision(pub, entry, ref.id, "match");
+  recordDecision(pub, entry, ref.id, "match", "read");
 }
 function confirmNone() {
   const pub = currentPub();
-  recordDecision(pub, currentEntry(), null, "none");
+  recordDecision(pub, currentEntry(), null, "none", "read");
 }
 
 function advance(pub) {
@@ -419,7 +484,7 @@ function allRows() {
     rows.push({
       arxiv_id: pub.arxiv_id, citation_key: e.key, groundtruth_arxiv_id: d.pick,
       decision: d.decision, draft_arxiv_id: d.draft, reviewer: d.reviewer,
-      reviewed_at: d.reviewed_at
+      reviewed_at: d.reviewed_at, via: d.via || "read"
     });
   }));
   return rows;
@@ -428,12 +493,15 @@ function allRows() {
 function exportLabels() {
   if (!store.reviewer.trim()) {
     document.getElementById("reviewer").focus();
-    alert("Put your name in the Reviewer box first — every row is signed.");
+    alert("Put your name in the Reviewer box first - every row is signed.");
     return;
   }
   const rows = allRows();
+  const via = rows.reduce((acc, row) => {
+    acc[row.via] = (acc[row.via] || 0) + 1; return acc;
+  }, {});
   const payload = { reviewer: store.reviewer, exported_at: new Date().toISOString(),
-                    quota: P.quota, rows: rows };
+                    quota: P.quota, via: via, rows: rows };
   const name = "m3-labels_" + store.reviewer.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") +
                "_" + new Date().toISOString().slice(0, 10) + ".json";
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -453,11 +521,12 @@ function mergeImport(text) {
     const ts = row.reviewed_at || "";
     if (existing && (existing.reviewed_at || "") > ts) { kept++; return; }
     if (!PUB[row.arxiv_id] || !PUB[row.arxiv_id]._entry[row.citation_key]) return;
-    store.decisions[key] = {
+      store.decisions[key] = {
       pick: row.groundtruth_arxiv_id == null ? null : row.groundtruth_arxiv_id,
       decision: row.decision || (row.groundtruth_arxiv_id ? "match" : "none"),
       reviewer: row.reviewer || store.reviewer, reviewed_at: ts || new Date().toISOString(),
-      draft: row.draft_arxiv_id == null ? null : row.draft_arxiv_id
+      draft: row.draft_arxiv_id == null ? null : row.draft_arxiv_id,
+      via: row.via || "read"
     };
     added++;
   });
@@ -494,6 +563,9 @@ document.getElementById("reviewer").addEventListener("input", ev => {
 document.getElementById("memberNames").innerHTML =
   P.members.map(m => `<option value="${esc(m)}">`).join("");
 document.getElementById("exportBtn").onclick = exportLabels;
+document.getElementById("bulkAcceptBtn").onclick = () => applyBulk("accept");
+document.getElementById("bulkNoneBtn").onclick = () => applyBulk("none");
+document.getElementById("readBtn").onclick = jumpToReadQueue;
 document.getElementById("rulesBtn").onclick = () => document.getElementById("rulesDialog").showModal();
 document.getElementById("rulesList").innerHTML = P.rules.map(r => `<li>${esc(r)}</li>`).join("");
 document.getElementById("importBtn").onclick = () => {

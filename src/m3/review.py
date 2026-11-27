@@ -43,8 +43,13 @@ YEAR_BONUS = 0.05           # publication year within one year of the submission
 HIGH_SCORE, HIGH_MARGIN = 0.70, 0.10
 MEDIUM_SCORE, MEDIUM_MARGIN = 0.55, 0.05
 
-LABELLING_RULES = [
-    "One decision per entry: the reference that is the same work, or None when the "
+# Bulk thresholds. A row is batch-decidable when the evidence is so lopsided that reading it
+# row by row buys nothing, and batch-decidable rows are the reason 469 decisions do not have
+# to cost 469 readings. Anything in between stays in the read queue.
+BULK_TITLE = 0.97        # near-verbatim title
+BULK_NONE_SCORE = 0.35   # nothing even remotely close
+
+LABELLING_RULES = [    "One decision per entry: the reference that is the same work, or None when the "
     "cited work is not among this publication's crawled references.",
     "A published journal or conference version matched to its arXiv preprint counts as "
     "the same work.",
@@ -85,6 +90,21 @@ def number_mismatch(entry_title, reference_title):
     """
     entry_numbers, ref_numbers = _numbers(entry_title), _numbers(reference_title)
     return bool(entry_numbers and ref_numbers and entry_numbers != ref_numbers)
+
+
+def bulk_classification(pick, score, top_seq, shared_surnames, number_conflict=False):
+    """Whether a row can be decided in bulk, and which way.
+
+    ``accept`` needs three independent agreements - a near-verbatim title, a shared surname
+    and no contradictory number - because any one of them alone can be a coincidence.
+    ``none`` needs the opposite: no candidate above the plausibility floor at all. Everything
+    else is a row a human has to read, which is where the genuine ambiguity lives.
+    """
+    if pick and top_seq >= BULK_TITLE and shared_surnames > 0 and not number_conflict:
+        return "accept"
+    if not pick and score < BULK_NONE_SCORE:
+        return "none"
+    return "read"
 
 
 def confidence_tier(score, margin, features, number_conflict=False):
@@ -171,13 +191,19 @@ def draft_suggestions(entries, references):
                              f"{len(shared)} of {len(entry_surnames)}")
         if conflict:
             evidence += " · titles disagree on a number, so this is a different work"
+        pick = top_reference["ref_arxiv_id"] if tier != "low" else None
         suggestions.append(dict(
             key=entry["citation_key"],
-            pick=top_reference["ref_arxiv_id"] if tier != "low" else None,
+            pick=pick,
             best=top_reference["ref_arxiv_id"],
             score=top_score,
             margin=margin,
             tier=tier,
+            top_seq=round(top_features["title_sequence_ratio"], 4),
+            shared_surnames=len(shared),
+            total_surnames=len(entry_surnames),
+            bulk=bulk_classification(pick, top_score, top_features["title_sequence_ratio"],
+                                     len(shared), conflict),
             why=evidence,
             candidates=[dict(
                 id=reference["ref_arxiv_id"],
@@ -259,6 +285,7 @@ def build_payload(bibtex_rows, reference_rows, shortlist_rows, members=4, names=
             per_member_entries=dict(Counter(card["member"] for card in publications
                                             for _ in card["entries"])),
             tiers=dict(Counter(draft["tier"] for card in publications for draft in card["draft"])),
+            bulk=dict(Counter(draft["bulk"] for card in publications for draft in card["draft"])),
         ),
     )
 
@@ -310,4 +337,8 @@ def validate_labels(rows, expected_publications=None, minimum_entries=400):
         none_rows=len(rows) - matched,
         per_publication=dict(per_publication),
         reviewers=dict(Counter(row.get("reviewer") for row in rows)),
+        # How each row was decided: read one by one, or taken in bulk. The split is what
+        # makes an audit possible - "we read 25% and batched the rest" is a claim a reviewer
+        # can check, while "we read everything" is not verifiable at all.
+        via=dict(Counter(row.get("via") or "read" for row in rows)),
     )

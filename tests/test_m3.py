@@ -249,6 +249,37 @@ class TestM3Review(unittest.TestCase):
         self.assertEqual(element_surnames("Evdoxia Taka"), ["taka"])
         self.assertEqual(surnames(["Smith, John, Doe, Jane,"]), {"smith", "doe"})
 
+    def test_bulk_classification_needs_three_agreements_to_auto_accept(self):
+        from src.m3.review import bulk_classification
+
+        # near-verbatim title, shared surname, no contradictory number
+        self.assertEqual(bulk_classification("2507.1", 0.98, 0.99, 2), "accept")
+        self.assertEqual(bulk_classification("2507.1", 0.98, 0.99, 2, number_conflict=True), "read")
+        self.assertEqual(bulk_classification("2507.1", 0.98, 0.96, 2), "read")   # title short
+        self.assertEqual(bulk_classification("2507.1", 0.98, 0.99, 0), "read")   # no author
+        self.assertEqual(bulk_classification(None, 0.20, 0.25, 0), "none")
+        self.assertEqual(bulk_classification(None, 0.50, 0.60, 0), "read")       # middle ground
+
+    def test_payload_reports_how_much_needs_reading(self):
+        from src.m3.review import build_payload
+
+        bib, refs = self._publication(entries=3)
+        payload = build_payload(bib, refs, [dict(arxiv_id="2508.00001")], members=1, names=["ana"])
+        bulk = payload["summary"]["bulk"]
+        self.assertEqual(sum(bulk.values()), payload["summary"]["entries"])
+        self.assertEqual(bulk.get("accept"), 1)      # only key0 carries both title and surname
+        self.assertGreaterEqual(bulk.get("read", 0), 2)
+
+    def test_validate_labels_counts_bulk_against_read(self):
+        from src.m3.review import validate_labels
+
+        rows = [dict(arxiv_id="2508.00001", citation_key=f"k{i}", groundtruth_arxiv_id=None,
+                     reviewer="ana", via="bulk" if i < 15 else "read",
+                     reviewed_at="2026-01-01T00:00:00Z") for i in range(20)]
+        report = validate_labels(rows, expected_publications=1, minimum_entries=20)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(report["via"], {"bulk": 15, "read": 5})
+
 
 class TestM3AutoMatch(unittest.TestCase):
     """The classic matcher that fills the automatic pool."""

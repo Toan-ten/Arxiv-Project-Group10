@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.m3.review import validate_labels
 
-ROW_FIELDS = ("arxiv_id", "citation_key", "groundtruth_arxiv_id", "decision", "reviewer",
-              "reviewed_at")
+ROW_FIELDS = ("arxiv_id", "citation_key", "groundtruth_arxiv_id", "decision", "via",
+              "reviewer", "reviewed_at")
 
 
 def load_export(path):
@@ -58,6 +58,7 @@ def main():
     print(f"  labels {report['labels']} ({report['matched']} matched, "
           f"{report['none_rows']} none) over {report['publications']} publications")
     print(f"  reviewers {report['reviewers']}")
+    print(f"  decided   {report['via']}")
     print(f"  quota {'met' if report['ok'] else 'NOT met'} for k={args.members}")
 
     if args.out and (report["ok"] or args.allow_partial):
