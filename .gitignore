@@ -252,3 +252,6 @@ __marimo__/
 
 # Locally captured course statement (not part of the milestone deliverable)
 /docs/web_statement.md
+
+# Generated M3 labelling artefacts (the page embeds the corpus rows)
+/labelling/

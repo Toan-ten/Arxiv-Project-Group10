@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M3 reference matching — manual labelling</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #5c6673; --line: #dde1e7;
+    --accent: #1d4ed8; --accent-soft: #e8eeff; --good: #067647; --good-soft: #e6f5ec;
+    --warn: #b54708; --warn-soft: #fdf1e5; --bad: #b42318; --mark: #fff3b0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font: 15px/1.5 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink); background: var(--bg); display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; letter-spacing: .01em; }
+  header .grow { flex: 1; }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
+  .pill.good { background: var(--good-soft); color: var(--good); }
+  .pill.warn { background: var(--warn-soft); color: var(--warn); }
+  .pill.bad { background: #fdecea; color: var(--bad); }
+  button, select, input[type=text] {
+    font: inherit; color: inherit; background: #fff; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; cursor: pointer;
+  }
+  button:hover { border-color: #b9c0cb; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.05); }
+  button.ghost { background: transparent; }
+  main { flex: 1; display: grid; grid-template-columns: 268px 1fr; min-height: 0; }
+  aside { border-right: 1px solid var(--line); background: var(--panel); overflow: auto; }
+  aside .head { padding: 10px 12px; border-bottom: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; }
+  .pub { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--line);
+    border-radius: 0; padding: 9px 12px; background: none; cursor: pointer; }
+  .pub:hover { background: #f2f4f8; }
+  .pub.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+  .pub .row1 { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .pub .id { font-variant-numeric: tabular-nums; font-weight: 600; font-size: 13px; }
+  .pub .who { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .bar { height: 4px; background: #e9ecf1; border-radius: 999px; overflow: hidden; margin-top: 6px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .bar.done > i { background: var(--good); }
+  section.work { overflow: auto; padding: 18px 22px 90px; }
+  .crumbs { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+  .card + .card { margin-top: 12px; }
+  .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px;
+    background: #eef1f6; border-radius: 6px; padding: 2px 7px; }
+  h2.title { font-size: 21px; line-height: 1.32; margin: 10px 0 8px; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .meta b { color: var(--ink); font-weight: 600; }
+  .cands { margin-top: 14px; display: grid; gap: 8px; max-height: 46vh; overflow-y: auto;
+    padding-right: 6px; scroll-behavior: smooth; border-radius: 10px; }
+  .cands:focus-visible { outline: 2px solid var(--accent); }
+  .candscroll { position: sticky; bottom: 0; margin-top: 6px; font-size: 12px; color: var(--warn);
+    background: var(--warn-soft); border-radius: 8px; padding: 4px 8px; text-align: center; }
+  .cand {
+    display: grid; grid-template-columns: 30px 1fr auto; gap: 10px; align-items: start;
+    width: 100%; text-align: left; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #fff;
+  }
+  .cand.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .cand.suggested { border-style: dashed; border-color: var(--accent); }
+  .cand .num { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 3px; }
+  .cand .ctitle { font-weight: 600; font-size: 14px; line-height: 1.35; }
+  .cand .cmeta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .cand .score { font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); text-align: right; min-width: 84px; }
+  .cand .score b { display: block; color: var(--ink); font-size: 14px; }
+  mark { background: var(--mark); border-radius: 3px; padding: 0 1px; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; align-items: center; }
+  .actions .hint { margin-left: auto; font-size: 12px; color: var(--muted); }
+  .why { margin-top: 12px; font-size: 13px; background: #f7f8fa; border: 1px dashed var(--line);
+    border-radius: 10px; padding: 9px 12px; color: var(--muted); }
+  .why b { color: var(--ink); }
+  table.decisions { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  table.decisions th, table.decisions td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  table.decisions th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  table.decisions tr.undecided td { color: var(--muted); }
+  table.decisions td.pick { font-variant-numeric: tabular-nums; }
+  .linkish { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0; background: var(--panel);
+    border-top: 1px solid var(--line); padding: 7px 16px; font-size: 12px; color: var(--muted);
+    display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  }
+  kbd { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #eef1f6;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; padding: 18px; max-width: 720px; }
+  dialog::backdrop { background: rgba(12, 16, 22, .45); }
+  textarea { width: 100%; height: 260px; font: 12px ui-monospace, monospace; }
+  .empty { color: var(--muted); font-style: italic; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>M3 · manual labelling</h1>
+  <span class="pill" id="quotaPill"></span>
+  <span class="grow"></span>
+  <label class="meta">Reviewer
+    <input type="text" id="reviewer" list="memberNames" placeholder="your name" size="14">
+    <datalist id="memberNames"></datalist>
+  </label>
+  <span class="pill" id="progressPill"></span>
+  <button id="bulkAcceptBtn" class="ghost" title="Near-verbatim title + shared surname + no number conflict">Bulk accept</button>
+  <button id="bulkNoneBtn" class="ghost" title="No candidate anywhere near the plausibility floor">Bulk none</button>
+  <button id="readBtn" class="ghost" title="Rows that need reading">Read queue</button>
+  <button id="exportBtn" class="primary">Export labels</button>
+  <button id="importBtn" class="ghost">Import…</button>
+  <input type="file" id="importFile" accept=".json,application/json" hidden>
+  <button id="rulesBtn" class="ghost" title="Labelling rules">Rules</button>
+</header>
+
+<main>
+  <aside>
+    <div class="head"><span>Publications</span><span id="pubCount"></span></div>
+    <div id="pubs"></div>
+  </aside>
+  <section class="work" id="work"></section>
+</main>
+
+<footer>
+  <span><kbd>j</kbd>/<kbd>k</kbd> move</span>
+  <span><kbd>1</kbd>–<kbd>9</kbd> <kbd>0</kbd>=10th <kbd>⇧1</kbd>=11th</span>
+  <span><kbd>Enter</kbd> confirm</span>
+  <span><kbd>n</kbd> none of these</span>
+  <span><kbd>s</kbd> skip</span>
+  <span><kbd>b</kbd> back</span>
+  <span><kbd>u</kbd> undo</span>
+  <span><kbd>e</kbd> export</span>
+  <span class="grow"></span>
+  <span>Progress is kept in this browser — export a file at the end of a sitting.</span>
+</footer>
+
+<dialog id="rulesDialog">
+  <h3 style="margin-top:0">Labelling rules</h3>
+  <ul id="rulesList"></ul>
+  <p class="meta">Every entry needs one decision. Nothing is exported until you accept or
+    correct it, and the exported file carries your name and a timestamp per row.</p>
+  <div style="text-align:right"><button onclick="document.getElementById('rulesDialog').close()">Close</button></div>
+</dialog>
+
+<dialog id="importDialog">
+  <h3 style="margin-top:0">Paste an exported labels file</h3>
+  <textarea id="importText" placeholder='{"reviewer": "...", "rows": [...]}'></textarea>
+  <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:10px">
+    <button onclick="document.getElementById('importDialog').close()">Cancel</button>
+    <button class="primary" id="importConfirm">Merge</button>
+  </div>
+</dialog>
+
+<script type="application/json" id="payload">__PAYLOAD__</script>
+<script>
+"use strict";
+const P = JSON.parse(document.getElementById("payload").textContent);
+const STORE = "m3-manual-labels-v1";
+const PUB = {};
+P.publications.forEach((p, i) => { PUB[p.arxiv_id] = p; p._index = i;
+  p._entry = {}; p.entries.forEach(e => { p._entry[e.key] = e; });
+  p._ref = {}; p.references.forEach(r => { p._ref[r.id] = r; });
+  p._draft = {}; p.draft.forEach(d => { p._draft[d.key] = d; }); });
+
+let store = loadStore();
+let view = { pub: 0, sel: 0, entryKey: null };
+let history = [];
+
+function loadStore() {
+  let raw = {};
+  try { raw = JSON.parse(localStorage.getItem(STORE) || "{}") || {}; } catch (e) { raw = {}; }
+  return Object.assign({ reviewer: "", decisions: {}, order: "easy" }, raw);
+}
+function saveStore() { try { localStorage.setItem(STORE, JSON.stringify(store)); } catch (e) {} }
+
+const dkey = (aid, key) => aid + "\u0000" + key;
+const decisionFor = (aid, key) => store.decisions[dkey(aid, key)] || null;
+const isDecided = (aid, key) => !!decisionFor(aid, key);
+const decidedCount = pub => pub.entries.filter(e => isDecided(pub.arxiv_id, e.key)).length;
+
+function firstOpenPublication() {
+  for (const pub of P.publications) if (decidedCount(pub) < pub.entries.length) return pub._index;
+  return 0;
+}
+function entryOrder(pub) {
+  const all = pub.entries.map(e => e.key);
+  const keys = store.order === "easy" ? pub.difficulty.slice()
+    : store.order === "source" ? all
+    : store.order === "bulk" ? pub.entries.filter(e => pub._draft[e.key].bulk !== "read").map(e => e.key)
+    : pub.entries.filter(e => pub._draft[e.key].bulk === "read").map(e => e.key);
+  return keys.length ? keys : all;
+}
+function currentPub() { return P.publications[view.pub]; }
+
+/* ---------- rendering ---------- */
+
+function esc(text) {
+  return String(text == null ? "" : text)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function tokenSet(text) {
+  return new Set(String(text || "").toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(t => t.length > 2));
+}
+function highlight(text, referenceTokens) {
+  const parts = String(text || "").split(/([\p{L}\p{N}]+)/u);
+  return parts.map(part => {
+    if (!/^[\p{L}\p{N}]+$/u.test(part)) return esc(part);
+    return referenceTokens.has(part.toLowerCase()) ? "<mark>" + esc(part) + "</mark>" : esc(part);
+  }).join("");
+}
+
+function renderSidebar() {
+  const host = document.getElementById("pubs");
+  host.innerHTML = "";
+  let done = 0, total = 0;
+  P.publications.forEach(pub => {
+    const d = decidedCount(pub), n = pub.entries.length;
+    done += d; total += n;
+    const b = document.createElement("button");
+    b.className = "pub" + (pub._index === view.pub ? " active" : "");
+    b.innerHTML = `<div class="row1"><span class="id">${esc(pub.arxiv_id)}</span>
+      <span class="pill ${d === n ? "good" : ""}">${d}/${n}</span></div>
+      <div class="who">${esc(pub.member || "")} · ${pub.references.length} refs</div>
+      <div class="bar ${d === n ? "done" : ""}"><i style="width:${n ? (100 * d / n) : 0}%"></i></div>`;
+    b.onclick = () => { view = { pub: pub._index, sel: 0, entryKey: null }; render(); };
+    host.appendChild(b);
+  });
+  document.getElementById("pubCount").textContent = P.publications.length + " pubs";
+  const pill = document.getElementById("progressPill");
+  pill.textContent = `${done} / ${total} labelled`;
+  pill.className = "pill " + (done === total ? "good" : "");
+  const q = P.quota;
+  document.getElementById("quotaPill").textContent =
+    `${q.publications} pubs · ${q.entries} labels · ${q.members} members`;
+  const counts = bulkCounts(myPublications(), false);
+  document.getElementById("bulkAcceptBtn").textContent = `Bulk accept ${counts.accept}`;
+  document.getElementById("bulkNoneBtn").textContent = `Bulk none ${counts.none}`;
+  document.getElementById("readBtn").textContent = `Read queue ${counts.read}`;
+}
+
+function decidedPick(pub, key) {
+  const d = decisionFor(pub.arxiv_id, key);
+  if (!d) return undefined;
+  return d.pick === undefined ? null : d.pick;
+}
+
+function currentEntry() {
+  const pub = currentPub();
+  const order = entryOrder(pub);
+  if (!view.entryKey) {
+    const first = order.find(k => !isDecided(pub.arxiv_id, k));
+    view.entryKey = first || order[0];
+  }
+  return pub._entry[view.entryKey];
+}
+
+function renderWork() {
+  const pub = currentPub();
+  const entry = currentEntry();
+  const draft = pub._draft[entry.key];
+  const order = entryOrder(pub);
+  const pos = order.indexOf(entry.key) + 1;
+  const existing = decisionFor(pub.arxiv_id, entry.key);
+  const entryTokens = tokenSet(entry.title);
+
+  if (view.sel == null || view.sel < 0) view.sel = suggestedIndex(pub, entry, draft, existing);
+  const refRows = pub.references.map((r, i) => ({ r, i, c: draft.candidates.find(c => c.id === r.id) || null }));
+
+  const work = document.getElementById("work");
+  work.innerHTML = `
+    <div class="crumbs">
+      <span class="pill">${esc(pub.arxiv_id)}</span>
+      <span>${esc(pub.member || "")}</span>
+      <span>entry ${pos} of ${order.length}</span>
+      <span class="pill ${draft.tier === "high" ? "good" : draft.tier === "medium" ? "warn" : "bad"}">
+        draft confidence: ${draft.tier}</span>
+      ${existing ? `<span class="pill good">decided: ${existing.pick || "none"}</span>` : ""}
+      <span class="grow"></span>
+      <button class="ghost" id="orderBtn">order: ${esc(store.order === "easy" ? "easy → hard" : store.order)}</button>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <div><span class="key">${esc(entry.key)}</span>
+        <span class="meta">${esc(entry.type)}</span>
+        ${entry.labelable ? "" : '<span class="pill bad">entry carries no title/authors</span>'}</div>
+      <h2 class="title">${esc(entry.title) || "<i>no title in the BibTeX entry</i>"}</h2>
+      <div class="meta"><b>${esc(entry.authors) || "no authors recorded"}</b></div>
+      <div class="meta">${entry.year ? "year " + esc(entry.year) : "no year"}
+        ${entry.venue ? " · " + esc(entry.venue) : ""}
+        ${entry.doi ? " · DOI " + esc(entry.doi) : " · no DOI"}</div>
+    </div>
+
+    <div class="card">
+      <div class="meta">Which crawled reference is the same work?
+        <span class="pill" id="candCount"></span>
+        <span id="candMore" class="pill warn" hidden></span></div>
+      <div class="cands" id="cands">
+        ${refRows.map(({ r, i, c }) => `
+          <button class="cand ${i === view.sel ? "sel" : ""} ${draft.pick === r.id ? "suggested" : ""}"
+                  data-i="${i}">
+            <span class="num">${i + 1}</span>
+            <span>
+              <span class="ctitle">${highlight(r.title, entryTokens)}</span>
+              <span class="cmeta">${esc(r.id)} · ${esc(r.authors) || "no authors"} · ${esc(r.year || r.date || "?")}
+                ${draft.pick === r.id ? " · <b>suggested</b>" : ""}</span>
+            </span>
+            <span class="score">${c ? "<b>" + c.score.toFixed(2) + "</b>title " + c.seq.toFixed(2) : "<b>–</b>none"}</span>
+          </button>`).join("")}
+      </div>
+      <div class="why">Draft says: <b>${draft.pick ? esc(draft.pick) : "no convincing candidate"}</b>
+        — ${esc(draft.why)}${draft.pick ? ` · margin ${draft.margin.toFixed(2)} over the runner-up` : ""}</div>
+      <div class="actions">
+        <button class="primary" id="matchBtn">Match selected <span class="meta">(Enter)</span></button>
+        <button id="noneBtn">None of these (n)</button>
+        <button class="ghost" id="skipBtn">Skip (s)</button>
+        <button class="ghost" id="backBtn">Back (b)</button>
+        <span class="hint">${esc(entry.doi ? "M1 references carry no DOI, so DOI cannot confirm a match here." : "")}</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="meta">Decisions for ${esc(pub.arxiv_id)}</div>
+      <table class="decisions"><thead><tr><th>entry</th><th>title</th><th>decision</th><th>draft</th><th>how</th><th></th></tr></thead>
+      <tbody>
+        ${pub.entries.map(e => {
+          const d = decisionFor(pub.arxiv_id, e.key);
+          const dr = pub._draft[e.key];
+          return `<tr class="${d ? "" : "undecided"}">
+            <td><span class="key">${esc(e.key)}</span></td>
+            <td>${esc((e.title || "").slice(0, 78))}${(e.title || "").length > 78 ? "…" : ""}</td>
+            <td>${d ? esc(d.pick || "none") : "—"}</td>
+            <td class="meta">${esc(dr.pick || "—")}</td>
+            <td class="meta">${d ? esc(d.via === "bulk" ? "bulk" : "read") : "—"}</td>
+            <td><button class="linkish" data-goto="${esc(e.key)}">open</button></td>
+          </tr>`;
+        }).join("")}
+      </tbody></table>
+    </div>`;
+
+  const candBox = work.querySelector("#cands");
+  if (candBox) {
+    const selected = candBox.querySelector(".cand.sel");
+    if (selected && selected.scrollIntoView) {
+      selected.scrollIntoView({ block: "nearest" });
+    }
+    const hidden = refRows.length - refRows.filter((_, i) => i === view.sel).length;
+    const counter = document.getElementById("candCount");
+    if (counter) counter.textContent = `${refRows.length} candidates`;
+    const more = document.getElementById("candMore");
+    if (more) {
+      const box = candBox.getBoundingClientRect ? candBox : null;
+      const overflows = box && candBox.scrollHeight > candBox.clientHeight + 4;
+      more.hidden = !overflows;
+      if (overflows) more.textContent = "more below — scroll or press j";
+    }
+  }
+  work.querySelectorAll(".cand").forEach(node => {
+    node.onclick = () => { view.sel = Number(node.dataset.i); renderWork(); };
+    node.ondblclick = () => confirmMatch();
+  });
+  work.querySelectorAll("[data-goto]").forEach(node => {
+    node.onclick = () => { view.entryKey = node.dataset.goto; view.sel = null; render(); };
+  });
+  document.getElementById("matchBtn").onclick = confirmMatch;
+  document.getElementById("noneBtn").onclick = confirmNone;
+  document.getElementById("skipBtn").onclick = skipEntry;
+  document.getElementById("backBtn").onclick = previousEntry;
+  document.getElementById("orderBtn").onclick = () => {
+    const cycle = { easy: "source", source: "read", read: "bulk", bulk: "easy" };
+    store.order = cycle[store.order] || "easy";
+    saveStore(); render();
+  };
+}
+
+function suggestedIndex(pub, entry, draft, existing) {
+  const pick = existing ? existing.pick : draft.pick;
+  if (pick) { const i = pub.references.findIndex(r => r.id === pick); if (i >= 0) return i; }
+  const best = draft.candidates && draft.candidates[0];
+  if (best) { const i = pub.references.findIndex(r => r.id === best.id); if (i >= 0) return i; }
+  return 0;
+}
+
+function render() { renderSidebar(); renderWork(); }
+
+/* ---------- decisions ---------- */
+
+function recordDecision(pub, entry, pick, kind, via) {
+  history.push({ aid: pub.arxiv_id, key: entry.key, previous: decisionFor(pub.arxiv_id, entry.key) });
+  store.decisions[dkey(pub.arxiv_id, entry.key)] = {
+    pick: pick, decision: kind, reviewer: store.reviewer || "",
+    reviewed_at: new Date().toISOString(), draft: pub._draft[entry.key].pick || null,
+    via: via || "read"
+  };
+  saveStore();
+  advance(pub);
+}
+
+function myPublications() {
+  const name = (store.reviewer || "").trim();
+  const mine = P.publications.filter(pub => pub.member === name);
+  return mine.length ? mine : P.publications;
+}
+
+function bulkCounts(publications, undecidedOnly) {
+  const counts = { accept: 0, none: 0, read: 0 };
+  publications.forEach(pub => pub.draft.forEach(draft => {
+    if (undecidedOnly && decisionFor(pub.arxiv_id, draft.key)) return;
+    counts[draft.bulk] = (counts[draft.bulk] || 0) + 1;
+  }));
+  return counts;
+}
+
+function applyBulk(kind) {
+  const name = (store.reviewer || "").trim();
+  if (!name) { document.getElementById("reviewer").focus();
+    alert("Put your name in the Reviewer box first - every row is signed."); return; }
+  const publications = myPublications();
+  let applied = 0;
+  publications.forEach(pub => pub.draft.forEach(draft => {
+    if (draft.bulk !== kind) return;
+    const key = dkey(pub.arxiv_id, draft.key);
+    if (store.decisions[key]) return;
+    store.decisions[key] = {
+      pick: kind === "accept" ? draft.pick : null,
+      decision: kind === "accept" ? "match" : "none",
+      reviewer: name, reviewed_at: new Date().toISOString(),
+      draft: draft.pick || null, via: "bulk"
+    };
+    applied++;
+  }));
+  saveStore(); view.sel = null; view.entryKey = null; render();
+  alert(applied ? `${applied} row(s) decided in bulk.\n\nAudit a sample before exporting - ` +
+        `the Read queue holds the ones a human still has to judge.`
+      : "Nothing left to apply in bulk.");
+}
+
+function jumpToReadQueue() {
+  store.order = "read"; saveStore();
+  for (const pub of myPublications()) {
+    const key = pub.entries.map(e => e.key).find(k => pub._draft[k].bulk === "read"
+                                                    && !isDecided(pub.arxiv_id, k));
+    if (key) { view = { pub: pub._index, sel: null, entryKey: key }; render(); return; }
+  }
+  view.sel = null; render();
+}
+
+function confirmMatch() {
+  const pub = currentPub();
+  const entry = currentEntry();
+  const ref = pub.references[view.sel];
+  if (!ref) return;
+  recordDecision(pub, entry, ref.id, "match", "read");
+}
+function confirmNone() {
+  const pub = currentPub();
+  recordDecision(pub, currentEntry(), null, "none", "read");
+}
+
+function advance(pub) {
+  const order = entryOrder(pub);
+  const at = order.indexOf(view.entryKey);
+  for (let step = 1; step <= order.length; step++) {
+    const key = order[(at + step) % order.length];
+    if (!isDecided(pub.arxiv_id, key)) { view.entryKey = key; view.sel = null; render(); return; }
+  }
+  view.sel = null; render();  // publication complete
+}
+
+function skipEntry() {
+  const pub = currentPub();
+  const order = entryOrder(pub);
+  const at = order.indexOf(view.entryKey);
+  view.entryKey = order[(at + 1) % order.length];
+  view.sel = null;
+  render();
+}
+function previousEntry() {
+  const pub = currentPub();
+  const order = entryOrder(pub);
+  const at = order.indexOf(view.entryKey);
+  view.entryKey = order[(at - 1 + order.length) % order.length];
+  view.sel = null;
+  render();
+}
+function undo() {
+  const last = history.pop();
+  if (!last) return;
+  const key = dkey(last.aid, last.key);
+  if (last.previous) store.decisions[key] = last.previous; else delete store.decisions[key];
+  saveStore();
+  view = { pub: PUB[last.aid]._index, sel: null, entryKey: last.key };
+  render();
+}
+
+/* ---------- export / import ---------- */
+
+function allRows() {
+  const rows = [];
+  P.publications.forEach(pub => pub.entries.forEach(e => {
+    const d = decisionFor(pub.arxiv_id, e.key);
+    if (!d) return;
+    rows.push({
+      arxiv_id: pub.arxiv_id, citation_key: e.key, groundtruth_arxiv_id: d.pick,
+      decision: d.decision, draft_arxiv_id: d.draft, reviewer: d.reviewer,
+      reviewed_at: d.reviewed_at, via: d.via || "read"
+    });
+  }));
+  return rows;
+}
+
+function exportLabels() {
+  if (!store.reviewer.trim()) {
+    document.getElementById("reviewer").focus();
+    alert("Put your name in the Reviewer box first - every row is signed.");
+    return;
+  }
+  const rows = allRows();
+  const via = rows.reduce((acc, row) => {
+    acc[row.via] = (acc[row.via] || 0) + 1; return acc;
+  }, {});
+  const payload = { reviewer: store.reviewer, exported_at: new Date().toISOString(),
+                    quota: P.quota, via: via, rows: rows };
+  const name = "m3-labels_" + store.reviewer.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-") +
+               "_" + new Date().toISOString().slice(0, 10) + ".json";
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+
+function mergeImport(text) {
+  let data;
+  try { data = JSON.parse(text); } catch (e) { alert("That is not JSON."); return; }
+  const rows = Array.isArray(data) ? data : (data.rows || []);
+  let added = 0, kept = 0;
+  rows.forEach(row => {
+    const key = dkey(row.arxiv_id, row.citation_key);
+    const existing = store.decisions[key];
+    const ts = row.reviewed_at || "";
+    if (existing && (existing.reviewed_at || "") > ts) { kept++; return; }
+    if (!PUB[row.arxiv_id] || !PUB[row.arxiv_id]._entry[row.citation_key]) return;
+      store.decisions[key] = {
+      pick: row.groundtruth_arxiv_id == null ? null : row.groundtruth_arxiv_id,
+      decision: row.decision || (row.groundtruth_arxiv_id ? "match" : "none"),
+      reviewer: row.reviewer || store.reviewer, reviewed_at: ts || new Date().toISOString(),
+      draft: row.draft_arxiv_id == null ? null : row.draft_arxiv_id,
+      via: row.via || "read"
+    };
+    added++;
+  });
+  saveStore(); render();
+  alert(`Merged ${added} row(s); kept ${kept} newer local row(s).`);
+}
+
+/* ---------- wiring ---------- */
+
+document.addEventListener("keydown", ev => {
+  const tag = (ev.target.tagName || "").toLowerCase();
+  if (["input", "textarea", "select"].includes(tag) || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const pub = currentPub();
+  const refs = pub.references;
+  const k = ev.key;
+  if (k === "j" || k === "ArrowDown") { view.sel = Math.min(refs.length - 1, view.sel + 1); renderWork(); ev.preventDefault(); }
+  else if (k === "k" || k === "ArrowUp") { view.sel = Math.max(0, view.sel - 1); renderWork(); ev.preventDefault(); }
+  else if (k === "Enter") { confirmMatch(); ev.preventDefault(); }
+  else if (k === "n") { confirmNone(); }
+  else if (k === "s") { skipEntry(); }
+  else if (k === "b" || k === "ArrowLeft") { previousEntry(); }
+  else if (k === "u") { undo(); }
+  else if (k === "e") { exportLabels(); }
+  else if (/^[1-9]$/.test(k)) {
+    const i = Number(k) - 1;
+    if (i < refs.length) { view.sel = i; renderWork(); }
+  }
+  else if (k === "0") {
+    if (refs.length > 9) { view.sel = 9; renderWork(); }
+  }
+  else if (/^[!@#$%^&*()]$/.test(k)) {
+    const i = "!@#$%^&*()".indexOf(k) + 10;
+    if (i < refs.length) { view.sel = i; renderWork(); }
+  }
+  else if (k === "PageDown" || k === ",") {
+    view.sel = Math.min(refs.length - 1, view.sel + 5); renderWork(); ev.preventDefault();
+  }
+  else if (k === "PageUp" || k === ".") {
+    view.sel = Math.max(0, view.sel - 5); renderWork(); ev.preventDefault();
+  }
+});
+
+document.getElementById("reviewer").value = store.reviewer || "";
+document.getElementById("reviewer").addEventListener("input", ev => {
+  store.reviewer = ev.target.value; saveStore();
+});
+document.getElementById("memberNames").innerHTML =
+  P.members.map(m => `<option value="${esc(m)}">`).join("");
+document.getElementById("exportBtn").onclick = exportLabels;
+document.getElementById("bulkAcceptBtn").onclick = () => applyBulk("accept");
+document.getElementById("bulkNoneBtn").onclick = () => applyBulk("none");
+document.getElementById("readBtn").onclick = jumpToReadQueue;
+document.getElementById("rulesBtn").onclick = () => document.getElementById("rulesDialog").showModal();
+document.getElementById("rulesList").innerHTML = P.rules.map(r => `<li>${esc(r)}</li>`).join("");
+document.getElementById("importBtn").onclick = () => {
+  document.getElementById("importText").value = "";
+  document.getElementById("importDialog").showModal();
+};
+document.getElementById("importConfirm").onclick = () => {
+  mergeImport(document.getElementById("importText").value);
+  document.getElementById("importDialog").close();
+};
+document.getElementById("importFile").onchange = ev => {
+  const file = ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => mergeImport(String(reader.result));
+  reader.readAsText(file);
+  ev.target.value = "";
+};
+
+view.pub = firstOpenPublication();
+render();
+</script>
+</body>
+</html>

@@ -9,7 +9,7 @@ from .matching import (
     mrr_at_k,
 )
 from .labeling import evaluate_mrr, interactive_label, load_labels, save_labels
-from .pipeline import run_matching
+from .pipeline import build_predictions, run_matching, validate_predictions, write_predictions
 
 __all__ = [
     "load_references",
@@ -22,6 +22,9 @@ __all__ = [
     "match_topk",
     "mrr_at_k",
     "run_matching",
+    "build_predictions",
+    "validate_predictions",
+    "write_predictions",
     "load_labels",
     "save_labels",
     "interactive_label",
