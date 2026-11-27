@@ -544,3 +544,99 @@ class TestM3Split(unittest.TestCase):
         annotated, missing = annotate(rows, split)
         self.assertEqual(annotated[0]["partition"], "test")
         self.assertEqual(missing, ["9999.99999"])
+
+
+class TestM3Model(unittest.TestCase):
+    """The pointwise ranker, its abstention and the MRR it reports."""
+
+    def _rows(self):
+        bib = [dict(arxiv_id="2508.30001", citation_key="hit", entry_type="article",
+                    title="Stability of a discrete plankton model",
+                    authors=["Shoyimardonov, S.,"], year=2025, doi=None, journal=None, url=None),
+               dict(arxiv_id="2508.30001", citation_key="none", entry_type="article",
+                    title="Computers and intractability",
+                    authors=["Garey, M.,"], year=1979, doi=None, journal=None, url=None)]
+        refs = [dict(arxiv_id="2508.30001", ref_arxiv_id="2507.40001",
+                     ref_title="Stability of a discrete plankton model",
+                     ref_authors=["S. Shoyimardonov"], ref_submission_date="2025-07-24"),
+                dict(arxiv_id="2508.30001", ref_arxiv_id="2507.40002",
+                     ref_title="Message passing for molecular graphs",
+                     ref_authors=["M. Zaripov"], ref_submission_date="2024-02-02")]
+        labels = [dict(arxiv_id="2508.30001", citation_key="hit",
+                       groundtruth_arxiv_id="2507.40001"),
+                  dict(arxiv_id="2508.30001", citation_key="none", groundtruth_arxiv_id=None)]
+        return bib, refs, labels
+
+    def test_cells_carry_one_positive_per_labelled_match(self):
+        from src.m3 import model
+
+        bib, refs, labels = self._rows()
+        matrix, target, meta = model.build_cells(
+            labels, model.index_by(bib, "citation_key"), model.group(refs))
+        self.assertEqual(len(target), 4)                 # 2 entries x 2 references
+        self.assertEqual(int(target.sum()), 1)           # only the labelled match
+        self.assertEqual(len(matrix[0]), len(model.MODEL_FEATURES))
+
+    def test_no_dollar_sign_features(self):
+        from src.m3 import model
+
+        self.assertNotIn("doi_exact", model.MODEL_FEATURES)   # M1 carries no DOI column
+        self.assertEqual(len(model.MODEL_FEATURES), 9)
+
+    def test_ranking_is_per_entry_and_ties_break_on_id(self):
+        from src.m3 import model
+
+        meta = [("p", "a", "ref2", None), ("p", "a", "ref1", None), ("p", "b", "ref3", None)]
+        ranked = model.rank_entries(meta, [0.5, 0.5, 0.9])
+        self.assertEqual([c[1] for c in ranked[("p", "a")]], ["ref1", "ref2"])
+        self.assertEqual([c[1] for c in ranked[("p", "b")]], ["ref3"])
+
+    def test_reciprocal_rank_and_abstention_semantics(self):
+        from src.m3 import model
+
+        hit_first = [(0.9, "r1", "r1"), (0.1, "r2", "r1")]
+        hit_third = [(0.9, "r2", "r1"), (0.8, "r3", "r1"), (0.2, "r1", "r1")]
+        missing = [(0.9, "r2", "r1")]
+        none_row = [(0.9, "r2", None)]
+        self.assertEqual(model.entry_score(hit_first)[0], 1.0)
+        self.assertAlmostEqual(model.entry_score(hit_third)[0], 1 / 3)
+        self.assertEqual(model.entry_score(missing)[0], 0.0)
+        self.assertEqual(model.entry_score(none_row)[0], 0.0)          # names a candidate
+        self.assertEqual(model.entry_score(none_row, abstain=0.95)[0], 1.0)   # abstains
+        self.assertEqual(model.entry_score(hit_first, abstain=0.95)[0], 0.0)  # abstained wrongly
+        self.assertAlmostEqual(model.entry_score(hit_first, k=1)[0], 1.0)
+
+    def test_mrr_averages_over_every_entry_including_none_rows(self):
+        from src.m3 import model
+
+        ranked = {("p", "a"): [(0.9, "r1", "r1")],
+                  ("p", "b"): [(0.9, "r2", "r1")],
+                  ("p", "c"): [(0.1, "r3", None)]}
+        report = model.mrr_at_k(ranked, k=5)
+        self.assertAlmostEqual(report["mrr"], 1 / 3, places=5)
+        self.assertEqual((report["entries"], report["hits"], report["none_entries"]), (3, 1, 1))
+
+    def test_abstention_is_tuned_on_validation(self):
+        from src.m3 import model
+
+        ranked = {("p", "none"): [(0.2, "r2", None)], ("p", "hit"): [(0.95, "r1", "r1")]}
+        best, table = model.tune_abstention(ranked, k=5, grid=[0.0, 0.5, 0.99])
+        self.assertEqual(best["threshold"], 0.5)     # 0.2 < 0.5 < 0.95: both rows score
+        self.assertAlmostEqual(best["mrr"], 1.0)
+        self.assertEqual(len(table), 3)
+
+    def test_both_models_fit_and_the_heuristic_still_scores(self):
+        from src.m3 import model
+        from src.m3.review import heuristic_score
+
+        bib, refs, labels = self._rows()
+        matrix, target, meta = model.build_cells(
+            labels, model.index_by(bib, "citation_key"), model.group(refs))
+        for kind in ("logistic", "boosting"):
+            probability = model.probability(model.train(kind, matrix, target), matrix)
+            self.assertEqual(len(probability), len(target))
+            self.assertTrue(((probability >= 0) & (probability <= 1)).all())
+        baseline = model.HeuristicBaseline().decision_function(matrix)
+        self.assertEqual(len(baseline), len(target))
+        self.assertGreater(baseline[0], baseline[1])   # the matching pair outranks the other
+
