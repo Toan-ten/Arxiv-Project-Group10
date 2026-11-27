@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import io
@@ -153,9 +154,10 @@ class TestUnifiedNotebookContract(unittest.TestCase):
                        cwd=self.root, check=True, capture_output=True)
         subprocess.run(["git", "merge-base", "--is-ancestor", expected, "HEAD"],
                        cwd=self.root, check=True, capture_output=True)
-        # M1 modules must be byte-identical to the pinned runtime; src/m2 is the
-        # later milestone's own tree and must not invalidate the M1 pin.
-        subprocess.run(["git", "diff", "--quiet", expected, "HEAD", "--", "src", ":(exclude)src/m2"],
+        # All M1/shared modules remain byte-identical. M2 and M3 have independent
+        # runtimes; the dependency guard below protects the newly excluded M3 tree.
+        subprocess.run(["git", "diff", "--quiet", expected, "HEAD", "--", "src",
+                        ":(exclude)src/m2", ":(exclude)src/m3"],
                        cwd=self.root, check=True, capture_output=True)
         colab_guide = (self.root / "docs" / "guides" / "colab.md").read_text(encoding="utf-8")
         self.assertIn(expected, colab_guide)
@@ -168,6 +170,26 @@ class TestUnifiedNotebookContract(unittest.TestCase):
         self.assertIn('auto_resume_429=True', pinned_api)
         subprocess.run(["git", "cat-file", "-e", f"{expected}:src/s2_batch.py"],
                        cwd=self.root, check=True, capture_output=True)
+
+    def test_m1_modules_do_not_import_excluded_m3(self):
+        for path in (self.root / "src").rglob("*.py"):
+            if path.relative_to(self.root / "src").parts[0] in {"m2", "m3"}:
+                continue
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [a.name for a in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    names = [node.module or ""]
+                    if node.module in {None, "src"}:
+                        names.extend(a.name for a in node.names)
+                elif isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant):
+                    func = node.func
+                    if ((isinstance(func, ast.Name) and func.id == "__import__")
+                            or (isinstance(func, ast.Attribute) and func.attr == "import_module")):
+                        names = [node.args[0].value]
+                self.assertFalse(any(isinstance(n, str) and (n in {"m3", "src.m3"}
+                    or n.startswith(("m3.", "src.m3."))) for n in names), str(path))
 
     def test_notebook_selects_batch_m1_and_isolates_experiment_data(self):
         setup = self.code[0]
