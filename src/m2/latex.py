@@ -2034,9 +2034,11 @@ def normalize(text, aliases=None, *, inline=True):
         text = re.sub(r"\\\((.*?)\\\)", lambda m: "$" + m[1].strip() + "$", text, flags=re.S)
     if aliases:
         def cite(m):
-            keys = [aliases.get(k.strip(), k.strip()) for k in m[2].split(",")]
+            # A nocite wildcard selects the entire bibliography, never an alias.
+            keys = [("*" if k.strip() == "*" and m[1] == r"\nocite" else aliases.get(k.strip(), k.strip()))
+                    for k in m[2].split(",")]
             return m[1] + "{" + ",".join(dict.fromkeys(keys)) + "}"
-        text = re.sub(r"(\\(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite)\*?(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}", cite, text)
+        text = re.sub(r"(\\(?:[cC]ite[a-zA-Z]*|[tT]extcite|[pP]arencite|[aA]utocite|onlinecite|nocite)\*?(?:\s*\[[^\]]*\]){0,2})\s*\{([^{}]*)\}", cite, text)
     pieces, cursor = [], 0
     while cursor < len(text):
         if text[cursor] == "\\" and cursor + 1 < len(text):

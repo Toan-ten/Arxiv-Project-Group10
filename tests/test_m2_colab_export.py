@@ -502,7 +502,11 @@ def test_notebook_pins_a_committed_helper_with_identical_source():
     assert pins["HELPER_COMMIT"]!=pins["PARSER_COMMIT"]
     blob=subprocess.check_output(["git","-C",str(repo),"show",pins["HELPER_COMMIT"]+":scripts/m2_colab_export.py"])
     assert blob==(repo/"scripts/m2_colab_export.py").read_bytes()
-    subprocess.run(["git","-C",str(repo),"diff","--exit-code",pins["PARSER_COMMIT"],"HEAD","--","src/m2"],check=True)
+    # The shared legacy notebook intentionally retains its old parser. Its
+    # released helper must match that parser, independently of a new recovery
+    # parser on HEAD. Compare the two actual runtime releases, not unrelated HEAD.
+    assert pins["PARSER_COMMIT"] == export.PARSER_COMMIT
+    subprocess.run(["git","-C",str(repo),"diff","--exit-code",pins["PARSER_COMMIT"],pins["HELPER_COMMIT"],"--","src/m2"],check=True)
 
 
 # Preflight-only fixtures: no call to runner.run, parsing, Drive or data APIs.
