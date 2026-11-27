@@ -407,3 +407,88 @@ class TestM3AutoMatch(unittest.TestCase):
         lenient = [row for row in curve if row["threshold"] == 0.5][0]
         self.assertGreaterEqual(lenient["accepted"], 1)
         self.assertEqual(lenient["precision"], 1.0)
+
+
+class TestM3Split(unittest.TestCase):
+    """Train/validation/test partition at the statement's per-member quantities."""
+
+    def _ids(self, count, prefix="2508."):
+        return [f"{prefix}{index:05d}" for index in range(count)]
+
+    def test_split_matches_the_per_member_quota(self):
+        from src.m3.split import assign_partitions
+
+        split = assign_partitions(self._ids(20), self._ids(245, "2509."), members=4)
+        self.assertEqual(len(split["test"]["manual"]), 4)
+        self.assertEqual(len(split["test"]["auto"]), 4)
+        self.assertEqual(len(split["valid"]["manual"]), 4)
+        self.assertEqual(len(split["valid"]["auto"]), 4)
+        self.assertEqual(len(split["train"]["manual"]), 12)
+        self.assertEqual(len(split["train"]["auto"]), 237)
+
+    def test_no_publication_appears_twice(self):
+        from src.m3.split import assign_partitions, partition_map
+
+        split = assign_partitions(self._ids(20), self._ids(245, "2509."), members=4)
+        mapping = partition_map(split)
+        self.assertEqual(len(mapping), 20 + 245)
+
+    def test_split_is_reproducible_and_seed_dependent(self):
+        from src.m3.split import assign_partitions
+
+        manual, auto = self._ids(20), self._ids(245, "2509.")
+        first = assign_partitions(manual, auto, members=4, seed=2026)
+        again = assign_partitions(manual, auto, members=4, seed=2026)
+        other = assign_partitions(manual, auto, members=4, seed=7)
+        self.assertEqual(first["test"], again["test"])
+        self.assertNotEqual(first["test"], other["test"])
+
+    def test_a_pool_too_small_for_the_quota_is_refused(self):
+        from src.m3.split import assign_partitions
+
+        with self.assertRaises(ValueError):
+            assign_partitions(self._ids(5), self._ids(245, "2509."), members=4)
+        with self.assertRaises(ValueError):
+            assign_partitions(self._ids(20), self._ids(3, "2509."), members=4)
+
+    def test_validation_accepts_a_correct_split_and_flags_an_overlap(self):
+        from src.m3.split import assign_partitions, validate_split
+
+        split = assign_partitions(self._ids(20), self._ids(245, "2509."), members=4)
+        report = validate_split(split, members=4)
+        self.assertTrue(report["ok"], report["problems"])
+
+        split["train"]["manual"].append(split["test"]["manual"][0])
+        report = validate_split(split, members=4)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("more than one partition" in problem for problem in report["problems"]))
+
+    def test_validation_checks_label_counts_of_validation_and_test(self):
+        from src.m3.split import assign_partitions, validate_split
+
+        split = assign_partitions(self._ids(20), self._ids(245, "2509."), members=4)
+        labels = [dict(arxiv_id=arxiv_id, citation_key=f"k{index}",
+                       groundtruth_arxiv_id=None if index % 2 else "2507.00001")
+                  for arxiv_id in split["train"]["manual"] + split["valid"]["manual"]
+                  for index in range(20)]
+        report = validate_split(split, members=4, labels=labels)
+        self.assertFalse(report["ok"])
+        things = " ".join(report["problems"])
+        self.assertIn("no labels at all", things)          # the test publications are unlabelled
+        self.assertEqual(report["labels"]["per_partition"]["test"], 0)
+
+        labels += [dict(arxiv_id=arxiv_id, citation_key=f"k{index}", groundtruth_arxiv_id=None)
+                   for arxiv_id in split["test"]["manual"] for index in range(20)]
+        report = validate_split(split, members=4, labels=labels)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual(report["labels"]["per_partition"]["valid"], 80)
+
+    def test_annotate_adds_the_partition_and_reports_strays(self):
+        from src.m3.split import annotate, assign_partitions
+
+        split = assign_partitions(self._ids(20), self._ids(245, "2509."), members=4)
+        rows = [dict(arxiv_id=split["test"]["manual"][0], citation_key="a"),
+                dict(arxiv_id="9999.99999", citation_key="b")]
+        annotated, missing = annotate(rows, split)
+        self.assertEqual(annotated[0]["partition"], "test")
+        self.assertEqual(missing, ["9999.99999"])
