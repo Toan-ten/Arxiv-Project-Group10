@@ -89,3 +89,60 @@ class TestM3Corpus(unittest.TestCase):
             (Path(scratch) / "elements").mkdir(parents=True)
             with self.assertRaises(FileNotFoundError):
                 load_bibtex(scratch)
+
+
+class TestM3Matrix(unittest.TestCase):
+    """The candidate matrix is the structure M3 labelling and modelling both hang on."""
+
+    def _rows(self):
+        entries = [
+            dict(arxiv_id="2508.00001", citation_key="smith2020", title="Deep Learning for Graphs",
+                 authors="['Smith, John']", year="2020", doi="10.1/x"),
+            dict(arxiv_id="2508.00001", citation_key="bare1999", title=None, authors=None, year="1999", doi=None),
+        ]
+        refs = [
+            dict(arxiv_id="2508.00001", ref_arxiv_id="2001.00001", ref_title="Deep learning for graphs",
+                 ref_authors="['John Smith']", ref_submission_date="2020-05-01"),
+            dict(arxiv_id="2508.00001", ref_arxiv_id="1999.00002", ref_title="Something unrelated",
+                 ref_authors="['Ada Lovelace']", ref_submission_date="2019-01-01"),
+        ]
+        return entries, refs
+
+    def test_cells_are_entries_times_references(self):
+        from src.m3.matrix import candidate_cells, FEATURE_COLUMNS
+
+        entries, refs = self._rows()
+        cells = candidate_cells(entries, refs)
+        self.assertEqual(len(cells), len(entries) * len(refs))
+        for column in FEATURE_COLUMNS:
+            self.assertIn(column, cells[0])
+
+    def test_matching_pair_scores_above_unrelated_pair(self):
+        from src.m3.matrix import pair_features
+
+        entries, refs = self._rows()
+        hit = pair_features(entries[0], refs[0])
+        miss = pair_features(entries[0], refs[1])
+        self.assertGreater(hit["title_sequence_ratio"], miss["title_sequence_ratio"])
+        self.assertGreater(hit["author_jaccard"], miss["author_jaccard"])
+        self.assertEqual(hit["doi_exact"], 0.0)  # the reference carries no DOI
+        self.assertEqual(hit["first_author_match"], 1.0)
+
+    def test_entry_without_title_is_flagged_not_silently_scored(self):
+        from src.m3.matrix import pair_features
+
+        entries, refs = self._rows()
+        bare = pair_features(entries[1], refs[0])
+        self.assertEqual(bare["entry_has_title"], 0.0)
+        self.assertEqual(bare["entry_has_authors"], 0.0)
+
+    def test_shortlist_requires_labelable_entries_and_orders_by_cost(self):
+        from src.m3.matrix import select_labeling_publications
+
+        entries, refs = self._rows()
+        entries = [dict(e, arxiv_id="2508.00001") for e in entries * 11]   # 22 rows, 11 labelable
+        shortlist, profiles = select_labeling_publications(entries, refs, minimum_entries=20)
+        self.assertEqual(profiles[0]["labelable_entries"], 11)
+        self.assertEqual(shortlist, [])
+        shortlist, _ = select_labeling_publications(entries, refs, minimum_entries=10)
+        self.assertEqual([p["arxiv_id"] for p in shortlist], ["2508.00001"])
