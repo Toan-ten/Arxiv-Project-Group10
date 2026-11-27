@@ -8,8 +8,32 @@ snippets in it are copy-pasteable by whoever opens the dataset.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from pathlib import Path
+
+
+def load_env(path):
+    """Fill os.environ from a KEY=VALUE file, so the token never lives in this repository.
+
+    The push script is committed; the token is not. Any file with ``HF_TOKEN=...`` works,
+    which lets the same script read the university workspace's credential folder.
+    """
+    target = Path(path)
+    if not target.exists():
+        return False
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+            token = value.strip().strip('"').strip("'")
+            if token and not token.startswith("hf_xxx"):
+                os.environ.setdefault("HF_TOKEN", token)
+                return True
+    return False
 
 
 def rewrite_card(card_path, repo_id):
@@ -27,8 +51,11 @@ def main():
     ap.add_argument("--private", action="store_true",
                     help="Create private; the submission needs a public link")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--env", help="File holding HF_TOKEN=... (read instead of the environment)")
     args = ap.parse_args()
 
+    if args.env:
+        print(f"token   : {'loaded from ' + args.env if load_env(args.env) else 'not found in ' + args.env}")
     from huggingface_hub import HfApi
 
     api = HfApi()
