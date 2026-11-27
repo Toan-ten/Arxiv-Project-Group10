@@ -102,13 +102,15 @@ def test_exact_verified_input_path_can_be_resolved(m2_external_bbl, name):
     assert result["bibtex"][0]["citation_key"] == "k"
 
 
-def test_unverified_external_folder_is_rejected(m2_external_bbl):
+def test_version_without_recorded_evidence_is_ignored_not_rejected(m2_external_bbl):
+    """No bbl_policy means M1 recorded nothing for this version, not that it is corrupt."""
     case = m2_external_bbl()
     del case["manifest"]["versions"]["v1"]["bbl_policy"]
     save_manifest(case)
     result = parse(case)
     assert result["versions"][0]["status"] == "parse_error"
-    assert "requires M1 bbl_policy" in result["versions"][0]["error"]
+    assert "BBL" not in result["versions"][0]["error"]
+    assert "bbl_policy" not in result["versions"][0]["error"]
     assert not result["bibtex"]
 
 
