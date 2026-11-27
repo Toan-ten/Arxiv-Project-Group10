@@ -49,8 +49,12 @@ def verified_bbl_artifacts(version_root, arxiv_id, version):
             if hashlib.sha256(source.read_bytes()).hexdigest() != hashes[file]:
                 raise BblIntegrityError("External BBL source checksum mismatch: " + file)
         policy = record.get("bbl_policy")
-        if not isinstance(policy, dict):
-            raise BblIntegrityError("External BBL requires M1 bbl_policy/index evidence")
+        if not isinstance(policy, dict) or not policy.get("index_path"):
+            # M1 recorded no bibliography for this version at all. That is an absence
+            # of evidence, not invalid evidence: the version must keep its own failure
+            # (for example missing citations) instead of an integrity error, otherwise
+            # carrying artefacts would make results worse than carrying none.
+            return {}
         # Validate exact paths before the M1 validator; include Windows drive/ADS
         # syntax and symlink ancestors, not just POSIX traversal.
         prefix = {name, arxiv_id_to_folder_key(arxiv_id) + "/" + name}
