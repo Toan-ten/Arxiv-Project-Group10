@@ -65,33 +65,39 @@ def split_authors(authors):
     return [str(a) for a in authors]
 
 
-def surnames(authors):
-    """Surname set for either ordering the corpus uses.
+def element_surnames(author):
+    """Surnames carried by one author element of either milestone.
 
-    Milestone 2 writes BibTeX authors surname-first ("Abdar, Moloud") while Milestone 1
-    references are given-first ("Evdoxia Taka"), so taking the last token - which is what
-    matching._norm_authors does - compares a given name against a surname.
+    Milestone 2 packs a whole entry's author list into a single element with a trailing
+    comma - "Chattopadhayay, J., Sarkar, R. R., Mandal, S.," - which is an alternating
+    surname/initials sequence, so every second comma-separated part is a surname.
+    Milestone 1 writes one author per element, given name first ("Evdoxia Taka"), where
+    the surname is the last token. Reading only the first part - or only the last token of
+    the whole element - loses the co-authors that make author agreement a usable signal.
     """
+    cleaned = re.sub(r"\s+", " ", str(author)).strip(" '\"\t")
+    if not cleaned:
+        return []
+    if "," not in cleaned:
+        return [cleaned.split()[-1].lower()]
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    return [part.lower() for part in parts[::2]]
+
+
+def surnames(authors):
+    """Surname set for either ordering the corpus uses."""
     out = set()
     for author in split_authors(authors):
-        cleaned = re.sub(r"\s+", " ", author).strip(" '\"\t")
-        if not cleaned:
-            continue
-        if "," in cleaned:
-            out.add(cleaned.split(",", 1)[0].strip().lower())
-        else:
-            out.add(cleaned.split()[-1].lower())
+        out.update(element_surnames(author))
     return out
 
 
 def first_surname(authors):
-    out = split_authors(authors)
-    if not out:
-        return None
-    cleaned = re.sub(r"\s+", " ", out[0]).strip(" '\"\t")
-    if not cleaned:
-        return None
-    return cleaned.split(",", 1)[0].strip().lower() if "," in cleaned else cleaned.split()[-1].lower()
+    for author in split_authors(authors):
+        names = element_surnames(author)
+        if names:
+            return names[0]
+    return None
 
 
 def pair_features(entry, reference):

@@ -146,3 +146,105 @@ class TestM3Matrix(unittest.TestCase):
         self.assertEqual(shortlist, [])
         shortlist, _ = select_labeling_publications(entries, refs, minimum_entries=10)
         self.assertEqual([p["arxiv_id"] for p in shortlist], ["2508.00001"])
+
+
+class TestM3Review(unittest.TestCase):
+    """The labelling page: drafts, assignment, export validation."""
+
+    def _publication(self, arxiv_id="2508.00001", entries=3):
+        bib = []
+        for index in range(entries):
+            bib.append(dict(
+                arxiv_id=arxiv_id, citation_key=f"key{index}", entry_type="article",
+                title=f"Phytoplankton blooms and toxin release part {index}",
+                authors=[f"Surname{index}, A., Coauthor{index}, B.,"], year=2019,
+                doi=None, journal=None, url=None))
+        refs = [
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.00001",
+                 ref_title="Phytoplankton blooms and toxin release part 0",
+                 ref_authors=["A. Surname0"], ref_submission_date="2025-07-24"),
+            dict(arxiv_id=arxiv_id, ref_arxiv_id="2507.00002",
+                 ref_title="Unrelated work on graph neural networks",
+                 ref_authors=["B. Other"], ref_submission_date="2024-01-01"),
+        ]
+        return bib, refs
+
+    def test_published_quota_matches_the_statement(self):
+        from src.m3.review import quota
+
+        four = quota(4)
+        self.assertEqual((four["publications"], four["entries"]), (20, 400))
+        self.assertEqual(four["entries_per_publication"], 20)
+        self.assertEqual(four["auto_publications_floor"], 8)
+        self.assertEqual((four["test_manual"], four["valid_manual"]), (4, 4))
+
+    def test_payload_assigns_an_equal_share_and_skips_unlabelable_entries(self):
+        from src.m3.review import build_payload
+
+        bib, refs = self._publication(entries=3)
+        bib.append(dict(bib[0], citation_key="bare", title=None, authors=None))
+        shortlist = [dict(arxiv_id="2508.00001")]
+        payload = build_payload(bib, refs, shortlist, members=2, names=["ana", "bo"])
+        card = payload["publications"][0]
+        self.assertEqual(len(card["entries"]), 3)          # the bare entry stays out
+        self.assertNotIn("bare", [entry["key"] for entry in card["entries"]])
+        self.assertEqual(payload["summary"]["entries"], 3)
+
+    def test_clear_match_is_suggested_and_unrelated_entries_get_no_pick(self):
+        from src.m3.review import draft_suggestions
+
+        bib, refs = self._publication(entries=3)
+        drafts = {draft["key"]: draft for draft in draft_suggestions(bib, refs)}
+        self.assertEqual(drafts["key0"]["pick"], "2507.00001")
+        self.assertEqual(drafts["key0"]["tier"], "high")
+        self.assertGreater(drafts["key0"]["margin"], 0.1)
+        self.assertIn("title", drafts["key0"]["why"])
+        self.assertIsNone(drafts["key1"]["pick"])           # nothing convincing to offer
+        self.assertEqual(drafts["key1"]["tier"], "low")
+
+    def test_candidate_scores_are_ordered_for_the_page(self):
+        from src.m3.review import draft_suggestions
+
+        bib, refs = self._publication(entries=1)
+        draft = draft_suggestions(bib, refs)[0]
+        scores = [candidate["score"] for candidate in draft["candidates"]]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual(draft["candidates"][0]["id"], "2507.00001")
+
+    def test_page_render_cannot_be_closed_by_a_title(self):
+        from src.m3.review import build_payload, render_page
+
+        bib, refs = self._publication(entries=1)
+        bib[0]["title"] = "Injection </script><script>alert(1)</script> attempt"
+        payload = build_payload(bib, refs, [dict(arxiv_id="2508.00001")], members=1, names=["ana"])
+        from pathlib import Path
+        import src.m3 as m3
+
+        page = render_page(payload, Path(m3.__file__).parent / "labelling_page.html")
+        self.assertEqual(page.count("</script>"), 2)        # payload + app, nothing injected
+        self.assertIn("<\\/script>", page)
+        self.assertNotIn("__PAYLOAD__", page)
+
+    def test_export_without_a_reviewer_is_not_a_label_set(self):
+        from src.m3.review import validate_labels
+
+        rows = [dict(arxiv_id="2508.00001", citation_key=f"k{i}", groundtruth_arxiv_id=None,
+                     reviewer="", reviewed_at="2026-01-01T00:00:00Z") for i in range(20)]
+        report = validate_labels(rows, expected_publications=1, minimum_entries=20)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("no reviewer" in problem for problem in report["problems"]))
+        for row in rows:
+            row["reviewer"] = "ana"
+        report = validate_labels(rows, expected_publications=1, minimum_entries=20)
+        self.assertTrue(report["ok"], report["problems"])
+        self.assertEqual((report["labels"], report["none_rows"]), (20, 20))
+
+    def test_serialised_author_lists_yield_every_surname(self):
+        from src.m3.matrix import element_surnames, surnames
+
+        # M2 packs a whole author list into one element, M1 uses one element per author.
+        self.assertEqual(element_surnames("Chattopadhayay, J., Sarkar, R. R., Mandal, S.,"),
+                         ["chattopadhayay", "sarkar", "mandal"])
+        self.assertEqual(element_surnames("Abdar, Moloud"), ["abdar"])
+        self.assertEqual(element_surnames("Evdoxia Taka"), ["taka"])
+        self.assertEqual(surnames(["Smith, John, Doe, Jane,"]), {"smith", "doe"})
