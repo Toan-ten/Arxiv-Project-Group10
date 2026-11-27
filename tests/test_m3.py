@@ -759,3 +759,44 @@ class TestM3Predictions(unittest.TestCase):
             legacy = Path(folder) / "legacy.json"
             legacy.write_text(json.dumps({"2508.40001": {"a": "r1"}}), encoding="utf-8")
             self.assertEqual(load_labels(legacy)[("2508.40001", "a")], "r1")
+
+
+class TestM3DatasetExport(unittest.TestCase):
+    """The assembly guards: a publication without TeX still needs an empty record."""
+
+    def test_assigned_ids_covers_the_declared_range_inclusively(self):
+        from scripts.export_hf_dataset import assigned_ids
+
+        ids = assigned_ids("2508.07872:2508.12871")
+        self.assertEqual(len(ids), 5000)
+        self.assertEqual(ids[0], "2508.07872")
+        self.assertEqual(ids[-1], "2508.12871")
+
+    def test_a_publication_missing_from_papers_is_reported(self):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        import tempfile
+        from pathlib import Path
+
+        from scripts.export_hf_dataset import missing_assigned_ids
+
+        with tempfile.TemporaryDirectory() as folder:
+            papers = Path(folder) / "data" / "papers"
+            papers.mkdir(parents=True)
+            table = pa.Table.from_pylist([{"arxiv_id": "2508.07872"},
+                                          {"arxiv_id": "2508.07874"}])
+            pq.write_table(table, papers / "part-00000.parquet")
+            missing = missing_assigned_ids(folder, "2508.07872:2508.07874")
+            self.assertEqual(missing, ["2508.07873"])
+
+    def test_dictionary_encoded_columns_are_flattened(self):
+        import pyarrow as pa
+
+        from scripts.export_hf_dataset import flat_column, flatten_type
+
+        dictionary = pa.dictionary(pa.int32(), pa.string())
+        self.assertEqual(flatten_type(dictionary), pa.string())
+        self.assertTrue(flat_column(flatten_type(dictionary)))
+        self.assertTrue(flat_column(pa.list_(pa.string())))
+        self.assertFalse(flat_column(pa.struct([("a", pa.string())])))
+        self.assertFalse(flat_column(pa.list_(pa.struct([("a", pa.string())]))))

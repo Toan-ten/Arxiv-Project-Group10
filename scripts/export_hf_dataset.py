@@ -103,6 +103,24 @@ def export_table(name, source, destination, batch_size, low, high):
                 columns=[(field.name, str(field.type)) for field in (schema_seen or [])])
 
 
+def assigned_ids(spec):
+    """Every arXiv id between START and END inclusive, in the corpus id format."""
+    start, _, end = spec.partition(":")
+    prefix, start_number = start.rsplit(".", 1)
+    _, end_number = end.rsplit(".", 1)
+    return [f"{prefix}.{number:05d}" for number in range(int(start_number), int(end_number) + 1)]
+
+
+def missing_assigned_ids(destination, spec):
+    """Assigned ids with no row in the written papers table."""
+    folder = Path(destination) / "data" / "papers"
+    seen = set()
+    for file in sorted(folder.glob("*.parquet")):
+        column = pq.read_table(file, columns=["arxiv_id"]).column("arxiv_id").to_pylist()
+        seen.update(column)
+    return sorted(set(assigned_ids(spec)) - seen)
+
+
 def validate(results):
     """The checks a grader would run: the file exists, the columns are flat, keys are set."""
     problems = []
@@ -174,6 +192,8 @@ def main():
     ap.add_argument("--batch-size", type=int, default=200_000)
     ap.add_argument("--min-id", help="Only keep rows with arxiv_id >= this")
     ap.add_argument("--max-id", help="Only keep rows with arxiv_id <= this")
+    ap.add_argument("--expect-range", help="Assigned ID range as START:END, e.g. "
+                                        "2508.07872:2508.12871 - every ID must appear in papers")
     ap.add_argument("--repo-name", default="arxiv-project-group10", help="owner/name on the Hub")
     ap.add_argument("--group", default="Group 10")
     ap.add_argument("--mssv", default="24120010")
@@ -191,6 +211,13 @@ def main():
               f"{len(result['columns'])} columns")
 
     problems = validate(results)
+    if args.expect_range:
+        missing = missing_assigned_ids(destination, args.expect_range)
+        if missing:
+            problems.append(f"papers is missing {len(missing)} assigned ID(s), e.g. {missing[0]} - "
+                            f"a publication without a TeX source still needs an empty record")
+        else:
+            print(f"  assigned range covered: every ID in {args.expect_range}")
     for problem in problems:
         print(f"  ! {problem}")
     card = dataset_card(results, args.repo_name, args.group, args.mssv,
