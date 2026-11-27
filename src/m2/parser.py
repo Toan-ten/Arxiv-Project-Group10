@@ -3349,7 +3349,7 @@ def _prepare_version(aid, version, path):
                   bibliography_status=None, error=None)
     gatherer = None
     try:
-        gatherer = Gatherer(path)
+        gatherer = Gatherer(path, arxiv_id=aid, version=version)
         root, body = gatherer.gather()
         record.update(root=root, included_files=gatherer.visited)
         body, entries, missing = bibliography(gatherer, body)

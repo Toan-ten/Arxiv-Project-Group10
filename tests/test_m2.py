@@ -6291,16 +6291,10 @@ def test_runner_attempt_records_benchmark_metrics(tmp_path):
     assert summaries[0].stat().st_size < (sorted((run_root / "attempts").glob("*.json"))[-1]).stat().st_size
 
 
-def test_bbl13_recorded_artifact_supplies_a_bibliography_the_source_never_shipped(tmp_path):
-    """arXiv's bibtex rendered it; M1 recorded it beside the version, not inside it."""
+def test_bbl13_recorded_artifact_supplies_a_bibliography_the_source_never_shipped(m2_external_bbl):
+    """Verified M1 evidence beside the version still supplies the bibliography."""
     aid = "2508.92001"
-    paper = tmp_path / "corpus" / aid
-    (paper / "v1").mkdir(parents=True)
-    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
-    (paper / "bbl" / "v1" / "source_bbl").mkdir(parents=True)
-    (paper / "bbl" / "v1" / "source_bbl" / "main.bbl").write_text(
-        r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Recorded work. 2020."
-        r"\end{thebibliography}", encoding="utf-8")
+    paper = m2_external_bbl(aid=aid, key="Smith2020", bibliography_request=False)["paper"]
 
     result = parse_versions(aid, [(1, paper / "v1")])
     record = result["versions"][0]
@@ -6311,18 +6305,11 @@ def test_bbl13_recorded_artifact_supplies_a_bibliography_the_source_never_shippe
     assert any("source_bbl" in name for name in record["bibliography_files"]), record["bibliography_files"]
 
 
-def test_bbl14_recorded_artifact_is_ignored_when_it_would_be_ambiguous(tmp_path):
+def test_bbl14_recorded_artifact_is_ignored_when_it_would_be_ambiguous(m2_external_bbl):
     """Two recorded bibliographies prove nothing about which one this version used."""
     aid = "2508.92002"
-    paper = tmp_path / "corpus" / aid
-    (paper / "v1").mkdir(parents=True)
-    (paper / "v1" / "main.tex").write_text(tex(r"Prose \cite{Smith2020}."), encoding="utf-8")
-    folder = paper / "bbl" / "v1" / "source_bbl"
-    folder.mkdir(parents=True)
-    for name in ("first.bbl", "second.bbl"):
-        (folder / name).write_text(
-            r"\begin{thebibliography}{9}\bibitem{Smith2020} Smith, J. Work."
-            r"\end{thebibliography}", encoding="utf-8")
+    paper = m2_external_bbl(aid=aid, key="Smith2020",
+                            names=("first.bbl", "second.bbl"), bibliography_request=False)["paper"]
 
     record = parse_versions(aid, [(1, paper / "v1")])["versions"][0]
     assert record["status"] == "parse_error", record

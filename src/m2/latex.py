@@ -10,6 +10,14 @@ class ParseError(ValueError):
     """Input cannot be interpreted safely by this parser."""
 
 
+class MissingResourceError(ParseError):
+    """A literal, safe resource path was checked but no file exists."""
+
+
+class BblIntegrityError(ParseError):
+    """External bibliography evidence failed validation; never optional fallback."""
+
+
 def group(text, pos, opening="{", closing="}", *, inline_literals=True):
     while pos < len(text) and text[pos].isspace():
         pos += 1
@@ -1021,8 +1029,12 @@ def box_styles(preamble):
 class Gatherer:
     """Resolve one documentclass root and only its explicit compilation path."""
 
-    def __init__(self, root):
+    def __init__(self, root, *, arxiv_id=None, version=None):
         self.root = Path(root).resolve()
+        self.arxiv_id = arxiv_id
+        self.version = version
+        self._recorded_bbl = None
+        self._artifact_hashes = {}
         self.visited = []
         self.bib_files = []
         self.bbl_files = []
@@ -1063,6 +1075,9 @@ class Gatherer:
             raw = stream.read(8 * 1024 * 1024 + 1)
         if len(raw) > 8 * 1024 * 1024:
             raise ParseError(f"Source file exceeds 8 MiB: {path.name}")
+        expected = self._artifact_hashes.get(path)
+        if expected is not None and hashlib.sha256(raw).hexdigest() != expected:
+            raise BblIntegrityError("BBL artifact changed after verification: " + self.source_label(path))
         comments_removed = False
         try:
             text = raw.decode("utf-8-sig")
@@ -1104,7 +1119,7 @@ class Gatherer:
                 path = safe_path(self.root, candidate, base)
                 if path.is_file():
                     return path
-        raise ParseError(f"Missing compilation resource: {names[-1]}")
+        raise MissingResourceError(f"Missing compilation resource: {names[-1]}")
 
     def expand(self, path, stack=(), scope_depth=0, *, body_mode=None):
         if path in stack or len(stack) >= 40:
@@ -1463,15 +1478,19 @@ class Gatherer:
                 if name != "include" or self.include_only is None or target in self.include_only:
                     try:
                         resource = self.resolve(target, path, ".tex")
-                    except ParseError:
-                        # \input{main.bbl} names a bibliography arXiv's bibtex produced,
-                        # so the recorded rendering is the file the paper compiled with.
+                    except MissingResourceError:
+                        # Only missing, already-safe paths may use verified evidence.
+                        # A basename match cannot establish the source association.
                         resource = None
                         if target.lower().endswith(".bbl"):
-                            wanted = Path(target.replace("\\", "/")).name
-                            recorded = [item for item in self.recorded_bbl() if item.name == wanted]
-                            if len(recorded) == 1:
-                                resource = recorded[0]
+                            requested = {safe_path(self.root, target, base).resolve()
+                                         for base in (path.parent, self.root)}
+                            recorded = self.recorded_bbl()
+                            matches = [p for p, info in self._recorded_bbl.items()
+                                       if p in recorded and
+                                       safe_path(self.root, info["bbl_path"]).resolve() in requested]
+                            if len(matches) == 1:
+                                resource = matches[0]
                         if resource is None:
                             raise
                     if resource.suffix.lower() == ".bbl":
@@ -1556,15 +1575,14 @@ class Gatherer:
         return path.name
 
     def recorded_bbl(self):
-        """The bibliography M1 recorded from the compilation arXiv actually ran.
-
-        It lives beside the version rather than inside it, because a version
-        directory may only hold the files its manifest lists.
-        """
-        folder = self.root.parent / "bbl" / self.root.name / "source_bbl"
-        if not folder.is_dir():
-            return []
-        return sorted(path for path in folder.glob("*.bbl") if path.is_file())
+        """Return only file-level, identity-bound M1 evidence, never globbed files."""
+        if self._recorded_bbl is None:
+            from .artifacts import verified_bbl_artifacts
+            self._recorded_bbl = verified_bbl_artifacts(
+                self.root, self.arxiv_id, self.version)
+            self._artifact_hashes.update({p: info["sha256"]
+                                          for p, info in self._recorded_bbl.items()})
+        return list(self._recorded_bbl)
 
     def fallback_bbl(self, cited=False):
         # A source can cite keys without ever issuing \bibliography (the rendered
@@ -1583,8 +1601,8 @@ class Gatherer:
         if len(candidates) > 1:
             raise ParseError("Ambiguous .bbl files for document root: " + self.document_root.name)
         if not candidates:
-            # Nothing beside the source: use the rendered bibliography M1 recorded,
-            # but only when it is unambiguous for this version.
+            # Missing local bibliography: require verified same-version M1 evidence,
+            # and an unambiguous association. Uploaded BBL is not a compilation log.
             recorded = self.recorded_bbl()
             matching = [path for path in recorded if path.stem == self.document_root.stem]
             if len(matching) == 1:
@@ -1884,6 +1902,8 @@ class Gatherer:
                 self.bibliography_requests or cited):
             try:
                 self.fallback_bbl(cited=cited)
+            except BblIntegrityError:
+                raise  # Invalid evidence must not degrade into optional missing data.
             except ParseError as exc:
                 # A sibling .bbl is optional evidence, not a requirement. Keep the
                 # version's own failure instead of inventing one from an ambiguity.
