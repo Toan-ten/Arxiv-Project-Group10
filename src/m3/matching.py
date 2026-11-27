@@ -10,10 +10,42 @@ import re
 import unicodedata
 
 
+# LaTeX markup that survives into a BibTeX title and defeats a string comparison.
+_TEX_COMMAND = re.compile(r"\\[a-zA-Z]+\*?")
+_TEX_CONTROL = re.compile(r"\\[^a-zA-Z]")
+_TEX_GROUP = re.compile(r"[{}]")
+_MATH_DELIMITER = re.compile(r"\$+")
+_SUBSCRIPT = re.compile(r"[_^~]")
+
+
+def strip_latex_markup(text):
+    """Drop TeX markup so a title reads the way the reference writes it.
+
+    The corpus cites the same paper as ``$\\mathrm{Sr_2RuO_4}$`` in one bibliography and
+    ``Sr2RuO4`` in another. Removing the delimiters, the command names and the subscript
+    markers (rather than turning them into spaces) makes those two titles identical, which
+    matters twice: the matcher stops calling a perfect match a near miss, and a labeller is
+    not asked to adjudicate between two titles that differ only in markup.
+    """
+    if not text:
+        return ""
+    out = _MATH_DELIMITER.sub("", str(text))
+    out = _TEX_COMMAND.sub("", out)
+    out = _TEX_CONTROL.sub("", out)
+    out = _TEX_GROUP.sub("", out)
+    return _SUBSCRIPT.sub("", out)
+
+
+def fold_accents(text):
+    """Strip diacritics so ``Bl\\"ugel`` and ``Blügel`` compare equal."""
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
 def normalize_title(title):
     if not title:
         return ""
-    text = unicodedata.normalize("NFKC", str(title)).lower()
+    text = fold_accents(strip_latex_markup(title)).lower()
     text = re.sub(r"[^a-z0-9]+", " ", text)
     return " ".join(text.split())
 

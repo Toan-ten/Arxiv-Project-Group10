@@ -147,6 +147,27 @@ class TestM3Matrix(unittest.TestCase):
         shortlist, _ = select_labeling_publications(entries, refs, minimum_entries=10)
         self.assertEqual([p["arxiv_id"] for p in shortlist], ["2508.00001"])
 
+    def test_latex_markup_does_not_hide_a_perfect_match(self):
+        from src.m3.matching import normalize_title
+        from src.m3.matrix import pair_features
+        from src.m3.review import heuristic_score
+
+        # The corpus writes the same title with and without markup.
+        self.assertEqual(normalize_title(r"$\mathrm{Sr_2RuO_4}$"), normalize_title("Sr2RuO4"))
+        self.assertEqual(normalize_title(r"Higher-T$_c$ Phase"), normalize_title("Higher-Tc Phase"))
+        self.assertEqual(normalize_title(r'Bl\"ugel'), normalize_title("Blügel"))
+
+        entry = dict(arxiv_id="2508.08026", citation_key="Mackenzie2017", entry_type="article",
+                     title=r"the superconducting order parameter puzzle of $\mathrm{Sr_2RuO_4}$",
+                     authors=["Mackenzie, A. P.,"], year=2017, doi=None, journal=None, url=None)
+        ref = dict(arxiv_id="2508.08026", ref_arxiv_id="1706.01942",
+                   ref_title="the superconducting order parameter puzzle of Sr2RuO4",
+                   ref_authors=["Andrew P. Mackenzie"], ref_submission_date="2017-06-06")
+        features = pair_features(entry, ref)
+        self.assertEqual(features["title_sequence_ratio"], 1.0)
+        self.assertEqual(features["title_token_jaccard"], 1.0)
+        self.assertGreaterEqual(heuristic_score(features), 0.97)
+
 
 class TestM3Review(unittest.TestCase):
     """The labelling page: drafts, assignment, export validation."""
