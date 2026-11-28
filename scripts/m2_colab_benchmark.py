@@ -467,6 +467,9 @@ def operate(config, action):
                 if native_attempt["retryable"]:
                     raise BenchmarkFailure("unknown", "Retryable native timeout; preserve partial checkpoint and resume")
                 stage = "audit"
+                expected = recovery.native_definition(item, rows, PARSER_FINGERPRINT)
+                if export.read(Path(native_attempt["run_root"]) / "definition.json") != expected:
+                    raise BenchmarkFailure("audit_invariant_error", "Native definition differs from verified benchmark input/parser/selection")
                 audit = recovery.audit_attempt(native_attempt, rows, runner, expected_parser_commit=identity["parser_sha"])
                 versions, errors = version_rows(name, native_attempt, "verified", durations)
                 attempt_path = root / "native_evidence" / (event_id + ".json")

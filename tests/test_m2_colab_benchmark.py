@@ -39,7 +39,8 @@ def setup(tmp_path, monkeypatch):
 
 
 def read_csv(path):
-    return list(csv.DictReader(Path(path).open(encoding="utf-8-sig", newline="")))
+    with Path(path).open(encoding="utf-8-sig", newline="") as stream:
+        return list(csv.DictReader(stream))
 
 
 def files_hashes(path):
@@ -355,3 +356,22 @@ def test_reporting_avoids_quadratic_native_reads_within_one_writer(setup, monkey
     # Restart/report invocation must not trust the previous process's cache.
     bench.write_reports(root, identity, [name])
     assert len(native_reads) == count * 2
+
+
+@pytest.mark.parametrize("field", ["parser_fingerprint", "input_fingerprint"])
+def test_native_definition_must_match_verified_benchmark_identity(setup, monkeypatch, field):
+    config, _, _ = setup
+    original = runner.run
+    def changed_evidence(*args, **kwargs):
+        attempt = original(*args, **kwargs)
+        definition_path = Path(attempt["run_root"]) / "definition.json"
+        definition = export.read(definition_path)
+        definition[field] = "f" * 64
+        definition_path.write_bytes(export.encoded(definition))
+        attempt["provenance"][field] = definition[field]
+        return attempt
+    monkeypatch.setattr(runner, "run", changed_evidence)
+    with pytest.raises(bench.BenchmarkFailure, match="Dừng an toàn"):
+        bench.operate(config, "smoke")
+    _, root, _ = bench.paths(config)
+    assert not (root / "completed").exists()
