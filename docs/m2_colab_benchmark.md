@@ -129,7 +129,7 @@ Parser unchanged. Loại bỏ plot/Markdown và chỉ tạo report cuối batch,
 không parse lại để xuất CSV. Extraction dùng local `/content` scratch. Native outputs/checkpoints vẫn ghi bền trên Drive:
 chưa chuyển chúng sang local rồi copy vì native evidence có absolute paths, cần thiết kế riêng để giữ provenance.
 Vẫn có chi phí hash archive, đọc evidence và re-audit; không bỏ checksum để nhanh hơn.
-Runtime ghi active verify/extract/read/parse/write/audit, loại Setup/report/re-audit cohort cached/session gaps.
+Runtime ghi active verify/extract/read/parse/write/audit, loại Setup/report/preflight kiểm tra sự hiện diện input/re-audit cohort cached/session gaps.
 Per-version runtime chỉ prepare/render worker gồm spawn, không phải end-to-end. Benchmark tài nguyên RAM/disk
 cuối cùng vẫn cần công cụ đo phù hợp; notebook này không tự bổ sung RAM toàn process tree hay disk peak.
 Chưa có phép đo tốc độ Drive/Colab thật cho release này; không suy ra parser nhanh hơn từ giảm thời gian report.

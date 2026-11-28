@@ -56,12 +56,14 @@ def test_exact_runtime_has_current_helpers_fixed_parser_and_requirements():
 def namespace(tmp_path):
     root = tmp_path / "benchmark-fixture"
     process = Mock()
-    process.check_output.return_value = json.dumps(dict(campaign=str(root), cohorts=["cohort_0101_corpus"], existing_completions=[]))
+    process.check_output.return_value = json.dumps(dict(campaign=str(root), cohorts=["cohort_0101_corpus"], existing_completions=[],
+        batches=[["cohort_0101_corpus"]], input_inventory=[]))
     process.run.return_value = SimpleNamespace(returncode=0)
     ns = dict(Path=Path, json=json, subprocess=process, sys=SimpleNamespace(executable="python"),
         CODE_DIR=REPO, RELEASE_COMMIT=pin(), LOCAL_CONFIG=tmp_path / "local.json",
         START_COHORT=101, END_COHORT=150, STUDENT_ID="24120232", INPUT_DRIVE_DIR="shared/archive-root",
-        OUTPUT_DRIVE_DIR="separate/benchmark-output", SCRATCH="local/scratch")
+        OUTPUT_DRIVE_DIR="separate/benchmark-output", SCRATCH="local/scratch",
+        COHORTS_PER_BATCH=50, AUTO_CONTINUE=True, BENCHMARK_CAMPAIGN="")
     exec(next(c for c in cells() if "def current_config():" in c), ns)
     return ns, root
 
@@ -110,3 +112,18 @@ def test_existing_export_and_recovery_notebooks_unchanged():
         path = f"notebooks/m2/{name}"
         old = subprocess.check_output(["git", "-C", str(REPO), "show", f"74e846b74b8692dd717cf127681001c3613db9e2:{path}"])
         assert (REPO / path).read_bytes() == old
+
+
+def test_batch_configuration_is_live_after_setup(tmp_path):
+    ns, _ = namespace(tmp_path)
+    assert ns["current_config"]()["cohorts_per_batch"] == 50
+    ns.update(COHORTS_PER_BATCH=5, AUTO_CONTINUE=False, BENCHMARK_CAMPAIGN="old/benchmark-id")
+    config = ns["current_config"]()
+    assert config["cohorts_per_batch"] == 5 and config["auto_continue"] is False
+    assert config["benchmark_campaign"] == "old/benchmark-id"
+
+
+def test_default_automatic_200_scope_and_no_plot_dependencies():
+    config = {}; exec(cells()[0], config)
+    assert (config["START_COHORT"], config["END_COHORT"], config["COHORTS_PER_BATCH"], config["AUTO_CONTINUE"]) == (1,200,50,True)
+    assert "matplotlib" not in (REPO / "requirements-m2-benchmark.txt").read_text().lower()
