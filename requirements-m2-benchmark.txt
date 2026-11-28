@@ -1,0 +1,3 @@
+-r requirements-m2.txt
+matplotlib>=3.8,<4
+nbformat>=5.10,<6

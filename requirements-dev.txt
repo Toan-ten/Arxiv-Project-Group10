@@ -5,3 +5,4 @@ typeguard>=4.0.0
 
 # Validate the release notebooks in offline tests.
 nbformat>=5.10.0,<6
+-r requirements-m2-benchmark.txt
