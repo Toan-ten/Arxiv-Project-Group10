@@ -70,14 +70,14 @@ def test_end_to_end_statuses_denominators_schema_and_resume(setup, monkeypatch):
     assert tuple(errors[0]) == bench.ERROR_COLUMNS
     assert {e["error_category"] for e in errors} == {"latex_parse_error", "no_tex_source", "input_missing"}
     assert all(e["exception_class"] == "" and e["traceback_path"] == "" for e in errors)
-    assert len(list(report.glob("*.png"))) == 4
-    assert all(p.stat().st_size > 1000 for p in report.glob("*.png"))
+    assert not list(report.glob("*.png")) and not list(report.glob("*.md"))
+    assert bench.verify_snapshot(report)["status"] == "complete"
     assert files_hashes(archives) == before
     monkeypatch.setattr(runner, "run", Mock(side_effect=AssertionError("Resume must not parse")))
     resumed = bench.operate(json.loads(json.dumps(config)), "run")
     assert resumed["summary"]["statuses"] == s["statuses"]
     assert resumed["summary"]["measured_active_seconds"] == s["measured_active_seconds"]
-    assert len(bench.load_events(Path(result["report_directory"]).parent.parent)) == 1
+    assert len(bench.load_events(bench.paths(config)[1])) == 1
     assert files_hashes(archives) == before
 
 
@@ -113,8 +113,9 @@ def test_bad_inputs_keep_partial_reports_without_running_parser(setup, monkeypat
 
 
 def test_audit_violation_stops_and_preserves_native_outputs(setup, monkeypatch):
-    config, _, name = setup
+    config, archives, name = setup
     config["end_cohort"] = 102
+    fixture_archive(archives.parent, number=102)
     original = recovery.audit_attempt
     def fail(attempt, rows, r, **kw):
         original(attempt, rows, r, **kw)
